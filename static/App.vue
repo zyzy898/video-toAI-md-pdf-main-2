@@ -1,5 +1,7 @@
 <template>
-<div class="app-container">
+    <div class="background-beams-shell">
+        <BackgroundBeams />
+        <div class="app-container">
         <header class="header">
             <span class="header-eyebrow">AI Workflow Studio</span>
             <div class="header-icon">
@@ -364,10 +366,12 @@
             </i>
             <span v-text="errorMessage"></span>
         </div>
+        </div>
     </div>
 </template>
 
 <script>
+import BackgroundBeams from "./components/ui/BackgroundBeams.vue";
 import DOMPurify from "dompurify";
 import {
     AlertCircle,
@@ -450,6 +454,9 @@ const isValidVideo = (filename) => {
 const clone = (value) => JSON.parse(JSON.stringify(value));
 
 export default {
+    components: {
+        BackgroundBeams
+    },
     data() {
         return {
             apiKey: "",

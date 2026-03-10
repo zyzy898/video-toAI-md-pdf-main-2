@@ -81,6 +81,11 @@ body {
     overflow-x: hidden;
 }
 
+.background-beams-shell {
+    position: relative;
+    min-height: 100vh;
+}
+
 body::before,
 body::after {
     content: '';
@@ -108,6 +113,8 @@ body::after {
 }
 
 .app-container {
+    position: relative;
+    z-index: 1;
     max-width: 1400px;
     margin: 0 auto;
     padding: 2.25rem 1.5rem 2.75rem;
