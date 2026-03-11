@@ -13,6 +13,8 @@ import {
 import { useEffect, useRef } from "react";
 
 const BASE_TRAVEL_DIAGONAL = Math.hypot(220, 56);
+const COLLISION_EPSILON = 0.9;
+const COLLISION_COOLDOWN_MS = 72;
 
 function getTravelScale(width: number, height: number): number {
   const diagonal = Math.hypot(Math.max(width, 1), Math.max(height, 1));
@@ -73,7 +75,7 @@ export const NoiseBackground = ({
     "rgb(100, 150, 255)",
     "rgb(255, 200, 100)",
   ],
-  noiseIntensity = 0.2,
+  noiseIntensity = 0.12,
   speed = 0.1,
   backdropBlur = false,
   animating = true,
@@ -91,6 +93,7 @@ export const NoiseBackground = ({
 
   const velocityRef = useRef({ x: 0, y: 0 });
   const lastDirectionChangeRef = useRef(0);
+  const lastCollisionTimeRef = useRef(0);
   const lastFrameTimeRef = useRef<number | null>(null);
 
   // Initialize position to center
@@ -159,21 +162,51 @@ export const NoiseBackground = ({
     let newX = currentX + velocityRef.current.x * deltaTime;
     let newY = currentY + velocityRef.current.y * deltaTime;
 
-    // When hitting edges, generate a completely new random direction
-    // This ensures truly random movement in all 360 degrees, not just horizontal/vertical
-    if (
-      newX < padding ||
-      newX > maxX - padding ||
-      newY < padding ||
-      newY > maxY - padding
-    ) {
-      // Generate completely random direction (full 360 degrees)
-      velocityRef.current = generateRandomVelocityRef.current(travelScale);
-      // Reset timer to allow immediate new direction
+    const minX = padding;
+    const maxBoundX = maxX - padding;
+    const minY = padding;
+    const maxBoundY = maxY - padding;
+
+    const hitLeft = newX <= minX;
+    const hitRight = newX >= maxBoundX;
+    const hitTop = newY <= minY;
+    const hitBottom = newY >= maxBoundY;
+    const hitEdge = hitLeft || hitRight || hitTop || hitBottom;
+
+    // Reflect velocity with slight angular jitter to keep rebounds natural,
+    // while forcing inward direction to avoid sticky edge collisions.
+    if (hitEdge) {
+      newX = Math.max(minX + COLLISION_EPSILON, Math.min(maxBoundX - COLLISION_EPSILON, newX));
+      newY = Math.max(minY + COLLISION_EPSILON, Math.min(maxBoundY - COLLISION_EPSILON, newY));
+
+      const baseVelocity = velocityRef.current;
+      let vx = hitLeft || hitRight ? -baseVelocity.x : baseVelocity.x;
+      let vy = hitTop || hitBottom ? -baseVelocity.y : baseVelocity.y;
+      const minMagnitude = speed * travelScale * 0.58;
+      const baseMagnitude = Math.max(minMagnitude, Math.hypot(vx, vy));
+
+      if (time - lastCollisionTimeRef.current >= COLLISION_COOLDOWN_MS) {
+        const jitter = (Math.random() - 0.5) * (Math.PI / 4.8);
+        const angle = Math.atan2(vy, vx) + jitter;
+        vx = Math.cos(angle) * baseMagnitude;
+        vy = Math.sin(angle) * baseMagnitude;
+        lastCollisionTimeRef.current = time;
+      }
+
+      if (hitLeft) vx = Math.abs(vx);
+      if (hitRight) vx = -Math.abs(vx);
+      if (hitTop) vy = Math.abs(vy);
+      if (hitBottom) vy = -Math.abs(vy);
+
+      const currentMagnitude = Math.hypot(vx, vy);
+      if (currentMagnitude < minMagnitude) {
+        const scale = minMagnitude / Math.max(currentMagnitude, 0.0001);
+        vx *= scale;
+        vy *= scale;
+      }
+
+      velocityRef.current = { x: vx, y: vy };
       lastDirectionChangeRef.current = time;
-      // Clamp position to stay within bounds
-      newX = Math.max(padding, Math.min(maxX - padding, newX));
-      newY = Math.max(padding, Math.min(maxY - padding, newY));
     }
 
     x.set(newX);
@@ -202,27 +235,27 @@ export const NoiseBackground = ({
         springX={springX}
         springY={springY}
         gradientColor={gradientColors[0]}
-        opacity={0.4}
+        opacity={0.32}
         multiplier={1}
       />
       <GradientLayer
         springX={springX}
         springY={springY}
         gradientColor={gradientColors[1]}
-        opacity={0.3}
+        opacity={0.24}
         multiplier={0.7}
       />
       <GradientLayer
         springX={springX}
         springY={springY}
         gradientColor={gradientColors[2] || gradientColors[0]}
-        opacity={0.25}
+        opacity={0.18}
         multiplier={1.2}
       />
 
       {/* Top gradient strip */}
       <motion.div
-        className="absolute inset-x-0 top-0 h-1 rounded-t-2xl opacity-80 blur-sm"
+        className="absolute inset-x-0 top-0 h-1 rounded-t-2xl opacity-65 blur-sm"
         style={{
           background: `linear-gradient(to right, ${gradientColors.join(", ")})`,
           x: animating ? topGradientX : 0,
@@ -235,7 +268,7 @@ export const NoiseBackground = ({
           src="https://assets.aceternity.com/noise.webp"
           alt=""
           className="h-full w-full object-cover opacity-[var(--noise-opacity)]"
-          style={{ mixBlendMode: "overlay" }}
+          style={{ mixBlendMode: "soft-light", filter: "contrast(0.8) saturate(0.7)" }}
         />
       </div>
 
