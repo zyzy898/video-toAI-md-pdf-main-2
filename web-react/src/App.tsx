@@ -1295,7 +1295,7 @@ export default function App() {
                   "rgb(255, 200, 100)",
                 ]}
                 noiseIntensity={0.2}
-                speed={0.1}
+                speed={0.12}
               >
                 <button
                   aria-busy={isAnalyzing}

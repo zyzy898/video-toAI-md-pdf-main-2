@@ -12,6 +12,18 @@ import {
 } from "motion/react";
 import { useEffect, useRef } from "react";
 
+const BASE_TRAVEL_DIAGONAL = Math.hypot(220, 56);
+
+function getTravelScale(width: number, height: number): number {
+  const diagonal = Math.hypot(Math.max(width, 1), Math.max(height, 1));
+  return Math.max(1, diagonal / BASE_TRAVEL_DIAGONAL);
+}
+
+function getEdgePadding(width: number, height: number): number {
+  const minSide = Math.min(width, height);
+  return Math.min(24, Math.max(10, minSide * 0.24));
+}
+
 // Helper component for gradient layers
 function GradientLayer({
   springX,
@@ -79,6 +91,7 @@ export const NoiseBackground = ({
 
   const velocityRef = useRef({ x: 0, y: 0 });
   const lastDirectionChangeRef = useRef(0);
+  const lastFrameTimeRef = useRef<number | null>(null);
 
   // Initialize position to center
   useEffect(() => {
@@ -93,9 +106,9 @@ export const NoiseBackground = ({
   }, [x, y]);
 
   // Generate random velocity
-  const generateRandomVelocityRef = useRef(() => {
+  const generateRandomVelocityRef = useRef((travelScale = 1) => {
     const angle = Math.random() * Math.PI * 2;
-    const magnitude = speed * (0.5 + Math.random() * 0.5); // Random speed between 0.5x and 1x
+    const magnitude = speed * travelScale * (0.5 + Math.random() * 0.5); // Keep flow intensity when container grows
     return {
       x: Math.cos(angle) * magnitude,
       y: Math.sin(angle) * magnitude,
@@ -104,33 +117,42 @@ export const NoiseBackground = ({
 
   // Update generateRandomVelocity when speed changes
   useEffect(() => {
-    generateRandomVelocityRef.current = () => {
+    generateRandomVelocityRef.current = (travelScale = 1) => {
       const angle = Math.random() * Math.PI * 2;
-      const magnitude = speed * (0.5 + Math.random() * 0.5);
+      const magnitude = speed * travelScale * (0.5 + Math.random() * 0.5);
       return {
         x: Math.cos(angle) * magnitude,
         y: Math.sin(angle) * magnitude,
       };
     };
-    velocityRef.current = generateRandomVelocityRef.current();
+    const rect = containerRef.current?.getBoundingClientRect();
+    const travelScale = rect ? getTravelScale(rect.width, rect.height) : 1;
+    velocityRef.current = generateRandomVelocityRef.current(travelScale);
   }, [speed]);
 
   // Animate using motion/react's useAnimationFrame
   useAnimationFrame((time) => {
-    if (!animating || !containerRef.current) return;
+    if (!animating || !containerRef.current) {
+      lastFrameTimeRef.current = null;
+      return;
+    }
 
     const rect = containerRef.current.getBoundingClientRect();
-    const maxX = rect.width;
-    const maxY = rect.height;
+    const maxX = Math.max(rect.width, 1);
+    const maxY = Math.max(rect.height, 1);
+    const travelScale = getTravelScale(maxX, maxY);
+    const padding = getEdgePadding(maxX, maxY);
+    const lastFrameTime = lastFrameTimeRef.current ?? time;
+    const deltaTime = Math.min(32, Math.max(12, time - lastFrameTime));
+    lastFrameTimeRef.current = time;
 
     // Change direction randomly every 1.5-3 seconds
     if (time - lastDirectionChangeRef.current > 1500 + Math.random() * 1500) {
-      velocityRef.current = generateRandomVelocityRef.current();
+      velocityRef.current = generateRandomVelocityRef.current(travelScale);
       lastDirectionChangeRef.current = time;
     }
 
-    // Update position based on velocity (deltaTime is ~16ms per frame at 60fps)
-    const deltaTime = 16; // Approximate frame time
+    // Update position based on true frame delta for consistent motion
     const currentX = x.get();
     const currentY = y.get();
 
@@ -139,8 +161,6 @@ export const NoiseBackground = ({
 
     // When hitting edges, generate a completely new random direction
     // This ensures truly random movement in all 360 degrees, not just horizontal/vertical
-    const padding = 20; // Keep some distance from edges
-
     if (
       newX < padding ||
       newX > maxX - padding ||
@@ -148,12 +168,7 @@ export const NoiseBackground = ({
       newY > maxY - padding
     ) {
       // Generate completely random direction (full 360 degrees)
-      const angle = Math.random() * Math.PI * 2;
-      const magnitude = speed * (0.5 + Math.random() * 0.5);
-      velocityRef.current = {
-        x: Math.cos(angle) * magnitude,
-        y: Math.sin(angle) * magnitude,
-      };
+      velocityRef.current = generateRandomVelocityRef.current(travelScale);
       // Reset timer to allow immediate new direction
       lastDirectionChangeRef.current = time;
       // Clamp position to stay within bounds
