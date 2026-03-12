@@ -2,6 +2,7 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { BackgroundBeams } from "@/components/ui/background-beams";
 import { CanvasText } from "@/components/ui/canvas-text";
 import { NoiseBackground } from "@/components/ui/noise-background";
@@ -324,7 +325,6 @@ export default function App() {
   const [progressBoard, setProgressBoard] = useState<ProgressBoard>(DEFAULT_PROGRESS_BOARD);
   const [errorMessage, setErrorMessage] = useState("");
   const [showErrorToast, setShowErrorToast] = useState(false);
-  const [toastAnchorX, setToastAnchorX] = useState<number | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
@@ -349,27 +349,6 @@ export default function App() {
       if (singleTimerRef.current) clearInterval(singleTimerRef.current);
     };
   }, []);
-
-  const updateToastAnchor = useCallback(() => {
-    if (typeof window === "undefined") return;
-    const anchor = document.querySelector("span.hero-toast-anchor") as HTMLElement | null;
-    if (!anchor) {
-      setToastAnchorX(null);
-      return;
-    }
-    const rect = anchor.getBoundingClientRect();
-    setToastAnchorX(Math.round(rect.left + rect.width / 2));
-  }, []);
-
-  useEffect(() => {
-    updateToastAnchor();
-    window.addEventListener("resize", updateToastAnchor);
-    return () => window.removeEventListener("resize", updateToastAnchor);
-  }, [updateToastAnchor]);
-
-  useEffect(() => {
-    if (showErrorToast) updateToastAnchor();
-  }, [showErrorToast, updateToastAnchor]);
 
   const fetchJson = useCallback(async <T,>(url: string, options: RequestInit = {}) => {
     const response = await fetch(url, options);
@@ -1015,8 +994,8 @@ export default function App() {
           </button>
         </div>
       </nav>
-      <main className="app-main relative z-10 mx-auto max-w-[1300px] px-4 pb-4 pt-20 md:px-8 md:pb-8 md:pt-24">
-        <header className="panel-card motion-enter mb-6 rounded-xl border-0 bg-transparent p-4">
+      <main className="app-main relative z-10 mx-auto w-full max-w-[1320px] space-y-6 px-4 pb-8 pt-[5.25rem] sm:px-6 md:space-y-7 md:px-8 md:pb-10 md:pt-24">
+        <header className="hero-panel panel-card motion-enter rounded-xl border-0 bg-transparent p-4">
           <div className="mx-auto flex w-full max-w-4xl flex-col items-center gap-3 text-center">
             <div className="hero-icon-float rounded-full border border-neutral-700 bg-neutral-950/70 p-2 text-neutral-300">
               <BrandStudioIcon className="h-8 w-8" />
@@ -1070,8 +1049,8 @@ export default function App() {
           </div>
         </header>
 
-        <div className="app-grid grid gap-6 lg:grid-cols-[360px_1fr]">
-          <aside className="motion-enter motion-delay-1 space-y-4">
+        <div className="app-grid grid items-start gap-5 xl:grid-cols-[360px_minmax(0,1fr)] 2xl:gap-6">
+          <aside className="app-sidebar motion-enter motion-delay-1 space-y-4">
             <section className="panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
               <div className="mb-3 flex items-center gap-2">
                 <SettingsIcon className="h-4 w-4 text-neutral-300" />
@@ -1205,7 +1184,7 @@ export default function App() {
             </section>
           </aside>
 
-          <section className="motion-enter motion-delay-2 space-y-4">
+          <section className="app-workspace motion-enter motion-delay-2 min-w-0 space-y-4">
             <section className="panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
               <div className="mb-2 flex items-center gap-2">
                 <UploadIcon className="h-4 w-4 text-neutral-300" />
@@ -1315,7 +1294,10 @@ export default function App() {
             </section>
 
             {hasAnyResult ? (
-              <div ref={resultsRef} className="grid gap-4 xl:grid-cols-2">
+              <div
+                ref={resultsRef}
+                className="results-grid grid gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]"
+              >
                 {hasBatchResult ? (
                   <section className="panel-card motion-enter rounded-xl border border-neutral-800 bg-neutral-900/70 p-4 xl:col-span-2">
                     <div className="mb-2 flex items-center justify-between">
@@ -1431,14 +1413,16 @@ export default function App() {
         </div>
       ) : null}
 
-      {showErrorToast ? (
-        <div
-          className="toast-anim fixed bottom-5 z-50 w-[min(92vw,560px)] -translate-x-1/2 rounded border border-red-400/40 bg-red-500/10 px-4 py-3 text-center text-sm text-red-200"
-          style={{ left: toastAnchorX ? `${toastAnchorX}px` : "50%" }}
-        >
-          {errorMessage}
-        </div>
-      ) : null}
+      {showErrorToast && typeof document !== "undefined"
+        ? createPortal(
+            <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
+              <div className="toast-anim pointer-events-auto w-[min(92vw,560px)] rounded border border-red-400/40 bg-red-500/10 px-4 py-3 text-center text-sm text-red-200">
+                {errorMessage}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
     </div>
   );
 }

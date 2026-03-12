@@ -24,6 +24,10 @@ body {
   color: #e5e5e5;
 }
 
+#root {
+  min-height: 100vh;
+}
+
 @keyframes fadeUpIn {
   from {
     opacity: 0;
@@ -79,17 +83,17 @@ body {
 @keyframes toastIn {
   0% {
     opacity: 0;
-    transform: translate(-50%, 18px) scale(0.965);
+    transform: translateY(18px) scale(0.965);
     filter: blur(4px);
   }
   68% {
     opacity: 1;
-    transform: translate(-50%, -1px) scale(1.004);
+    transform: translateY(-1px) scale(1.004);
     filter: blur(0);
   }
   100% {
     opacity: 1;
-    transform: translate(-50%, 0);
+    transform: translateY(0);
     filter: blur(0);
   }
 }
@@ -244,7 +248,29 @@ body {
 }
 
 .app-main {
+  width: 100%;
   animation: fadeUpIn 0.5s ease-out both;
+}
+
+.app-main > * {
+  min-width: 0;
+}
+
+.app-grid > * {
+  min-width: 0;
+}
+
+.hero-panel {
+  border-radius: 0.95rem;
+}
+
+.app-workspace .panel-card,
+.app-sidebar .panel-card {
+  border-radius: 0.95rem;
+}
+
+.results-grid > * {
+  min-width: 0;
 }
 
 .motion-enter {
