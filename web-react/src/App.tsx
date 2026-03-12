@@ -29,18 +29,36 @@ const WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_
 const DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_RESUME_KEY_PREFIX = "video-upload-resume-v1";
 
+const extractRequestId = (message: string) => {
+  const match = String(message || "").match(/request[_\s-]*id[:：]\s*([A-Za-z0-9]+)/i);
+  return match?.[1] || "";
+};
+
 const formatErrorMessage = (rawMessage: string) => {
   const message = String(rawMessage || "").trim();
   if (!message) return "操作失败";
 
   const lower = message.toLowerCase();
   if (WEB_SEARCH_ERROR_HINTS.some((hint) => lower.includes(hint))) {
-    const requestIdMatch = message.match(/request[_\s-]*id[:：]\s*([A-Za-z0-9]+)/i);
-    const requestIdText = requestIdMatch?.[1] ? `（Request ID: ${requestIdMatch[1]}）` : "";
-    return `联网搜索功能未开通，请前往火山引擎控制台开通后重试：${WEB_SEARCH_ACTIVATION_URL}${requestIdText}`;
+    const requestId = extractRequestId(message);
+    const requestIdText = requestId ? `（请求 ID：${requestId}）` : "";
+    return `联网搜索功能未开通。请前往火山引擎控制台开通后重试：${WEB_SEARCH_ACTIVATION_URL}${requestIdText}`;
   }
 
   return message;
+};
+
+const formatInlineErrorMessage = (rawMessage: string) => {
+  const message = String(rawMessage || "").trim();
+  if (!message) return "";
+  const lower = message.toLowerCase();
+
+  if (WEB_SEARCH_ERROR_HINTS.some((hint) => lower.includes(hint))) {
+    const requestId = extractRequestId(message);
+    return requestId ? `联网搜索未开通（请求 ID：${requestId}）` : "联网搜索未开通，请在火山引擎控制台开通后重试";
+  }
+
+  return message.replace(/\s+/g, " ").trim();
 };
 
 const STAGE_LABELS: Record<string, string> = {
@@ -229,6 +247,24 @@ function FileVideoIcon({ className = "h-4 w-4" }: { className?: string }) {
       <path d="M915.4048 420.3008c-11.0592 0-21.248-7.2192-24.5248-18.3808a373.1456 373.1456 0 0 0-10.24-30.1568c-5.0688-13.2096 1.4848-28.0064 14.6944-33.0752 13.1584-5.12 28.0064 1.4848 33.0752 14.6944 4.3008 11.1616 8.192 22.6304 11.5712 34.0992 3.9936 13.568-3.7888 27.8016-17.3056 31.7952-2.4576 0.6656-4.864 1.024-7.2704 1.024z" fill="currentColor" />
       <path d="M514.7648 956.0064c-244.3776 0-443.1872-198.8096-443.1872-443.1872S270.3872 69.632 514.7648 69.632c147.8144 0 285.3376 73.3184 367.9744 196.096 7.8848 11.7248 4.7616 27.648-6.9632 35.5328s-27.648 4.7616-35.5328-6.9632c-73.0624-108.5952-194.7648-173.4656-325.4784-173.4656-216.1664 0-391.9872 175.872-391.9872 391.9872 0 216.1664 175.872 391.9872 391.9872 391.9872 216.1664 0 391.9872-175.872 391.9872-391.9872 0-14.1312 11.4688-25.6 25.6-25.6s25.6 11.4688 25.6 25.6c0 244.3776-198.8096 443.1872-443.1872 443.1872z" fill="currentColor" />
       <path d="M439.2448 691.8144c-11.776 0-23.6032-3.1232-34.3552-9.3184-21.504-12.3904-34.304-34.6112-34.304-59.4432V392.3456c0-24.832 12.8512-47.0528 34.3552-59.4432s47.1552-12.3904 68.6592 0l199.7824 115.3536c21.504 12.3904 34.304 34.6112 34.304 59.4432s-12.8512 47.0528-34.304 59.4432L473.6 682.496c-10.752 6.1952-22.528 9.3184-34.3552 9.3184z m0.1024-316.9792c-4.0448 0-7.2192 1.4848-8.8064 2.4064-2.6112 1.536-8.7552 6.0416-8.7552 15.104v230.7072c0 9.1136 6.0928 13.6192 8.7552 15.104s9.5744 4.5568 17.4592 0l199.7824-115.3536c7.8848-4.5568 8.704-12.0832 8.704-15.104s-0.8704-10.5472-8.704-15.104L448 377.2416c-3.1232-1.792-6.0416-2.4064-8.6528-2.4064z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function StatusSuccessIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.8" />
+      <path d="m8.4 12.2 2.4 2.4 4.8-5.2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function StatusFailedIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.8" />
+      <path d="m9 9 6 6m0-6-6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 }
@@ -1281,30 +1317,58 @@ export default function App() {
                 {batchFiles.map((item, index) => (
                   <div
                     key={`${item.filepath}-${index}`}
-                    className="flex items-center justify-between rounded border border-neutral-800 bg-neutral-950/60 p-2"
+                    className="flex items-start justify-between rounded border border-neutral-800 bg-neutral-950/60 p-2"
                   >
-                    <div className="min-w-0 flex items-center gap-2">
-                      <FileVideoIcon className="h-3.5 w-3.5 text-neutral-400" />
-                      <div className="min-w-0">
+                    <div
+                      className={cn(
+                        "min-w-0 flex flex-1 items-start gap-2 rounded-md px-1 py-0.5 transition-colors",
+                        item.status === "failed" ? "bg-rose-500/8" : "bg-transparent",
+                      )}
+                    >
+                      <FileVideoIcon
+                        className={cn(
+                          "mt-0.5 h-3.5 w-3.5 shrink-0 text-neutral-400 transition-[color,transform,filter] duration-300 ease-out",
+                          item.status === "success" && "text-emerald-300 drop-shadow-[0_0_6px_rgba(52,211,153,0.35)]",
+                          item.status === "failed" && "text-rose-300 drop-shadow-[0_0_6px_rgba(244,63,94,0.32)]",
+                        )}
+                      />
+                      <div className="min-w-0 flex-1">
                         <p className="truncate text-sm">{item.filename}</p>
-                        <p className="text-xs text-neutral-500">
+                        <p className={cn("text-xs", item.status === "failed" ? "text-rose-300/90" : "text-neutral-500")}>
                           {batchStatusText(item.status)}
-                          {item.error ? ` · ${item.error}` : ""}
                         </p>
+                        {item.error ? (
+                          <p className="mt-0.5 text-xs leading-5 text-rose-200/90 break-words">
+                            {formatInlineErrorMessage(item.error)}
+                          </p>
+                        ) : null}
                       </div>
                     </div>
-                    {batchFiles.length > 1 ? (
-                      <button
-                        type="button"
-                        title="删除文件"
-                        aria-label="删除文件"
-                        className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10"
-                        disabled={isAnalyzing}
-                        onClick={() => setBatchFiles((prev) => prev.filter((_, i) => i !== index))}
-                      >
-                        <TrashIcon />
-                      </button>
-                    ) : null}
+                    <div className="ml-2 flex shrink-0 items-center gap-2">
+                      {(item.status === "success" || item.status === "failed") && (
+                        <span
+                          className={cn(
+                            "file-status-chip",
+                            item.status === "success" ? "file-status-chip-success" : "file-status-chip-failed",
+                          )}
+                        >
+                          {item.status === "success" ? <StatusSuccessIcon /> : <StatusFailedIcon />}
+                          <span>{item.status === "success" ? "成功" : "失败"}</span>
+                        </span>
+                      )}
+                      {batchFiles.length > 1 ? (
+                        <button
+                          type="button"
+                          title="删除文件"
+                          aria-label="删除文件"
+                          className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10"
+                          disabled={isAnalyzing}
+                          onClick={() => setBatchFiles((prev) => prev.filter((_, i) => i !== index))}
+                        >
+                          <TrashIcon />
+                        </button>
+                      ) : null}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -1359,7 +1423,7 @@ export default function App() {
                         <h2 className="text-sm font-semibold">批量处理结果</h2>
                       </div>
                       <button
-                        className="flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
+                        className="zip-download-btn flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
                         onClick={() => void downloadBatchZip()}
                       >
                         <DownloadZipIcon className="h-3.5 w-3.5" />
@@ -1377,7 +1441,7 @@ export default function App() {
                           </div>
                           {r.success ? (
                             <button
-                              className="mt-1 flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
+                              className="zip-download-btn mt-1 flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
                               onClick={() => void downloadSingleFromBatch(r.output_dir, r.filename)}
                             >
                               <DownloadSingleIcon className="h-3.5 w-3.5" />
@@ -1434,12 +1498,16 @@ export default function App() {
                     ) : (
                       <div className="history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
                         <div className="mb-2 flex gap-2">
-                          <button disabled={savingSteps} className="rounded bg-teal-600 px-2 py-1 text-xs" onClick={() => void saveEditedSteps()}>
+                          <button
+                            disabled={savingSteps}
+                            className="rounded-md border border-teal-400/55 bg-gradient-to-b from-teal-500/88 to-cyan-600/78 px-2.5 py-1 text-xs font-semibold text-white shadow-[0_6px_14px_rgba(13,148,136,0.32),inset_0_1px_0_rgba(255,255,255,0.18)] transition-all duration-200 hover:-translate-y-0.5 hover:from-teal-400 hover:to-cyan-500 hover:shadow-[0_10px_18px_rgba(14,116,144,0.34)] active:translate-y-0 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-300/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-950 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
+                            onClick={() => void saveEditedSteps()}
+                          >
                             保存并重生成
                           </button>
                           <button
                             disabled={savingSteps}
-                            className="rounded border border-neutral-700 px-2 py-1 text-xs"
+                            className="rounded-md border border-neutral-600/90 bg-neutral-900/70 px-2.5 py-1 text-xs font-medium text-neutral-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition-all duration-200 hover:-translate-y-0.5 hover:border-neutral-500 hover:bg-neutral-800/90 hover:text-neutral-100 active:translate-y-0 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-950 disabled:cursor-not-allowed disabled:opacity-60"
                             onClick={() => {
                               setIsEditMode(false);
                               setEditedSteps([]);
@@ -1552,7 +1620,7 @@ export default function App() {
                         <h2 className="text-sm font-semibold">生成的总结文档</h2>
                       </div>
                       <button
-                        className="flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
+                        className="zip-download-btn flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
                         onClick={() => void downloadSingleZip()}
                       >
                         <DownloadZipIcon className="h-3.5 w-3.5" />
