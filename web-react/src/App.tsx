@@ -1529,7 +1529,7 @@ export default function App() {
                           ))}
                         </div>
                         <button
-                          className="mt-2 w-full rounded border border-dashed border-neutral-700 px-3 py-1.5 text-sm"
+                          className="mt-2 w-full rounded-lg border border-dashed border-teal-400/45 bg-gradient-to-b from-teal-500/8 to-cyan-500/6 px-3 py-2 text-sm font-medium text-teal-100/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition-all duration-200 hover:-translate-y-0.5 hover:border-teal-300/70 hover:from-teal-500/14 hover:to-cyan-500/12 hover:text-teal-50 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-950"
                           onClick={() =>
                             setEditedSteps((prev) => [
                               ...prev,
