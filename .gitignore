@@ -1,6 +1,59 @@
-/outputs
-/uploads
-/history.json
-/node_modules
-/static/dist
-/.runtime_bin
+# -----------------------------
+# Runtime data (project-specific)
+# -----------------------------
+outputs/
+uploads/
+history.json
+.runtime_bin/
+
+# -----------------------------
+# Python
+# -----------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+env/
+ENV/
+
+# -----------------------------
+# Node / Frontend
+# -----------------------------
+node_modules/
+web-react/node_modules/
+web-react/dist/
+static/dist/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# -----------------------------
+# Local environment files
+# -----------------------------
+.env
+.env.*
+*.local
+
+# -----------------------------
+# Editor / OS
+# -----------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+!.vscode/extensions.json
+
+# -----------------------------
+# Local agent/workspace metadata
+# -----------------------------
+.codex/
+.learnings/

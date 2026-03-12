@@ -25,8 +25,23 @@ const VALID_VIDEO_EXTENSIONS = new Set([
 ]);
 
 const WEB_SEARCH_ERROR_HINTS = ["toolnotopen", "web search", "联网搜索"];
+const WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_content_plugin";
 const DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_RESUME_KEY_PREFIX = "video-upload-resume-v1";
+
+const formatErrorMessage = (rawMessage: string) => {
+  const message = String(rawMessage || "").trim();
+  if (!message) return "操作失败";
+
+  const lower = message.toLowerCase();
+  if (WEB_SEARCH_ERROR_HINTS.some((hint) => lower.includes(hint))) {
+    const requestIdMatch = message.match(/request[_\s-]*id[:：]\s*([A-Za-z0-9]+)/i);
+    const requestIdText = requestIdMatch?.[1] ? `（Request ID: ${requestIdMatch[1]}）` : "";
+    return `联网搜索功能未开通，请前往火山引擎控制台开通后重试：${WEB_SEARCH_ACTIVATION_URL}${requestIdText}`;
+  }
+
+  return message;
+};
 
 const STAGE_LABELS: Record<string, string> = {
   prepare: "准备中",
@@ -392,7 +407,7 @@ export default function App() {
   }, []);
 
   const showError = useCallback((message: string) => {
-    setErrorMessage(message || "操作失败");
+    setErrorMessage(formatErrorMessage(message));
     setShowErrorToast(true);
     if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
     errorTimerRef.current = setTimeout(() => setShowErrorToast(false), 5000);
@@ -767,6 +782,8 @@ export default function App() {
       reveal = true;
       await loadHistory();
     } catch (error) {
+      const message = String((error as Error).message || error);
+      if (WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint))) setWebSearch(false);
       const { success, failed } = countBatchStatus();
       updateProgressBoard({
         mode: "batch",
@@ -777,7 +794,7 @@ export default function App() {
         failed,
         percent: 100,
       });
-      showError(`批量分析失败: ${String((error as Error).message || error)}`);
+      showError(`批量分析失败: ${message}`);
     } finally {
       stopBatchPolling();
       setIsAnalyzing(false);

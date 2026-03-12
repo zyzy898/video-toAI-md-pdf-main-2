@@ -12,7 +12,7 @@ from threading import Lock, RLock
 from typing import Any, Callable, Dict, List, Tuple
 from uuid import uuid4
 
-from flask import Flask, jsonify, render_template, request, send_file, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
 from werkzeug.utils import secure_filename
 
 from video_analyzer_agent import VideoAnalyzerAgent
@@ -86,13 +86,6 @@ def _update_batch_progress(**kwargs: Any) -> None:
 def _update_single_progress(**kwargs: Any) -> None:
     with single_progress_lock:
         single_progress.update(kwargs)
-
-
-def _vite_dev_server() -> str | None:
-    server = os.getenv("VITE_DEV_SERVER", "").strip()
-    if not server:
-        return None
-    return server.rstrip("/")
 
 
 def allowed_file(filename: str) -> bool:
@@ -422,12 +415,13 @@ def process_video(
 
 @app.route("/")
 def index():
-    return render_template("index.html", vite_dev_server=_vite_dev_server())
-
-
-@app.route("/main.css")
-def maincss():
-    return send_from_directory("static", "main.css")
+    return jsonify(
+        {
+            "service": "video-to-doc-api",
+            "status": "ok",
+            "frontend": "Run web-react independently (e.g. npm run dev in /web-react).",
+        }
+    )
 
 
 @app.route("/upload", methods=["POST"])
