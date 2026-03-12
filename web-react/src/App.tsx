@@ -172,6 +172,14 @@ function HistoryIcon({ className = "h-5 w-5" }: { className?: string }) {
   );
 }
 
+function CloseIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function RefreshIcon({ className = "h-4 w-4" }: { className?: string }) {
   return (
     <svg viewBox="0 0 1024 1024" fill="none" className={className} aria-hidden="true">
@@ -307,6 +315,8 @@ export default function App() {
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
+  const [clearingHistory, setClearingHistory] = useState(false);
+  const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
 
   const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
@@ -349,6 +359,20 @@ export default function App() {
       if (singleTimerRef.current) clearInterval(singleTimerRef.current);
     };
   }, []);
+
+  useEffect(() => {
+    if (!historyDrawerOpen || typeof document === "undefined") return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setHistoryDrawerOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [historyDrawerOpen]);
 
   const fetchJson = useCallback(async <T,>(url: string, options: RequestInit = {}) => {
     const response = await fetch(url, options);
@@ -829,6 +853,30 @@ export default function App() {
     [fetchJson, loadHistory, showError],
   );
 
+  const clearAllHistoryRecords = useCallback(async () => {
+    if (history.length === 0) return;
+    if (!window.confirm("确定要清空全部历史记录吗？")) return;
+    setClearingHistory(true);
+    try {
+      for (const record of history) {
+        await fetchJson(`/history/${record.id}`, { method: "DELETE" });
+      }
+      await loadHistory();
+    } catch (error) {
+      showError(`清空失败: ${String((error as Error).message || error)}`);
+    } finally {
+      setClearingHistory(false);
+    }
+  }, [fetchJson, history, loadHistory, showError]);
+
+  const openHistoryRecordFromDrawer = useCallback(
+    async (recordId: string) => {
+      setHistoryDrawerOpen(false);
+      await openHistoryRecord(recordId);
+    },
+    [openHistoryRecord],
+  );
+
   const saveEditedSteps = useCallback(async () => {
     if (!apiKey) return showError("请输入 ARK API Key");
     if (!resultData?.output_dir) return showError("缺少输出目录信息");
@@ -984,13 +1032,23 @@ export default function App() {
         <BackgroundBeams className="opacity-70" />
       </div>
       <nav className="fixed inset-x-0 top-0 z-40 w-full border-y border-neutral-800 bg-neutral-900/80 backdrop-blur-md">
-        <div className="mx-auto flex min-h-[52px] w-full max-w-[1300px] items-center px-4 md:px-8">
+        <div className="mx-auto flex min-h-[52px] w-full max-w-[1320px] items-center justify-between px-4 sm:px-6 md:px-8">
           <button
             type="button"
             onClick={handleStudioClick}
             className="cursor-pointer rounded-sm text-xs uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:text-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70"
           >
             AI Workflow Studio
+          </button>
+          <button
+            type="button"
+            aria-expanded={historyDrawerOpen}
+            aria-controls="history-drawer"
+            onClick={() => setHistoryDrawerOpen((prev) => !prev)}
+            className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-xs font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
+          >
+            <HistoryIcon className="h-3.5 w-3.5" />
+            历史
           </button>
         </div>
       </nav>
@@ -1142,46 +1200,6 @@ export default function App() {
               </label>
             </section>
 
-            <section className="panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
-              <div className="mb-2 flex items-center gap-2">
-                <HistoryIcon className="h-4 w-4 text-neutral-300" />
-                <h2 className="text-sm font-semibold">历史记录</h2>
-              </div>
-              <div className="history-scroll max-h-72 space-y-2 overflow-auto">
-                {history.length === 0 ? <p className="text-sm text-neutral-500">暂无历史记录</p> : null}
-                {history.map((record) => (
-                  <div key={record.id} className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
-                    <div className="flex items-start justify-between gap-2">
-                      <button className="min-w-0 flex-1 text-left" onClick={() => void openHistoryRecord(record.id)}>
-                        <p className="truncate text-sm font-medium">{record.video_name}</p>
-                        <p className="text-xs text-neutral-500">
-                          {modeLabel(record.mode)} · {record.steps_count || 0} 步 · {record.timestamp || ""}
-                        </p>
-                      </button>
-                      <button
-                        type="button"
-                        title="删除记录"
-                        aria-label="删除记录"
-                        className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10"
-                        onClick={() => void removeHistoryRecord(record.id)}
-                      >
-                        <TrashIcon />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <button
-                type="button"
-                className="history-refresh-btn mt-3 flex w-full items-center justify-center gap-1 rounded-lg border border-neutral-700 px-2.5 py-2 text-xs font-medium"
-                disabled={loadingHistory}
-                aria-busy={loadingHistory}
-                onClick={() => void loadHistory()}
-              >
-                <RefreshIcon className={`h-3.5 w-3.5 ${loadingHistory ? "history-refresh-icon-spin" : ""}`} />
-                {loadingHistory ? "刷新中..." : "刷新"}
-              </button>
-            </section>
           </aside>
 
           <section className="app-workspace motion-enter motion-delay-2 min-w-0 space-y-4">
@@ -1296,7 +1314,7 @@ export default function App() {
             {hasAnyResult ? (
               <div
                 ref={resultsRef}
-                className="results-grid grid gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]"
+                className="results-grid grid items-start gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]"
               >
                 {hasBatchResult ? (
                   <section className="panel-card motion-enter rounded-xl border border-neutral-800 bg-neutral-900/70 p-4 xl:col-span-2">
@@ -1368,7 +1386,126 @@ export default function App() {
                         </button>
                       ) : null}
                     </div>
-                    {!isEditMode ? <div className="history-scroll max-h-96 space-y-2 overflow-auto">{(resultData?.steps || []).map((step, i) => <div key={`s-${i}`} className="rounded border border-neutral-800 bg-neutral-950/60 p-2"><p className="text-xs text-neutral-500">#{step.step || i + 1} · {step.time || "00:00"}</p><p className="text-sm font-medium">{step.title || "未命名步骤"}</p><p className="text-sm text-neutral-300">{step.description || ""}</p></div>)}</div> : <div className="history-scroll max-h-96 overflow-auto"><div className="mb-2 flex gap-2"><button disabled={savingSteps} className="rounded bg-teal-600 px-2 py-1 text-xs" onClick={() => void saveEditedSteps()}>保存并重生成</button><button disabled={savingSteps} className="rounded border border-neutral-700 px-2 py-1 text-xs" onClick={() => { setIsEditMode(false); setEditedSteps([]); }}>取消</button></div><div className="space-y-2">{editedSteps.map((step, index) => <div key={`e-${index}`} draggable onDragStart={() => setDragIndex(index)} onDragOver={(e) => { e.preventDefault(); setDragOverIndex(index); }} onDrop={(e) => { e.preventDefault(); if (dragIndex === null || dragIndex === index) return; setEditedSteps((prev) => { const next = [...prev]; const [moved] = next.splice(dragIndex, 1); if (!moved) return prev; next.splice(index, 0, moved); return next.map((s, i) => ({ ...s, step: i + 1 })); }); setDragIndex(null); setDragOverIndex(null); }} onDragEnd={() => { setDragIndex(null); setDragOverIndex(null); }} className={`rounded border p-2 ${dragIndex === index ? "border-teal-500/50 opacity-60" : dragOverIndex === index ? "border-teal-400" : "border-neutral-800"}`}><div className="mb-1 flex gap-2"><input className="flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm" value={step.title || ""} onChange={(e) => setEditedSteps((prev) => prev.map((item, idx) => (idx === index ? { ...item, title: e.target.value } : item)))} /><input className="w-24 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm" value={step.time || ""} onChange={(e) => setEditedSteps((prev) => prev.map((item, idx) => (idx === index ? { ...item, time: e.target.value } : item)))} /></div><textarea className="min-h-16 w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm" value={step.description || ""} onChange={(e) => setEditedSteps((prev) => prev.map((item, idx) => (idx === index ? { ...item, description: e.target.value } : item)))} /><button type="button" title="删除步骤" aria-label="删除步骤" className="mt-1 inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10" onClick={() => setEditedSteps((prev) => prev.filter((_, idx) => idx !== index).map((s, i) => ({ ...s, step: i + 1 })))}><TrashIcon /></button></div>)}</div><button className="mt-2 w-full rounded border border-dashed border-neutral-700 px-3 py-1.5 text-sm" onClick={() => setEditedSteps((prev) => [...prev, { step: prev.length + 1, time: "00:00", title: "新步骤", description: "请输入步骤描述" }])}>添加新步骤</button></div>}
+                    {!isEditMode ? (
+                      <div className="history-scroll max-h-[min(62vh,40rem)] space-y-2 overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+                        {(resultData?.steps || []).map((step, i) => (
+                          <div key={`s-${i}`} className="rounded border border-neutral-800 bg-neutral-950/60 p-2">
+                            <p className="text-xs text-neutral-500">#{step.step || i + 1} · {step.time || "00:00"}</p>
+                            <p className="text-sm font-medium">{step.title || "未命名步骤"}</p>
+                            <p className="text-sm text-neutral-300">{step.description || ""}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+                        <div className="mb-2 flex gap-2">
+                          <button disabled={savingSteps} className="rounded bg-teal-600 px-2 py-1 text-xs" onClick={() => void saveEditedSteps()}>
+                            保存并重生成
+                          </button>
+                          <button
+                            disabled={savingSteps}
+                            className="rounded border border-neutral-700 px-2 py-1 text-xs"
+                            onClick={() => {
+                              setIsEditMode(false);
+                              setEditedSteps([]);
+                            }}
+                          >
+                            取消
+                          </button>
+                        </div>
+                        <div className="space-y-2">
+                          {editedSteps.map((step, index) => (
+                            <div
+                              key={`e-${index}`}
+                              draggable
+                              onDragStart={() => setDragIndex(index)}
+                              onDragOver={(e) => {
+                                e.preventDefault();
+                                setDragOverIndex(index);
+                              }}
+                              onDrop={(e) => {
+                                e.preventDefault();
+                                if (dragIndex === null || dragIndex === index) return;
+                                setEditedSteps((prev) => {
+                                  const next = [...prev];
+                                  const [moved] = next.splice(dragIndex, 1);
+                                  if (!moved) return prev;
+                                  next.splice(index, 0, moved);
+                                  return next.map((s, i) => ({ ...s, step: i + 1 }));
+                                });
+                                setDragIndex(null);
+                                setDragOverIndex(null);
+                              }}
+                              onDragEnd={() => {
+                                setDragIndex(null);
+                                setDragOverIndex(null);
+                              }}
+                              className={`rounded border p-2 ${
+                                dragIndex === index
+                                  ? "border-teal-500/50 opacity-60"
+                                  : dragOverIndex === index
+                                    ? "border-teal-400"
+                                    : "border-neutral-800"
+                              }`}
+                            >
+                              <div className="mb-1 flex gap-2">
+                                <input
+                                  className="flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
+                                  value={step.title || ""}
+                                  onChange={(e) =>
+                                    setEditedSteps((prev) =>
+                                      prev.map((item, idx) => (idx === index ? { ...item, title: e.target.value } : item)),
+                                    )
+                                  }
+                                />
+                                <input
+                                  className="w-24 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
+                                  value={step.time || ""}
+                                  onChange={(e) =>
+                                    setEditedSteps((prev) =>
+                                      prev.map((item, idx) => (idx === index ? { ...item, time: e.target.value } : item)),
+                                    )
+                                  }
+                                />
+                              </div>
+                              <textarea
+                                className="min-h-16 w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
+                                value={step.description || ""}
+                                onChange={(e) =>
+                                  setEditedSteps((prev) =>
+                                    prev.map((item, idx) => (idx === index ? { ...item, description: e.target.value } : item)),
+                                  )
+                                }
+                              />
+                              <button
+                                type="button"
+                                title="删除步骤"
+                                aria-label="删除步骤"
+                                className="mt-1 inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10"
+                                onClick={() =>
+                                  setEditedSteps((prev) =>
+                                    prev.filter((_, idx) => idx !== index).map((s, i) => ({ ...s, step: i + 1 })),
+                                  )
+                                }
+                              >
+                                <TrashIcon />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        <button
+                          className="mt-2 w-full rounded border border-dashed border-neutral-700 px-3 py-1.5 text-sm"
+                          onClick={() =>
+                            setEditedSteps((prev) => [
+                              ...prev,
+                              { step: prev.length + 1, time: "00:00", title: "新步骤", description: "请输入步骤描述" },
+                            ])
+                          }
+                        >
+                          添加新步骤
+                        </button>
+                      </div>
+                    )}
                   </section>
                 ) : null}
 
@@ -1387,7 +1524,9 @@ export default function App() {
                         下载 ZIP
                       </button>
                     </div>
-                    <div className="prose prose-invert max-w-none text-sm" dangerouslySetInnerHTML={{ __html: renderedMarkdown }} />
+                    <div className="history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+                      <div className="prose prose-invert max-w-none text-sm" dangerouslySetInnerHTML={{ __html: renderedMarkdown }} />
+                    </div>
                   </section>
                 ) : null}
               </div>
@@ -1395,6 +1534,93 @@ export default function App() {
           </section>
         </div>
       </main>
+
+      {historyDrawerOpen && typeof document !== "undefined"
+        ? createPortal(
+            <div className="history-drawer-overlay fixed inset-0 z-[45]">
+              <button
+                type="button"
+                aria-label="关闭历史侧边栏"
+                className="history-drawer-backdrop absolute inset-0 bg-black/45"
+                onClick={() => setHistoryDrawerOpen(false)}
+              />
+              <div className="pointer-events-none relative h-full w-full">
+                <aside
+                  id="history-drawer"
+                  className="history-drawer-panel pointer-events-auto ml-auto flex h-full w-[min(92vw,360px)] flex-col border-l border-neutral-700/80 bg-neutral-900/96 py-4 shadow-[-16px_0_34px_rgba(2,6,23,0.45)] backdrop-blur-xl"
+                >
+                  <div className="border-b border-neutral-800 px-4 pb-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <HistoryIcon className="h-4 w-4 text-neutral-300" />
+                        <h2 className="text-sm font-semibold">历史记录</h2>
+                      </div>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-rose-400/60 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-60"
+                          onClick={() => void clearAllHistoryRecords()}
+                          disabled={clearingHistory || loadingHistory || history.length === 0}
+                        >
+                          {clearingHistory ? "清空中..." : "清空全部"}
+                        </button>
+                        <button
+                          type="button"
+                          title="关闭侧边栏"
+                          aria-label="关闭侧边栏"
+                          className="inline-flex h-8 w-8 items-center justify-center rounded border border-neutral-700 text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100"
+                          onClick={() => setHistoryDrawerOpen(false)}
+                        >
+                          <CloseIcon className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                  <div className="history-scroll flex-1 space-y-2 overflow-auto px-4 py-3">
+                    {history.length === 0 ? <p className="text-sm text-neutral-500">暂无历史记录</p> : null}
+                    {history.map((record) => (
+                      <div key={record.id} className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
+                        <div className="flex items-start justify-between gap-2">
+                          <button
+                            className="min-w-0 flex-1 text-left"
+                            onClick={() => void openHistoryRecordFromDrawer(record.id)}
+                          >
+                            <p className="truncate text-sm font-medium">{record.video_name}</p>
+                            <p className="text-xs text-neutral-500">
+                              {modeLabel(record.mode)} · {record.steps_count || 0} 步 · {record.timestamp || ""}
+                            </p>
+                          </button>
+                          <button
+                            type="button"
+                            title="删除记录"
+                            aria-label="删除记录"
+                            className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10"
+                            onClick={() => void removeHistoryRecord(record.id)}
+                          >
+                            <TrashIcon />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="border-t border-neutral-800 px-4 pt-3">
+                    <button
+                      type="button"
+                      className="history-refresh-btn flex w-full items-center justify-center gap-1 rounded-lg border border-neutral-700 px-2.5 py-2 text-xs font-medium"
+                      disabled={loadingHistory}
+                      aria-busy={loadingHistory}
+                      onClick={() => void loadHistory()}
+                    >
+                      <RefreshIcon className={`h-3.5 w-3.5 ${loadingHistory ? "history-refresh-icon-spin" : ""}`} />
+                      {loadingHistory ? "刷新中..." : "刷新"}
+                    </button>
+                  </div>
+                </aside>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
 
       {progressVisible ? (
         <div className="progress-overlay-anim fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">

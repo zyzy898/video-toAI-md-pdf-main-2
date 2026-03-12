@@ -80,6 +80,55 @@ body {
   }
 }
 
+@keyframes historyBackdropIn {
+  from {
+    opacity: 0;
+    backdrop-filter: blur(0);
+  }
+  to {
+    opacity: 1;
+    backdrop-filter: blur(2px);
+  }
+}
+
+@keyframes historyDrawerSlideIn {
+  from {
+    opacity: 0;
+    transform: translateX(34px) scale(0.992);
+    filter: blur(5px);
+  }
+  68% {
+    opacity: 1;
+    transform: translateX(-3px) scale(1.002);
+    filter: blur(0);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+    filter: blur(0);
+  }
+}
+
+@keyframes historyDrawerSectionIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes historyNavGlow {
+  from {
+    transform: translateX(-135%) rotate(8deg);
+  }
+  to {
+    transform: translateX(180%) rotate(8deg);
+  }
+}
+
 @keyframes toastIn {
   0% {
     opacity: 0;
@@ -575,6 +624,93 @@ body {
   animation-delay: 0.07s;
 }
 
+.history-nav-btn {
+  position: relative;
+  overflow: hidden;
+  border: 0;
+  background:
+    linear-gradient(138deg, rgba(24, 24, 27, 0.72), rgba(17, 24, 39, 0.58)),
+    rgba(10, 10, 10, 0.38);
+  box-shadow:
+    inset 0 1px 0 rgba(148, 163, 184, 0.06),
+    0 8px 18px rgba(2, 6, 23, 0.16);
+  transition:
+    box-shadow 0.24s ease,
+    background-color 0.24s ease,
+    transform 0.2s cubic-bezier(0.22, 1, 0.36, 1),
+    filter 0.24s ease;
+}
+
+.history-nav-btn::before {
+  content: "";
+  position: absolute;
+  inset: -165% -44%;
+  pointer-events: none;
+  background: linear-gradient(120deg, transparent 42%, rgba(103, 232, 249, 0.2) 50%, transparent 58%);
+  opacity: 0;
+}
+
+.history-nav-btn:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+  box-shadow:
+    inset 0 1px 0 rgba(148, 163, 184, 0.12),
+    0 12px 24px rgba(8, 47, 73, 0.18);
+}
+
+.history-nav-btn:hover::before {
+  opacity: 1;
+  animation: historyNavGlow 0.9s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.history-nav-btn:active {
+  transform: translateY(0) scale(0.985);
+}
+
+.history-nav-btn svg {
+  transition: transform 0.24s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.history-nav-btn:hover svg {
+  transform: translateX(1px) scale(1.05);
+}
+
+.history-drawer-overlay {
+  animation: overlayIn 0.2s ease-out both;
+}
+
+.history-drawer-backdrop {
+  animation: historyBackdropIn 0.24s ease-out both;
+  will-change: opacity, backdrop-filter;
+}
+
+.history-drawer-panel {
+  transform-origin: right center;
+  will-change: transform, opacity, filter;
+  animation: historyDrawerSlideIn 0.36s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.history-drawer-panel > * {
+  opacity: 0;
+  animation: historyDrawerSectionIn 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.history-drawer-panel > :nth-child(1) {
+  animation-delay: 0.07s;
+}
+
+.history-drawer-panel > :nth-child(2) {
+  animation-delay: 0.11s;
+}
+
+.history-drawer-panel > :nth-child(3) {
+  animation-delay: 0.15s;
+}
+
+.history-drawer-panel .list-item-pop {
+  animation: none;
+}
+
 .history-refresh-btn {
   position: relative;
   overflow: hidden;
@@ -961,9 +1097,14 @@ body {
   .fps-reveal,
   .fps-reveal > *,
   .list-item-pop,
+  .history-drawer-overlay,
+  .history-drawer-backdrop,
+  .history-drawer-panel,
+  .history-drawer-panel > *,
   .progress-overlay-anim,
   .progress-dialog-anim,
-  .toast-anim {
+  .toast-anim,
+  .history-nav-btn:hover::before {
     animation: none !important;
   }
 
@@ -973,6 +1114,7 @@ body {
   .upload-dropzone,
   .clear-list-btn,
   .clear-list-icon,
+  .history-nav-btn,
   .app-main button:not(.analyze-action-btn),
   .list-item-pop,
   .progress-fill-anim {
