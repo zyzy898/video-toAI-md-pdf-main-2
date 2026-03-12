@@ -899,17 +899,31 @@ export default function App() {
     if (!resultData?.output_dir) return showError("缺少输出目录信息");
     setSavingSteps(true);
     showProgress("重新生成中", "根据编辑步骤生成新文档...");
-    try {
-      const data = await fetchJson<SingleResultData>("/regenerate", {
+
+    const requestRegenerate = async (enableWebSearch: boolean) =>
+      fetchJson<SingleResultData>("/regenerate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           api_key: apiKey,
           steps: editedSteps,
           output_dir: resultData.output_dir,
-          web_search: webSearch,
+          web_search: enableWebSearch,
         }),
       });
+
+    try {
+      let data: SingleResultData;
+      try {
+        data = await requestRegenerate(webSearch);
+      } catch (error) {
+        const message = String((error as Error).message || error);
+        const canFallback = webSearch && WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint));
+        if (!canFallback) throw error;
+        setWebSearch(false);
+        data = await requestRegenerate(false);
+      }
+
       setResultData(data);
       setIsEditMode(false);
       setEditedSteps([]);

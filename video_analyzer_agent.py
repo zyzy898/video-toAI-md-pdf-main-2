@@ -666,6 +666,87 @@ class VideoAnalyzerAgent:
 
     # ========== 步骤操作文档生成 ==========
 
+    @staticmethod
+    def _normalize_compare_text(value: Any) -> str:
+        """Normalize text for loose inclusion checks."""
+        if value is None:
+            return ""
+        text = str(value).strip().lower()
+        return re.sub(r"\s+", "", text)
+
+    def _is_markdown_aligned_with_steps(
+        self, markdown_content: str, steps: List[Dict]
+    ) -> bool:
+        """Check whether generated markdown reflects edited step titles and descriptions."""
+        normalized_doc = self._normalize_compare_text(markdown_content)
+        if not normalized_doc:
+            return False
+
+        for idx, step in enumerate(steps, start=1):
+            title = str(step.get("title", "") or "").strip()
+            description = str(step.get("description", "") or "").strip()
+
+            if title:
+                title_anchor = self._normalize_compare_text(title)
+                if title_anchor and title_anchor not in normalized_doc:
+                    return False
+
+            if description:
+                description_anchor = self._normalize_compare_text(description)
+                if len(description_anchor) > 32:
+                    description_anchor = description_anchor[:32]
+                if description_anchor and description_anchor not in normalized_doc:
+                    return False
+
+            step_no = step.get("step", idx)
+            zh_heading_anchor = self._normalize_compare_text(f"步骤{step_no}")
+            en_heading_anchor = self._normalize_compare_text(f"step{step_no}")
+            if (
+                zh_heading_anchor not in normalized_doc
+                and en_heading_anchor not in normalized_doc
+            ):
+                return False
+
+        return True
+
+    def _build_document_from_steps(self, steps: List[Dict], image_dir: str = "images") -> str:
+        """Build a deterministic document from user-edited steps as a strict fallback."""
+        lines: List[str] = [
+            "# 操作步骤总结",
+            "",
+            "## 概览",
+            f"- 共 {len(steps)} 个步骤。",
+            "- 本文档按用户编辑后的步骤内容生成。",
+            "",
+        ]
+
+        for idx, step in enumerate(steps, start=1):
+            raw_step_no = step.get("step", idx)
+            try:
+                step_no = int(raw_step_no)
+            except (TypeError, ValueError):
+                step_no = idx
+
+            title = str(step.get("title", "") or "").strip() or f"步骤 {step_no}"
+            time_text = str(step.get("time", "") or "").strip()
+            description = str(step.get("description", "") or "").strip() or "（未填写步骤说明）"
+            screenshot_name = f"step_{step_no:02d}.jpg"
+
+            lines.extend(
+                [
+                    f"## 步骤 {step_no}：{title}",
+                    f"- 时间：{time_text or '00:00'}",
+                    "",
+                    f"![步骤{step_no}截图]({image_dir}/{screenshot_name})",
+                    "",
+                    "### 操作说明",
+                    description,
+                    "",
+                ]
+            )
+
+        return "\n".join(lines).rstrip() + "\n"
+
     async def generate_step_document(
         self,
         steps: List[Dict],
@@ -673,6 +754,7 @@ class VideoAnalyzerAgent:
         srt_path: str = None,
         image_dir: str = "images",
         web_search: bool = False,
+        respect_step_content: bool = False,
     ) -> str:
         """
         生成步骤操作文档（Markdown格式）
@@ -681,6 +763,7 @@ class VideoAnalyzerAgent:
         :param srt_path: SRT字幕文件路径（可选，用于补充文字内容）
         :param image_dir: 截图目录
         :param web_search: 是否启用联网搜索增强
+        :param respect_step_content: 是否严格遵循传入步骤内容（用于用户手工编辑后重生成）
         """
         # 准备字幕信息（如果有）
         subtitle_text = ""
@@ -732,11 +815,30 @@ class VideoAnalyzerAgent:
 6. 保持语言简洁专业
 7. 直接返回 Markdown 内容，不要添加其他说明"""
 
+        if respect_step_content:
+            system_prompt += """
+
+Additional strict requirements:
+1. The provided `steps` are user-edited final content and are authoritative.
+2. Keep each step title exactly aligned with the provided `title`.
+3. Keep each step description semantically aligned with the provided `description`; do not override user intent.
+4. Do not add/remove critical actions that conflict with the provided descriptions.
+5. In each step section, keep the user-provided description text visible before any expansion.
+"""
+
         user_prompt = f"""操作步骤信息：
 {steps_info}
 
 截图对应关系：
 {chr(10).join(screenshot_list)}
+"""
+        if respect_step_content:
+            user_prompt += """
+
+IMPORTANT:
+- These steps were manually edited by the user.
+- Treat the provided title/description as the primary source of truth for each step.
+- Keep each provided description text visible in the final markdown content.
 """
         if subtitle_text:
             user_prompt += f"""
@@ -777,6 +879,16 @@ class VideoAnalyzerAgent:
 
             response = await self._call_api_with_retry(call_api)
             markdown_content = response.choices[0].message.content
+
+        if respect_step_content and not self._is_markdown_aligned_with_steps(
+            markdown_content, steps
+        ):
+            logging.warning(
+                "Model output did not fully reflect edited steps; using strict fallback document builder."
+            )
+            markdown_content = self._build_document_from_steps(
+                steps=steps, image_dir=image_dir
+            )
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(markdown_content)

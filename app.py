@@ -785,6 +785,7 @@ def regenerate_document():
                 srt_path=None,
                 image_dir="images",
                 web_search=web_search,
+                respect_step_content=True,
             )
         )
 

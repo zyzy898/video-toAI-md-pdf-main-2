@@ -100,3 +100,31 @@ For toggle reveal UI, start from minimal animation (single container fade/transl
 - **Notes**: Removed FPS child staggering and scale transform; kept only a short container fade+translate animation.
 
 ---
+## [LRN-20260312-003] correction
+
+**Logged**: 2026-03-12T00:00:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+For edited-step regenerate, prompt-only constraints are not sufficient; add output alignment checks and deterministic fallback.
+
+### Details
+User feedback showed step titles could update while generated document body still drifted from edited descriptions. The regenerate path already sent edited steps, but model output remained probabilistic. Relying on strict prompt text alone does not guarantee fidelity.
+
+### Suggested Action
+In strict regenerate mode, verify generated markdown includes edited step titles/descriptions. If not aligned, fallback to a deterministic markdown builder from user-edited steps.
+
+### Metadata
+- Source: user_feedback
+- Related Files: app.py, video_analyzer_agent.py
+- Tags: regenerate, prompt-robustness, fallback, correction
+- See Also: LRN-20260312-001
+
+### Resolution
+- **Resolved**: 2026-03-12T00:00:00+08:00
+- **Commit/PR**: local_workspace_change
+- **Notes**: Added strict alignment validator and fallback markdown builder in `generate_step_document` when `respect_step_content=True`.
+
+---
