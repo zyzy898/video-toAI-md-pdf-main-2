@@ -1317,12 +1317,17 @@ export default function App() {
                 {batchFiles.map((item, index) => (
                   <div
                     key={`${item.filepath}-${index}`}
-                    className="flex items-start justify-between rounded border border-neutral-800 bg-neutral-950/60 p-2"
+                    className={cn(
+                      "flex items-start justify-between rounded border p-2 transition-colors",
+                      item.status === "failed"
+                        ? "border-rose-500/45 bg-rose-500/12"
+                        : "border-neutral-800 bg-neutral-950/60",
+                    )}
                   >
                     <div
                       className={cn(
                         "min-w-0 flex flex-1 items-start gap-2 rounded-md px-1 py-0.5 transition-colors",
-                        item.status === "failed" ? "bg-rose-500/8" : "bg-transparent",
+                        "bg-transparent",
                       )}
                     >
                       <FileVideoIcon
@@ -1344,7 +1349,7 @@ export default function App() {
                         ) : null}
                       </div>
                     </div>
-                    <div className="ml-2 flex shrink-0 items-center gap-2">
+                    <div className="ml-2 flex shrink-0 self-center items-center gap-2">
                       {(item.status === "success" || item.status === "failed") && (
                         <span
                           className={cn(
