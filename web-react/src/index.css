@@ -192,20 +192,22 @@ body {
 @keyframes fpsFieldIn {
   from {
     opacity: 0;
-    transform: translateY(-8px) scaleY(0.96);
-    filter: blur(2px);
+    transform: translateY(-5px) scale(0.992);
+  }
+  72% {
+    opacity: 1;
+    transform: translateY(0.8px) scale(1);
   }
   to {
     opacity: 1;
-    transform: translateY(0) scaleY(1);
-    filter: blur(0);
+    transform: translateY(0);
   }
 }
 
 @keyframes fpsFieldItemIn {
   from {
     opacity: 0;
-    transform: translateY(-3px);
+    transform: translateY(-2px);
   }
   to {
     opacity: 1;
@@ -550,25 +552,27 @@ body {
 }
 
 .fps-reveal {
-  transform-origin: top;
-  animation: fpsFieldIn 0.34s cubic-bezier(0.22, 1, 0.36, 1) both;
+  overflow: hidden;
+  will-change: transform, opacity;
+  animation: fpsFieldIn 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .fps-reveal > * {
   opacity: 0;
-  animation: fpsFieldItemIn 0.28s ease-out both;
+  will-change: transform, opacity;
+  animation: fpsFieldItemIn 0.18s ease-out both;
 }
 
 .fps-reveal > :nth-child(1) {
-  animation-delay: 0.06s;
+  animation-delay: 0.03s;
 }
 
 .fps-reveal > :nth-child(2) {
-  animation-delay: 0.11s;
+  animation-delay: 0.05s;
 }
 
 .fps-reveal > :nth-child(3) {
-  animation-delay: 0.16s;
+  animation-delay: 0.07s;
 }
 
 .history-refresh-btn {

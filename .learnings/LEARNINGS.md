@@ -72,3 +72,31 @@ Use a full-width fixed wrapper to center overlays, and ensure related keyframes 
 - **Notes**: Wrapped toast in fixed full-width flex container and removed X-axis translate from `toastIn` keyframes.
 
 ---
+## [LRN-20260312-002] correction
+
+**Logged**: 2026-03-12T00:00:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: frontend
+
+### Summary
+When users report reveal animation stutter, prefer single-layer transform+opacity animation and remove stagger/scale effects.
+
+### Details
+The FPS field reveal used multi-step effects (scale and staggered child animations). Even after initial tuning, user feedback still reported non-smooth behavior. Simplifying to one short container animation reduced perceived jank.
+
+### Suggested Action
+For toggle reveal UI, start from minimal animation (single container fade/translate) and only add complexity if performance stays smooth.
+
+### Metadata
+- Source: user_feedback
+- Related Files: web-react/src/index.css
+- Tags: animation, performance, correction
+- See Also: LRN-20260311-001, LRN-20260312-001
+
+### Resolution
+- **Resolved**: 2026-03-12T00:00:00+08:00
+- **Commit/PR**: local_workspace_change
+- **Notes**: Removed FPS child staggering and scale transform; kept only a short container fade+translate animation.
+
+---
