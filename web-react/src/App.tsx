@@ -1063,9 +1063,9 @@ export default function App() {
                 "group relative mx-auto max-w-2xl text-balance text-center text-4xl font-bold tracking-tight sm:text-5xl md:text-6xl xl:text-7xl",
               )}
             >
-              视频转文档，
+              视频转文档 
               <CanvasText
-                text="不止是提取，更是理解"
+                text=" 不止是提取   更是理解"
                 className="hero-toast-anchor inline align-middle"
                 backgroundClassName="bg-blue-600 dark:bg-blue-700"
                 colors={[
