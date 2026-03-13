@@ -1103,7 +1103,7 @@ export default function App() {
           <button
             type="button"
             onClick={handleStudioClick}
-            className="cursor-pointer rounded-sm text-xs uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:text-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70"
+            className="cursor-pointer rounded-sm text-sm uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:text-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70"
           >
             AI Workflow Studio
           </button>
@@ -1112,7 +1112,7 @@ export default function App() {
             aria-expanded={historyDrawerOpen}
             aria-controls="history-drawer"
             onClick={() => setHistoryDrawerOpen((prev) => !prev)}
-            className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-xs font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
+            className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-sm font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
           >
             <HistoryIcon className="h-3.5 w-3.5" />
             历史
@@ -1183,7 +1183,7 @@ export default function App() {
             <section className="panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
               <div className="mb-3 flex items-center gap-2">
                 <SettingsIcon className="h-4 w-4 text-neutral-300" />
-                <h2 className="text-sm font-semibold">配置选项</h2>
+                <h2 className="text-base font-semibold">配置选项</h2>
               </div>
 
               <div className="config-field mb-3 space-y-1">
@@ -1277,7 +1277,7 @@ export default function App() {
             <section className="panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
               <div className="mb-2 flex items-center gap-2">
                 <UploadIcon className="h-4 w-4 text-neutral-300" />
-                <h2 className="text-sm font-semibold">上传视频</h2>
+                <h2 className="text-base font-semibold">上传视频</h2>
               </div>
               <input
                 ref={fileInputRef}
@@ -1425,7 +1425,7 @@ export default function App() {
                     <div className="mb-2 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <StackIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-sm font-semibold">批量处理结果</h2>
+                        <h2 className="text-base font-semibold">批量处理结果</h2>
                       </div>
                       <button
                         className="zip-download-btn flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
@@ -1466,7 +1466,7 @@ export default function App() {
                     <div className="mb-2 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <StepsIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-sm font-semibold">识别到的步骤</h2>
+                        <h2 className="text-base font-semibold">识别到的步骤</h2>
                       </div>
                       {!isEditMode ? (
                         <button
@@ -1622,7 +1622,7 @@ export default function App() {
                     <div className="mb-2 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <DocumentIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-sm font-semibold">生成的总结文档</h2>
+                        <h2 className="text-base font-semibold">生成的总结文档</h2>
                       </div>
                       <button
                         className="zip-download-btn flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
@@ -1661,7 +1661,7 @@ export default function App() {
                     <div className="flex items-center justify-between gap-2">
                       <div className="flex items-center gap-2">
                         <HistoryIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-sm font-semibold">历史记录</h2>
+                        <h2 className="text-base font-semibold">历史记录</h2>
                       </div>
                       <div className="flex items-center gap-1.5">
                         <button
