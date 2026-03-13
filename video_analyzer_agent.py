@@ -5,6 +5,8 @@ import logging
 import subprocess
 import re
 import base64
+import urllib.error
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from volcenginesdkarkruntime import AsyncArk
@@ -23,13 +25,22 @@ logging.basicConfig(
 
 
 class VideoAnalyzerAgent:
+    DEFAULT_MODEL_NAME = "doubao-seed-2-0-pro-260215"
+    DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+    DEFAULT_CHAT_TEMPERATURE = 0.2
     FONT_PATHS = [
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\simsun.ttc",
         r"C:\Windows\Fonts\SIMSUN.TTC",
     ]
 
-    def __init__(self, api_key: str = None, whisper_model: str = "base"):
+    def __init__(
+        self,
+        api_key: str = None,
+        whisper_model: str = "base",
+        model_name: str = None,
+        model_base_url: str = None,
+    ):
         """
         初始化视频分析AI Agent
         :param api_key: 火山引擎ARK API Key，如果为None则从.env文件读取
@@ -40,14 +51,28 @@ class VideoAnalyzerAgent:
         if api_key:
             self.api_key = api_key
         else:
-            self.api_key = os.getenv("ARK_API_KEY")
+            self.api_key = (
+                os.getenv("MODEL_API_KEY")
+                or os.getenv("ARK_API_KEY")
+                or os.getenv("OPENAI_API_KEY")
+            )
             if not self.api_key:
-                raise ValueError("ARK_API_KEY 未设置，请在.env文件中设置或通过参数传入")
+                raise ValueError(
+                    "API Key 未设置，请在 .env 中配置 MODEL_API_KEY / ARK_API_KEY / OPENAI_API_KEY，或通过参数传入"
+                )
 
-        self.client = AsyncArk(
-            base_url="https://ark.cn-beijing.volces.com/api/v3", api_key=self.api_key
+        self.base_url = (
+            str(model_base_url or "").strip()
+            or str(os.getenv("MODEL_BASE_URL", "")).strip()
+            or self.DEFAULT_BASE_URL
         )
-        self.model = "doubao-seed-2-0-pro-260215"
+        self.model = (
+            str(model_name or "").strip()
+            or str(os.getenv("MODEL_NAME", "")).strip()
+            or self.DEFAULT_MODEL_NAME
+        )
+
+        self.client = AsyncArk(base_url=self.base_url, api_key=self.api_key)
         self.whisper_model = whisper_model
         self.ffmpeg_cmd = self._prepare_ffmpeg_command()
 
@@ -122,6 +147,93 @@ class VideoAnalyzerAgent:
                     await asyncio.sleep(wait_time)
                 else:
                     raise
+
+    def _chat_completion_http_fallback(
+        self, messages: List[Dict[str, Any]], temperature: float
+    ) -> str:
+        """Fallback for OpenAI-compatible providers that reject SDK extra fields."""
+        url = f"{self.base_url.rstrip('/')}/chat/completions"
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": float(temperature),
+        }
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        req = urllib.request.Request(
+            url=url,
+            data=body,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.api_key}",
+            },
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read().decode("utf-8", errors="ignore")
+        except urllib.error.HTTPError as exc:
+            error_text = exc.read().decode("utf-8", errors="ignore")
+            raise RuntimeError(error_text or str(exc)) from exc
+        except Exception as exc:
+            raise RuntimeError(str(exc)) from exc
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"模型返回非 JSON: {raw[:300]}") from exc
+
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise RuntimeError(f"模型返回格式异常: {raw[:300]}")
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if isinstance(item, dict) and "text" in item:
+                    text_parts.append(str(item.get("text", "")))
+            content = "\n".join(text_parts)
+        return str(content or "").strip()
+
+    async def _chat_completion_text(
+        self, messages: List[Dict[str, Any]], temperature: float | None = None
+    ) -> str:
+        temp = float(self.DEFAULT_CHAT_TEMPERATURE if temperature is None else temperature)
+
+        async def call_api():
+            return await self.client.chat.completions.create(
+                model=self.model,
+                temperature=temp,
+                messages=messages,
+            )
+
+        try:
+            response = await self._call_api_with_retry(call_api)
+            if getattr(response, "choices", None):
+                first = response.choices[0]
+                if getattr(first, "message", None) and getattr(first.message, "content", None):
+                    return str(first.message.content).strip()
+            return ""
+        except Exception as exc:
+            err = str(exc).lower()
+            if "stream_options" in err and "stream: true" in err:
+                return await asyncio.to_thread(self._chat_completion_http_fallback, messages, temp)
+            raise
+
+    async def test_model_connection(self) -> Dict[str, Any]:
+        """Use a tiny request to validate whether model connection is available."""
+        reply = await self._chat_completion_text(
+            [
+                {"role": "system", "content": "You are a connectivity checker."},
+                {"role": "user", "content": "Reply with OK."},
+            ]
+        )
+        return {
+            "ok": True,
+            "reply": str(reply or "")[:120],
+            "model": self.model,
+            "base_url": self.base_url,
+        }
 
     def _strip_code_fence(self, text: str) -> str:
         cleaned = text.strip()
@@ -275,17 +387,12 @@ class VideoAnalyzerAgent:
 
         print("正在通过字幕分析识别操作步骤...")
 
-        async def call_api():
-            return await self.client.chat.completions.create(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-
-        response = await self._call_api_with_retry(call_api)
-        result = response.choices[0].message.content
+        result = await self._chat_completion_text(
+            [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ]
+        )
         steps = self._parse_json_response(result)
 
         return steps
@@ -621,35 +728,16 @@ class VideoAnalyzerAgent:
 
             print(f"  步骤{step_num} (confidence={confidence:.1f}): AI 看图分析中...")
 
-            max_retries = 5
-            response = None
-            for attempt in range(max_retries):
-                try:
-                    response = await self.client.chat.completions.create(
-                        model=self.model,
-                        messages=[
-                            {
-                                "role": "system",
-                                "content": "你是一个专业的操作视频分析助手。请根据截图画面内容，修正或补充操作步骤的标题和描述。描述要具体、准确、可操作。只输出JSON。",
-                            },
-                            {"role": "user", "content": user_content},
-                        ],
-                    )
-                    break
-                except Exception as e:
-                    if "429" in str(e) and attempt < max_retries - 1:
-                        wait_time = (attempt + 1) * 10
-                        print(f"    请求频率过快，等待 {wait_time} 秒后重试...")
-                        await asyncio.sleep(wait_time)
-                    else:
-                        print(f"    AI 看图失败: {e}，保留原始结果")
-                        break
-
-            if response is None:
-                continue
-
             try:
-                result = response.choices[0].message.content
+                result = await self._chat_completion_text(
+                    [
+                        {
+                            "role": "system",
+                            "content": "??????????????????????????????????????????????????????????JSON?",
+                        },
+                        {"role": "user", "content": user_content},
+                    ]
+                )
                 enhanced = self._parse_json_object_response(result)
 
                 old_title = steps[idx]["title"]
@@ -868,17 +956,12 @@ IMPORTANT:
         else:
             print("正在调用 AI 生成步骤操作文档...")
 
-            async def call_api():
-                return await self.client.chat.completions.create(
-                    model=self.model,
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                )
-
-            response = await self._call_api_with_retry(call_api)
-            markdown_content = response.choices[0].message.content
+            markdown_content = await self._chat_completion_text(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ]
+            )
 
         if respect_step_content and not self._is_markdown_aligned_with_steps(
             markdown_content, steps

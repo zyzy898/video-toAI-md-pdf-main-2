@@ -103,7 +103,7 @@ const MODEL_PRESETS: Record<Exclude<ModelPreset, "custom">, { label: string; bas
     baseUrl: "https://api.deepseek.com/v1",
   },
   qwen: {
-    label: "Qwen (DashScope)",
+    label: "Qwen",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   },
 };
@@ -1269,9 +1269,9 @@ export default function App() {
           <button
             type="button"
             onClick={handleStudioClick}
-            className="cursor-pointer rounded-sm text-sm uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:text-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70"
+            className="cursor-cursor-pointer rounded-sm text-sm uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:text-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70 font-bold rounded-sm text-sm uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:text-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70"
           >
-            AI Workflow Studio
+            Video Insights
           </button>
           <div className="flex items-center gap-2">
             <button
@@ -1282,7 +1282,7 @@ export default function App() {
                 setSettingsDrawerOpen(false);
                 setHistoryDrawerOpen((prev) => !prev);
               }}
-              className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-sm font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
+              className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-base font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
             >
               <HistoryIcon className="h-3.5 w-3.5" />
               历史
@@ -1295,7 +1295,7 @@ export default function App() {
                 setHistoryDrawerOpen(false);
                 setSettingsDrawerOpen((prev) => !prev);
               }}
-              className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-sm font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
+              className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-base font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
             >
               <SettingsIcon className="h-3.5 w-3.5" />
               设置
