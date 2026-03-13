@@ -26,12 +26,47 @@ const VALID_VIDEO_EXTENSIONS = new Set([
 
 const WEB_SEARCH_ERROR_HINTS = ["toolnotopen", "web search", "联网搜索"];
 const WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_content_plugin";
+const ALIYUN_APIKEY_DOC_URL = "https://help.aliyun.com/zh/model-studio/error-code#apikey-error";
 const DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_RESUME_KEY_PREFIX = "video-upload-resume-v1";
 
 const extractRequestId = (message: string) => {
-  const match = String(message || "").match(/request[_\s-]*id[:：]\s*([A-Za-z0-9]+)/i);
+  const match = String(message || "").match(/request[_\s-]*id['"]?\s*[:：]\s*['"]?([A-Za-z0-9._-]+)/i);
   return match?.[1] || "";
+};
+
+const extractModelNameFromNotFound = (message: string) => {
+  const match = String(message || "").match(/model or endpoint\s+([A-Za-z0-9._:-]+)/i);
+  return match?.[1] || "";
+};
+
+const formatModelConnectionError = (message: string) => {
+  const lower = String(message || "").toLowerCase();
+  const requestId = extractRequestId(message);
+  const requestIdText = requestId ? `（请求 ID：${requestId}）` : "";
+
+  if (lower.includes("authenticationerror") || lower.includes("api key format is incorrect")) {
+    return `模型连接失败：API Key 格式不正确，请检查密钥后重试${requestIdText}`;
+  }
+
+  if (
+    lower.includes("invalid_api_key") ||
+    lower.includes("incorrect api key provided") ||
+    lower.includes("apikey-error")
+  ) {
+    return `模型连接失败：API Key 无效，或与当前平台不匹配。请检查 API Key 与 Base URL 是否对应（可参考：${ALIYUN_APIKEY_DOC_URL}）${requestIdText}`;
+  }
+
+  if (
+    lower.includes("invalidendpointormodel.notfound") ||
+    lower.includes("does not exist or you do not have access")
+  ) {
+    const modelName = extractModelNameFromNotFound(message);
+    const modelText = modelName ? `（${modelName}）` : "";
+    return `模型连接失败：模型或接口不存在，或当前账号无权限访问${modelText}。请检查 Base URL 和模型名称${requestIdText}`;
+  }
+
+  return "";
 };
 
 const formatErrorMessage = (rawMessage: string) => {
@@ -45,6 +80,9 @@ const formatErrorMessage = (rawMessage: string) => {
     return `联网搜索功能未开通。请前往火山引擎控制台开通后重试：${WEB_SEARCH_ACTIVATION_URL}${requestIdText}`;
   }
 
+  const modelConnectionHint = formatModelConnectionError(message);
+  if (modelConnectionHint) return modelConnectionHint;
+
   return message;
 };
 
@@ -57,6 +95,9 @@ const formatInlineErrorMessage = (rawMessage: string) => {
     const requestId = extractRequestId(message);
     return requestId ? `联网搜索未开通（请求 ID：${requestId}）` : "联网搜索未开通，请在火山引擎控制台开通后重试";
   }
+
+  const modelConnectionHint = formatModelConnectionError(message);
+  if (modelConnectionHint) return modelConnectionHint;
 
   return message.replace(/\s+/g, " ").trim();
 };
@@ -234,6 +275,42 @@ function CloseIcon({ className = "h-4 w-4" }: { className?: string }) {
   );
 }
 
+function EyeIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path
+        d="M2.8 12c1.9-3.9 5.3-6 9.2-6s7.3 2.1 9.2 6c-1.9 3.9-5.3 6-9.2 6s-7.3-2.1-9.2-6Z"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinejoin="round"
+      />
+      <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function EyeOffIcon({ className = "h-4 w-4" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path
+        d="M3.3 8.5A12.3 12.3 0 0 0 2.8 12c1.9 3.9 5.3 6 9.2 6 1.7 0 3.3-.4 4.6-1.2"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M8.3 6.8A9.7 9.7 0 0 1 12 6c3.9 0 7.3 2.1 9.2 6-.6 1.3-1.4 2.4-2.3 3.2"
+        stroke="currentColor"
+        strokeWidth="1.8"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="m3 3 18 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 function RefreshIcon({ className = "h-4 w-4" }: { className?: string }) {
   return (
     <svg viewBox="0 0 1024 1024" fill="none" className={className} aria-hidden="true">
@@ -374,10 +451,37 @@ function TrashIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
   );
 }
 
+function HistoryEmptyIllustration({ className = "h-24 w-24" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 128 128" fill="none" className={className} aria-hidden="true">
+      <defs>
+        <linearGradient id="history-empty-bg" x1="20" y1="16" x2="102" y2="108" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#22d3ee" stopOpacity="0.28" />
+          <stop offset="1" stopColor="#60a5fa" stopOpacity="0.1" />
+        </linearGradient>
+        <linearGradient id="history-empty-card" x1="36" y1="30" x2="88" y2="88" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#a5f3fc" stopOpacity="0.95" />
+          <stop offset="1" stopColor="#67e8f9" stopOpacity="0.7" />
+        </linearGradient>
+      </defs>
+      <circle cx="64" cy="64" r="52" fill="url(#history-empty-bg)" />
+      <rect x="36" y="30" width="56" height="68" rx="11" fill="url(#history-empty-card)" />
+      <rect x="44" y="45" width="40" height="6" rx="3" fill="#0f172a" fillOpacity="0.34" />
+      <rect x="44" y="58" width="31" height="6" rx="3" fill="#0f172a" fillOpacity="0.24" />
+      <rect x="44" y="71" width="36" height="6" rx="3" fill="#0f172a" fillOpacity="0.24" />
+      <path d="M64 90c12.15 0 22-9.85 22-22" stroke="#0f172a" strokeOpacity="0.34" strokeWidth="4" strokeLinecap="round" />
+      <circle cx="64" cy="68" r="3.5" fill="#0f172a" fillOpacity="0.48" />
+      <path d="m96 26 5 5m0-5-5 5" stroke="#67e8f9" strokeWidth="2.2" strokeLinecap="round" />
+      <path d="m27 93 4 4m0-4-4 4" stroke="#7dd3fc" strokeWidth="2.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 
 
 export default function App() {
   const [apiKey, setApiKey] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
   const [modelPreset, setModelPreset] = useState<ModelPreset>("ark");
   const [modelName, setModelName] = useState("");
   const [modelBaseUrl, setModelBaseUrl] = useState("https://ark.cn-beijing.volces.com/api/v3");
@@ -392,6 +496,9 @@ export default function App() {
   const [testingModel, setTestingModel] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
+  const [deletingHistoryId, setDeletingHistoryId] = useState("");
+  const [pendingDeleteHistory, setPendingDeleteHistory] = useState<HistoryItem | null>(null);
+  const [showClearHistoryConfirm, setShowClearHistoryConfirm] = useState(false);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const [apiKeyGuideActive, setApiKeyGuideActive] = useState(false);
@@ -455,11 +562,19 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if ((!historyDrawerOpen && !settingsDrawerOpen) || typeof document === "undefined") return;
+    if ((!historyDrawerOpen && !settingsDrawerOpen && !showClearHistoryConfirm && !pendingDeleteHistory) || typeof document === "undefined") return;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
+        if (showClearHistoryConfirm) {
+          if (!clearingHistory) setShowClearHistoryConfirm(false);
+          return;
+        }
+        if (pendingDeleteHistory) {
+          if (!deletingHistoryId) setPendingDeleteHistory(null);
+          return;
+        }
         setHistoryDrawerOpen(false);
         setSettingsDrawerOpen(false);
       }
@@ -469,7 +584,21 @@ export default function App() {
       window.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
     };
-  }, [historyDrawerOpen, settingsDrawerOpen]);
+  }, [
+    clearingHistory,
+    deletingHistoryId,
+    historyDrawerOpen,
+    pendingDeleteHistory,
+    settingsDrawerOpen,
+    showClearHistoryConfirm,
+  ]);
+
+  useEffect(() => {
+    if (!historyDrawerOpen) {
+      if (showClearHistoryConfirm) setShowClearHistoryConfirm(false);
+      if (pendingDeleteHistory) setPendingDeleteHistory(null);
+    }
+  }, [historyDrawerOpen, pendingDeleteHistory, showClearHistoryConfirm]);
 
   const fetchJson = useCallback(async <T,>(url: string, options: RequestInit = {}) => {
     const response = await fetch(url, options);
@@ -1056,28 +1185,58 @@ export default function App() {
     [fetchJson, hideProgress, showError, showProgress],
   );
 
-  const removeHistoryRecord = useCallback(
-    async (recordId: string) => {
-      if (!window.confirm("确定要删除这条历史记录吗？")) return;
-      try {
-        await fetchJson(`/history/${recordId}`, { method: "DELETE" });
-        await loadHistory();
-      } catch (error) {
-        showError(`删除失败: ${String((error as Error).message || error)}`);
-      }
+  const openDeleteHistoryConfirm = useCallback(
+    (record: HistoryItem) => {
+      if (!record?.id || clearingHistory || loadingHistory || Boolean(deletingHistoryId)) return;
+      setShowClearHistoryConfirm(false);
+      setPendingDeleteHistory(record);
     },
-    [fetchJson, loadHistory, showError],
+    [clearingHistory, deletingHistoryId, loadingHistory],
   );
 
+  const closeDeleteHistoryConfirm = useCallback(() => {
+    if (deletingHistoryId) return;
+    setPendingDeleteHistory(null);
+  }, [deletingHistoryId]);
+
+  const removeHistoryRecord = useCallback(async () => {
+    const recordId = pendingDeleteHistory?.id;
+    if (!recordId) return;
+    setDeletingHistoryId(recordId);
+    try {
+      await fetchJson(`/history/${recordId}`, { method: "DELETE" });
+      await loadHistory();
+      setPendingDeleteHistory(null);
+    } catch (error) {
+      showError(`删除失败: ${String((error as Error).message || error)}`);
+    } finally {
+      setDeletingHistoryId("");
+    }
+  }, [fetchJson, loadHistory, pendingDeleteHistory, showError]);
+
+  const openClearHistoryConfirm = useCallback(() => {
+    if (history.length === 0 || clearingHistory || loadingHistory || Boolean(deletingHistoryId)) return;
+    setPendingDeleteHistory(null);
+    setShowClearHistoryConfirm(true);
+  }, [clearingHistory, deletingHistoryId, history.length, loadingHistory]);
+
+  const closeClearHistoryConfirm = useCallback(() => {
+    if (clearingHistory) return;
+    setShowClearHistoryConfirm(false);
+  }, [clearingHistory]);
+
   const clearAllHistoryRecords = useCallback(async () => {
-    if (history.length === 0) return;
-    if (!window.confirm("确定要清空全部历史记录吗？")) return;
+    if (history.length === 0) {
+      setShowClearHistoryConfirm(false);
+      return;
+    }
     setClearingHistory(true);
     try {
       for (const record of history) {
         await fetchJson(`/history/${record.id}`, { method: "DELETE" });
       }
       await loadHistory();
+      setShowClearHistoryConfirm(false);
     } catch (error) {
       showError(`清空失败: ${String((error as Error).message || error)}`);
     } finally {
@@ -1757,7 +1916,7 @@ export default function App() {
                         <button
                           type="button"
                           className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-rose-400/60 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-60"
-                          onClick={() => void clearAllHistoryRecords()}
+                          onClick={openClearHistoryConfirm}
                           disabled={clearingHistory || loadingHistory || history.length === 0}
                         >
                           {clearingHistory ? "清空中..." : "清空全部"}
@@ -1774,8 +1933,20 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  <div className="history-scroll flex-1 space-y-2 overflow-auto px-4 py-3">
-                    {history.length === 0 ? <p className="text-sm text-neutral-500">暂无历史记录</p> : null}
+                  <div className={cn("history-scroll flex-1 overflow-auto px-4 py-3", history.length === 0 ? "history-scroll-empty" : "space-y-2")}>
+                    {history.length === 0 ? (
+                      <div className="history-empty-state">
+                        <div className="history-empty-art">
+                          <HistoryEmptyIllustration className="h-24 w-24" />
+                        </div>
+                        <p className="history-empty-title">还没有历史记录</p>
+                        <p className="history-empty-desc">
+                          上传并分析视频后，结果会自动保存在这里。
+                          <br />
+                          你可以随时回看、继续编辑或下载文档。
+                        </p>
+                      </div>
+                    ) : null}
                     {history.map((record) => (
                       <div key={record.id} className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
                         <div className="flex items-start justify-between gap-2">
@@ -1792,8 +1963,9 @@ export default function App() {
                             type="button"
                             title="删除记录"
                             aria-label="删除记录"
-                            className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10"
-                            onClick={() => void removeHistoryRecord(record.id)}
+                            className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+                            onClick={() => openDeleteHistoryConfirm(record)}
+                            disabled={clearingHistory || Boolean(deletingHistoryId)}
                           >
                             <TrashIcon />
                           </button>
@@ -1814,6 +1986,103 @@ export default function App() {
                     </button>
                   </div>
                 </aside>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {showClearHistoryConfirm && typeof document !== "undefined"
+        ? createPortal(
+            <div className="progress-overlay-anim fixed inset-0 z-[60] flex items-center justify-center bg-black/55 p-4">
+              <button
+                type="button"
+                className="absolute inset-0"
+                aria-label="关闭清空历史确认"
+                onClick={closeClearHistoryConfirm}
+                disabled={clearingHistory}
+              />
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="clear-history-confirm-title"
+                className="progress-dialog-anim relative z-10 w-full max-w-sm rounded-xl border border-neutral-700 bg-neutral-900/96 p-4 shadow-[0_18px_36px_rgba(2,6,23,0.45)]"
+              >
+                <div className="mb-3 flex items-center gap-2">
+                  <ClearIcon className="h-4 w-4 text-rose-300" />
+                  <h3 id="clear-history-confirm-title" className="text-sm font-semibold text-neutral-100">
+                    确认清空全部历史记录？
+                  </h3>
+                </div>
+                <p className="text-sm text-neutral-300">该操作不可撤销，历史中的分析结果入口将被移除。</p>
+                <div className="mt-4 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded border border-neutral-700 px-3 py-1.5 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={closeClearHistoryConfirm}
+                    disabled={clearingHistory}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border border-rose-500/60 bg-rose-500/15 px-3 py-1.5 text-xs text-rose-200 transition-colors hover:border-rose-400 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => void clearAllHistoryRecords()}
+                    disabled={clearingHistory}
+                  >
+                    {clearingHistory ? "清空中..." : "确认清空"}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {pendingDeleteHistory && typeof document !== "undefined"
+        ? createPortal(
+            <div className="progress-overlay-anim fixed inset-0 z-[60] flex items-center justify-center bg-black/55 p-4">
+              <button
+                type="button"
+                className="absolute inset-0"
+                aria-label="关闭删除历史确认"
+                onClick={closeDeleteHistoryConfirm}
+                disabled={Boolean(deletingHistoryId)}
+              />
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="delete-history-confirm-title"
+                className="progress-dialog-anim relative z-10 w-full max-w-sm rounded-xl border border-neutral-700 bg-neutral-900/96 p-4 shadow-[0_18px_36px_rgba(2,6,23,0.45)]"
+              >
+                <div className="mb-3 flex items-center gap-2">
+                  <TrashIcon className="h-4 w-4 text-rose-300" />
+                  <h3 id="delete-history-confirm-title" className="text-sm font-semibold text-neutral-100">
+                    确认删除这条历史记录？
+                  </h3>
+                </div>
+                <p className="text-sm text-neutral-300">删除后将无法通过历史列表快速找回该结果。</p>
+                <p className="mt-2 rounded bg-neutral-900/96 px-2 py-1 text-center text-xs text-neutral-300 break-all">
+                  {pendingDeleteHistory.video_name || "未命名记录"}
+                </p>
+                <div className="mt-4 flex items-center justify-end gap-2">
+                  <button
+                    type="button"
+                    className="rounded border border-neutral-700 px-3 py-1.5 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={closeDeleteHistoryConfirm}
+                    disabled={Boolean(deletingHistoryId)}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border border-rose-500/60 bg-rose-500/15 px-3 py-1.5 text-xs text-rose-200 transition-colors hover:border-rose-400 hover:bg-rose-500/20 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => void removeHistoryRecord()}
+                    disabled={Boolean(deletingHistoryId)}
+                  >
+                    {deletingHistoryId ? "删除中..." : "确认删除"}
+                  </button>
+                </div>
               </div>
             </div>,
             document.body,
@@ -1856,20 +2125,31 @@ export default function App() {
                       <label className="text-sm">
                         <span className="mr-1 text-rose-300">*</span>模型 API Key
                       </label>
-                      <input
-                        ref={apiKeyInputRef}
-                        className={cn(
-                          "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm",
-                          apiKeyGuideActive && "api-key-guide-input",
-                        )}
-                        type="password"
-                        placeholder="请输入 API Key"
-                        value={apiKey}
-                        onChange={(e) => {
-                          setApiKey(e.target.value);
-                          if (apiKeyGuideActive) setApiKeyGuideActive(false);
-                        }}
-                      />
+                      <div className="relative">
+                        <input
+                          ref={apiKeyInputRef}
+                          className={cn(
+                            "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 pr-9 text-sm",
+                            apiKeyGuideActive && "api-key-guide-input",
+                          )}
+                          type={showApiKey ? "text" : "password"}
+                          placeholder="请输入 API Key"
+                          value={apiKey}
+                          onChange={(e) => {
+                            setApiKey(e.target.value);
+                            if (apiKeyGuideActive) setApiKeyGuideActive(false);
+                          }}
+                        />
+                        <button
+                          type="button"
+                          className="absolute inset-y-0 right-0 inline-flex w-8 items-center justify-center rounded-r text-neutral-400 transition-colors hover:text-neutral-100"
+                          title={showApiKey ? "隐藏 API Key" : "显示 API Key"}
+                          aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}
+                          onClick={() => setShowApiKey((prev) => !prev)}
+                        >
+                          {showApiKey ? <EyeOffIcon className="h-4 w-4" /> : <EyeIcon className="h-4 w-4" />}
+                        </button>
+                      </div>
                       <p className="text-xs text-neutral-500">可填写任意兼容平台的 API Key</p>
                     </div>
 
