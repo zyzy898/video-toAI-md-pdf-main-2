@@ -380,6 +380,23 @@ body {
   }
 }
 
+@keyframes apiKeyGuidePulse {
+  0%,
+  100% {
+    border-color: rgba(45, 212, 191, 0.52);
+    box-shadow:
+      0 0 0 0 rgba(45, 212, 191, 0),
+      inset 0 1px 0 rgba(153, 246, 228, 0.12);
+  }
+  50% {
+    border-color: rgba(103, 232, 249, 0.9);
+    box-shadow:
+      0 0 0 4px rgba(45, 212, 191, 0.14),
+      0 0 20px rgba(34, 211, 238, 0.22),
+      inset 0 1px 0 rgba(224, 242, 254, 0.24);
+  }
+}
+
 .app-main {
   width: 100%;
   animation: fadeUpIn 0.5s ease-out both;
@@ -1184,6 +1201,10 @@ body {
   filter: saturate(0.78);
 }
 
+.api-key-guide-input {
+  animation: apiKeyGuidePulse 1.15s ease-in-out infinite;
+}
+
 .file-status-chip {
   position: relative;
   display: inline-flex;
@@ -1283,6 +1304,7 @@ body {
   .clear-list-btn:hover:not(:disabled) .clear-list-icon,
   .zip-download-btn:hover:not(:disabled),
   .zip-download-btn:hover:not(:disabled)::before,
+  .api-key-guide-input,
   .file-status-chip,
   .file-status-chip-success::after,
   .fps-reveal,

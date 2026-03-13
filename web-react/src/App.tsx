@@ -368,6 +368,8 @@ export default function App() {
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
+  const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
+  const [apiKeyGuideActive, setApiKeyGuideActive] = useState(false);
 
   const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
@@ -388,8 +390,11 @@ export default function App() {
   const [showErrorToast, setShowErrorToast] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const apiKeyGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const apiKeyGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const singleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progressVisibleRef = useRef(false);
@@ -406,24 +411,29 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+      if (apiKeyGuideTimerRef.current) clearTimeout(apiKeyGuideTimerRef.current);
+      if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
       if (batchTimerRef.current) clearInterval(batchTimerRef.current);
       if (singleTimerRef.current) clearInterval(singleTimerRef.current);
     };
   }, []);
 
   useEffect(() => {
-    if (!historyDrawerOpen || typeof document === "undefined") return;
+    if ((!historyDrawerOpen && !settingsDrawerOpen) || typeof document === "undefined") return;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setHistoryDrawerOpen(false);
+      if (event.key === "Escape") {
+        setHistoryDrawerOpen(false);
+        setSettingsDrawerOpen(false);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => {
       window.removeEventListener("keydown", onKeyDown);
       document.body.style.overflow = previousOverflow;
     };
-  }, [historyDrawerOpen]);
+  }, [historyDrawerOpen, settingsDrawerOpen]);
 
   const fetchJson = useCallback(async <T,>(url: string, options: RequestInit = {}) => {
     const response = await fetch(url, options);
@@ -443,10 +453,26 @@ export default function App() {
   }, []);
 
   const showError = useCallback((message: string) => {
-    setErrorMessage(formatErrorMessage(message));
+    const rawMessage = String(message || "");
+    setErrorMessage(formatErrorMessage(rawMessage));
     setShowErrorToast(true);
     if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
     errorTimerRef.current = setTimeout(() => setShowErrorToast(false), 5000);
+
+    if (rawMessage.includes("请输入 ARK API Key")) {
+      setHistoryDrawerOpen(false);
+      setSettingsDrawerOpen(true);
+      setApiKeyGuideActive(true);
+
+      if (apiKeyGuideTimerRef.current) clearTimeout(apiKeyGuideTimerRef.current);
+      apiKeyGuideTimerRef.current = setTimeout(() => setApiKeyGuideActive(false), 2800);
+
+      if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
+      apiKeyGuideFocusTimerRef.current = setTimeout(() => {
+        apiKeyInputRef.current?.focus();
+        apiKeyInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      }, 220);
+    }
   }, []);
 
   const showProgress = useCallback((title: string, text: string) => {
@@ -1107,16 +1133,34 @@ export default function App() {
           >
             AI Workflow Studio
           </button>
-          <button
-            type="button"
-            aria-expanded={historyDrawerOpen}
-            aria-controls="history-drawer"
-            onClick={() => setHistoryDrawerOpen((prev) => !prev)}
-            className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-sm font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
-          >
-            <HistoryIcon className="h-3.5 w-3.5" />
-            历史
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              aria-expanded={historyDrawerOpen}
+              aria-controls="history-drawer"
+              onClick={() => {
+                setSettingsDrawerOpen(false);
+                setHistoryDrawerOpen((prev) => !prev);
+              }}
+              className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-sm font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
+            >
+              <HistoryIcon className="h-3.5 w-3.5" />
+              历史
+            </button>
+            <button
+              type="button"
+              aria-expanded={settingsDrawerOpen}
+              aria-controls="settings-drawer"
+              onClick={() => {
+                setHistoryDrawerOpen(false);
+                setSettingsDrawerOpen((prev) => !prev);
+              }}
+              className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-sm font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
+            >
+              <SettingsIcon className="h-3.5 w-3.5" />
+              设置
+            </button>
+          </div>
         </div>
       </nav>
       <main className="app-main relative z-10 mx-auto w-full max-w-[1320px] space-y-6 px-4 pb-8 pt-[5.25rem] sm:px-6 md:space-y-7 md:px-8 md:pb-10 md:pt-24">
@@ -1178,101 +1222,7 @@ export default function App() {
           </div>
         </header>
 
-        <div className="app-grid grid items-start gap-5 xl:grid-cols-[360px_minmax(0,1fr)] 2xl:gap-6">
-          <aside className="app-sidebar motion-enter motion-delay-1 space-y-4">
-            <section className="panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
-              <div className="mb-3 flex items-center gap-2">
-                <SettingsIcon className="h-4 w-4 text-neutral-300" />
-                <h2 className="text-base font-semibold">配置选项</h2>
-              </div>
-
-              <div className="config-field mb-3 space-y-1">
-                <label className="text-sm">
-                  <span className="mr-1 text-rose-300">*</span>火山引擎 ARK API Key
-                </label>
-                <input
-                  className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
-                  type="password"
-                  placeholder="ARK API Key"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                />
-                <p className="text-xs text-neutral-500">目前仅支持 doubao-seed-2-0-pro-260215</p>
-              </div>
-
-              <div className="config-field mb-3 space-y-1">
-                <label className="text-sm">Whisper 字幕识别模型</label>
-                <select
-                  className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
-                  value={whisperModel}
-                  onChange={(e) => setWhisperModel(e.target.value)}
-                >
-                  <option value="tiny">tiny - 最快，精度较低</option>
-                  <option value="base">base - 快速，平衡精度</option>
-                  <option value="small">small - 中等速度，较高精度</option>
-                  <option value="medium">medium - 较慢，更高精度</option>
-                  <option value="large">large - 最慢，最高精度</option>
-                </select>
-              </div>
-
-              <div className="config-field mb-3 space-y-1">
-                <label className="text-sm">AI 看图增强次数</label>
-                <input
-                  className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
-                  type="number"
-                  min={0}
-                  max={10}
-                  value={maxVision}
-                  onChange={(e) => setMaxVision(Number(e.target.value) || 0)}
-                />
-                <p className="text-xs text-neutral-500">对低置信度步骤进行 AI 看图增强（0-10 次）</p>
-              </div>
-
-              <label className="feature-toggle mb-3 flex items-start gap-2 text-sm">
-                <input
-                  className="feature-checkbox mt-0.5"
-                  type="checkbox"
-                  checked={useVideo}
-                  onChange={(e) => setUseVideo(e.target.checked)}
-                />
-                <span>
-                  <strong className="block font-semibold">视频上传模式</strong>
-                  <span className="feature-note text-xs text-neutral-500">直接上传视频给 AI 识别（更准确，费用更高）</span>
-                </span>
-              </label>
-
-              {useVideo ? (
-                <div className="fps-reveal mb-3 space-y-1">
-                  <label className="text-sm">抽帧频率 (FPS)</label>
-                  <input
-                    className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
-                    type="number"
-                    min={0.1}
-                    max={10}
-                    step={0.1}
-                    value={fps}
-                    onChange={(e) => setFps(Number(e.target.value) || 1)}
-                  />
-                  <p className="text-xs text-neutral-500">视频上传模式下的抽帧频率，默认 1 帧/秒</p>
-                </div>
-              ) : null}
-
-              <label className="feature-toggle flex items-start gap-2 text-sm">
-                <input
-                  className="feature-checkbox mt-0.5"
-                  type="checkbox"
-                  checked={webSearch}
-                  onChange={(e) => setWebSearch(e.target.checked)}
-                />
-                <span>
-                  <strong className="block font-semibold">联网搜索增强</strong>
-                  <span className="feature-note text-xs text-neutral-500">自动搜索相关信息，丰富文档内容（需提前开通）</span>
-                </span>
-              </label>
-            </section>
-
-          </aside>
-
+        <div className="app-grid grid items-start gap-5 2xl:gap-6">
           <section className="app-workspace motion-enter motion-delay-2 min-w-0 space-y-4">
             <section className="panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
               <div className="mb-2 flex items-center gap-2">
@@ -1722,6 +1672,136 @@ export default function App() {
                       <RefreshIcon className={`h-3.5 w-3.5 ${loadingHistory ? "history-refresh-icon-spin" : ""}`} />
                       {loadingHistory ? "刷新中..." : "刷新"}
                     </button>
+                  </div>
+                </aside>
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {settingsDrawerOpen && typeof document !== "undefined"
+        ? createPortal(
+            <div className="history-drawer-overlay fixed inset-0 z-[45]">
+              <button
+                type="button"
+                aria-label="关闭设置侧边栏"
+                className="history-drawer-backdrop absolute inset-0 bg-black/45"
+                onClick={() => setSettingsDrawerOpen(false)}
+              />
+              <div className="pointer-events-none relative h-full w-full">
+                <aside
+                  id="settings-drawer"
+                  className="history-drawer-panel pointer-events-auto ml-auto flex h-full w-[min(92vw,360px)] flex-col border-l border-neutral-700/80 bg-neutral-900/96 py-4 shadow-[-16px_0_34px_rgba(2,6,23,0.45)] backdrop-blur-xl"
+                >
+                  <div className="border-b border-neutral-800 px-4 pb-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <SettingsIcon className="h-4 w-4 text-neutral-300" />
+                        <h2 className="text-base font-semibold">设置</h2>
+                      </div>
+                      <button
+                        type="button"
+                        title="关闭侧边栏"
+                        aria-label="关闭侧边栏"
+                        className="inline-flex h-8 w-8 items-center justify-center rounded border border-neutral-700 text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100"
+                        onClick={() => setSettingsDrawerOpen(false)}
+                      >
+                        <CloseIcon className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                  <div className="history-scroll flex-1 overflow-auto px-4 py-3">
+                    <div className="config-field mb-3 space-y-1">
+                      <label className="text-sm">
+                        <span className="mr-1 text-rose-300">*</span>火山引擎 ARK API Key
+                      </label>
+                      <input
+                        ref={apiKeyInputRef}
+                        className={cn(
+                          "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm",
+                          apiKeyGuideActive && "api-key-guide-input",
+                        )}
+                        type="password"
+                        placeholder="ARK API Key"
+                        value={apiKey}
+                        onChange={(e) => {
+                          setApiKey(e.target.value);
+                          if (apiKeyGuideActive) setApiKeyGuideActive(false);
+                        }}
+                      />
+                      <p className="text-xs text-neutral-500">目前仅支持 doubao-seed-2-0-pro-260215</p>
+                    </div>
+
+                    <div className="config-field mb-3 space-y-1">
+                      <label className="text-sm">Whisper 字幕识别模型</label>
+                      <select
+                        className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
+                        value={whisperModel}
+                        onChange={(e) => setWhisperModel(e.target.value)}
+                      >
+                        <option value="tiny">tiny - 最快，精度较低</option>
+                        <option value="base">base - 快速，平衡精度</option>
+                        <option value="small">small - 中等速度，较高精度</option>
+                        <option value="medium">medium - 较慢，更高精度</option>
+                        <option value="large">large - 最慢，最高精度</option>
+                      </select>
+                    </div>
+
+                    <div className="config-field mb-3 space-y-1">
+                      <label className="text-sm">AI 看图增强次数</label>
+                      <input
+                        className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
+                        type="number"
+                        min={0}
+                        max={10}
+                        value={maxVision}
+                        onChange={(e) => setMaxVision(Number(e.target.value) || 0)}
+                      />
+                      <p className="text-xs text-neutral-500">对低置信度步骤进行 AI 看图增强（0-10 次）</p>
+                    </div>
+
+                    <label className="feature-toggle mb-3 flex items-start gap-2 text-sm">
+                      <input
+                        className="feature-checkbox mt-0.5"
+                        type="checkbox"
+                        checked={useVideo}
+                        onChange={(e) => setUseVideo(e.target.checked)}
+                      />
+                      <span>
+                        <strong className="block font-semibold">视频上传模式</strong>
+                        <span className="feature-note text-xs text-neutral-500">直接上传视频给 AI 识别（更准确，费用更高）</span>
+                      </span>
+                    </label>
+
+                    {useVideo ? (
+                      <div className="fps-reveal mb-3 space-y-1">
+                        <label className="text-sm">抽帧频率 (FPS)</label>
+                        <input
+                          className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
+                          type="number"
+                          min={0.1}
+                          max={10}
+                          step={0.1}
+                          value={fps}
+                          onChange={(e) => setFps(Number(e.target.value) || 1)}
+                        />
+                        <p className="text-xs text-neutral-500">视频上传模式下的抽帧频率，默认 1 帧/秒</p>
+                      </div>
+                    ) : null}
+
+                    <label className="feature-toggle flex items-start gap-2 text-sm">
+                      <input
+                        className="feature-checkbox mt-0.5"
+                        type="checkbox"
+                        checked={webSearch}
+                        onChange={(e) => setWebSearch(e.target.checked)}
+                      />
+                      <span>
+                        <strong className="block font-semibold">联网搜索增强</strong>
+                        <span className="feature-note text-xs text-neutral-500">自动搜索相关信息，丰富文档内容（需提前开通）</span>
+                      </span>
+                    </label>
                   </div>
                 </aside>
               </div>
