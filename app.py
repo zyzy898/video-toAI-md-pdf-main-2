@@ -52,6 +52,8 @@ FPS_MIN = 0.1
 FPS_MAX = 10.0
 DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 MAX_UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024
+DEFAULT_MODEL_NAME = "doubao-seed-2-0-pro-260215"
+DEFAULT_MODEL_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -316,10 +318,24 @@ def _normalize_processing_options(data: Dict[str, Any]) -> Tuple[str, bool, bool
     return whisper_model, use_video, web_search, max_vision, fps
 
 
+def _normalize_model_options(data: Dict[str, Any]) -> Tuple[str, str]:
+    model_name = str(data.get("model_name", "")).strip() or DEFAULT_MODEL_NAME
+    model_base_url = str(data.get("model_base_url", "")).strip() or DEFAULT_MODEL_BASE_URL
+
+    if len(model_name) > 200:
+        model_name = model_name[:200]
+    if len(model_base_url) > 300:
+        model_base_url = model_base_url[:300]
+
+    return model_name, model_base_url
+
+
 def process_video(
     video_path: Path,
     api_key: str,
     whisper_model: str,
+    model_name: str,
+    model_base_url: str,
     use_video: bool,
     web_search: bool,
     max_vision: int,
@@ -337,7 +353,12 @@ def process_video(
     if not video_dest.exists():
         shutil.copy2(video_path, video_dest)
 
-    agent = VideoAnalyzerAgent(api_key if api_key else None, whisper_model)
+    agent = VideoAnalyzerAgent(
+        api_key if api_key else None,
+        whisper_model,
+        model_name=model_name,
+        model_base_url=model_base_url,
+    )
     srt_path = None
 
     if not use_video:
@@ -400,6 +421,8 @@ def process_video(
             "steps_count": len(steps),
             "mode": "video" if use_video else "subtitle",
             "whisper_model": whisper_model,
+            "model_name": model_name,
+            "model_base_url": model_base_url,
             "use_video": use_video,
             "web_search": web_search,
             "max_vision": max_vision,
@@ -645,6 +668,7 @@ def analyze():
     whisper_model, use_video, web_search, max_vision, fps = _normalize_processing_options(
         data
     )
+    model_name, model_base_url = _normalize_model_options(data)
 
     try:
         video_path = _resolve_upload_filepath(data.get("filepath"))
@@ -673,6 +697,8 @@ def analyze():
             video_path,
             api_key,
             whisper_model,
+            model_name,
+            model_base_url,
             use_video,
             web_search,
             max_vision,
@@ -708,6 +734,45 @@ def analyze():
             message=str(exc),
         )
         return jsonify({"error": str(exc), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/test_model", methods=["POST"])
+def test_model():
+    data = _json_payload()
+    api_key = str(data.get("api_key", "")).strip()
+    if not api_key:
+        return jsonify({"error": "请输入 API Key"}), 400
+
+    model_name = str(data.get("model_name", "")).strip()
+    model_base_url = str(data.get("model_base_url", "")).strip()
+    if len(model_name) > 200:
+        model_name = model_name[:200]
+    if len(model_base_url) > 300:
+        model_base_url = model_base_url[:300]
+
+    if not model_name:
+        return jsonify({"error": "请填写模型名称"}), 400
+    if not model_base_url:
+        return jsonify({"error": "请填写模型接口 Base URL"}), 400
+
+    try:
+        agent = VideoAnalyzerAgent(
+            api_key=api_key,
+            model_name=model_name,
+            model_base_url=model_base_url,
+        )
+        result = _run_async(agent.test_model_connection())
+        return jsonify(
+            {
+                "success": True,
+                "message": "模型连接测试成功",
+                "model_name": model_name,
+                "model_base_url": model_base_url,
+                "reply": str(result.get("reply", "") or ""),
+            }
+        )
+    except Exception as exc:
+        return jsonify({"error": f"模型连接测试失败: {str(exc)}"}), 500
 
 
 @app.route("/download/<filename>")
@@ -774,9 +839,14 @@ def regenerate_document():
         return jsonify({"error": "输出目录不存在"}), 400
 
     web_search = _as_bool(data.get("web_search", False))
+    model_name, model_base_url = _normalize_model_options(data)
 
     try:
-        agent = VideoAnalyzerAgent(api_key)
+        agent = VideoAnalyzerAgent(
+            api_key,
+            model_name=model_name,
+            model_base_url=model_base_url,
+        )
         output_path = output_dir / "operation_guide.md"
         _run_async(
             agent.generate_step_document(
@@ -937,6 +1007,7 @@ def analyze_batch():
     whisper_model, use_video, web_search, max_vision, fps = _normalize_processing_options(
         data
     )
+    model_name, model_base_url = _normalize_model_options(data)
 
     filepaths: List[Path] = []
     for raw_path in raw_filepaths:
@@ -979,6 +1050,8 @@ def analyze_batch():
                     filepath,
                     api_key,
                     whisper_model,
+                    model_name,
+                    model_base_url,
                     use_video,
                     web_search,
                     max_vision,

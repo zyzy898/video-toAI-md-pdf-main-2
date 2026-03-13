@@ -87,6 +87,27 @@ const STAGE_PERCENT: Record<string, number> = {
   failed: 100,
 };
 
+type ModelPreset = "ark" | "openai" | "deepseek" | "qwen" | "custom";
+
+const MODEL_PRESETS: Record<Exclude<ModelPreset, "custom">, { label: string; baseUrl: string }> = {
+  ark: {
+    label: "Ark (火山引擎)",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+  },
+  openai: {
+    label: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+  },
+  deepseek: {
+    label: "DeepSeek",
+    baseUrl: "https://api.deepseek.com/v1",
+  },
+  qwen: {
+    label: "Qwen (DashScope)",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  },
+};
+
 type Mode = "" | "upload" | "single" | "batch";
 type FileStatus = "pending" | "processing" | "success" | "failed";
 
@@ -357,6 +378,9 @@ function TrashIcon({ className = "h-3.5 w-3.5" }: { className?: string }) {
 
 export default function App() {
   const [apiKey, setApiKey] = useState("");
+  const [modelPreset, setModelPreset] = useState<ModelPreset>("ark");
+  const [modelName, setModelName] = useState("");
+  const [modelBaseUrl, setModelBaseUrl] = useState("https://ark.cn-beijing.volces.com/api/v3");
   const [whisperModel, setWhisperModel] = useState("base");
   const [maxVision, setMaxVision] = useState(10);
   const [useVideo, setUseVideo] = useState(false);
@@ -365,11 +389,13 @@ export default function App() {
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
+  const [testingModel, setTestingModel] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const [apiKeyGuideActive, setApiKeyGuideActive] = useState(false);
+  const [modelConfigGuideActive, setModelConfigGuideActive] = useState(false);
 
   const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
@@ -388,13 +414,20 @@ export default function App() {
   const [progressBoard, setProgressBoard] = useState<ProgressBoard>(DEFAULT_PROGRESS_BOARD);
   const [errorMessage, setErrorMessage] = useState("");
   const [showErrorToast, setShowErrorToast] = useState(false);
+  const [successMessage, setSuccessMessage] = useState("");
+  const [showSuccessToast, setShowSuccessToast] = useState(false);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
+  const modelBaseUrlInputRef = useRef<HTMLInputElement | null>(null);
+  const modelNameInputRef = useRef<HTMLInputElement | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const apiKeyGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const apiKeyGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modelConfigGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modelConfigGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const singleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progressVisibleRef = useRef(false);
@@ -411,8 +444,11 @@ export default function App() {
   useEffect(() => {
     return () => {
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+      if (successTimerRef.current) clearTimeout(successTimerRef.current);
       if (apiKeyGuideTimerRef.current) clearTimeout(apiKeyGuideTimerRef.current);
       if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
+      if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
+      if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
       if (batchTimerRef.current) clearInterval(batchTimerRef.current);
       if (singleTimerRef.current) clearInterval(singleTimerRef.current);
     };
@@ -454,12 +490,14 @@ export default function App() {
 
   const showError = useCallback((message: string) => {
     const rawMessage = String(message || "");
+    setShowSuccessToast(false);
+    if (successTimerRef.current) clearTimeout(successTimerRef.current);
     setErrorMessage(formatErrorMessage(rawMessage));
     setShowErrorToast(true);
     if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
     errorTimerRef.current = setTimeout(() => setShowErrorToast(false), 5000);
 
-    if (rawMessage.includes("请输入 ARK API Key")) {
+    if (rawMessage.includes("请输入 ARK API Key") || rawMessage.includes("请输入 API Key")) {
       setHistoryDrawerOpen(false);
       setSettingsDrawerOpen(true);
       setApiKeyGuideActive(true);
@@ -474,6 +512,96 @@ export default function App() {
       }, 220);
     }
   }, []);
+
+  const showSuccess = useCallback((message: string) => {
+    const rawMessage = String(message || "").trim() || "操作成功";
+    setShowErrorToast(false);
+    if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
+    setSuccessMessage(rawMessage);
+    setShowSuccessToast(true);
+    if (successTimerRef.current) clearTimeout(successTimerRef.current);
+    successTimerRef.current = setTimeout(() => setShowSuccessToast(false), 3600);
+  }, []);
+
+  const triggerModelConfigGuide = useCallback(() => {
+    setHistoryDrawerOpen(false);
+    setSettingsDrawerOpen(true);
+    setModelConfigGuideActive(true);
+
+    if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
+    modelConfigGuideTimerRef.current = setTimeout(() => setModelConfigGuideActive(false), 2800);
+
+    if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
+    modelConfigGuideFocusTimerRef.current = setTimeout(() => {
+      const missingBaseUrl = modelPreset === "custom" && !String(modelBaseUrl || "").trim();
+      const missingModelName = !String(modelName || "").trim();
+      const target = missingBaseUrl
+        ? modelBaseUrlInputRef.current
+        : missingModelName
+          ? modelNameInputRef.current
+          : modelBaseUrlInputRef.current;
+      target?.focus();
+      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 220);
+  }, [modelBaseUrl, modelName, modelPreset]);
+
+  const validateModelConfig = useCallback(() => {
+    const hasBaseUrl = Boolean(String(modelBaseUrl || "").trim());
+    const hasModelName = Boolean(String(modelName || "").trim());
+    const needBaseUrl = modelPreset === "custom";
+    if (hasModelName && (!needBaseUrl || hasBaseUrl)) return true;
+    if (needBaseUrl && !hasBaseUrl && !hasModelName) {
+      showError("请填写模型接口 Base URL 和模型名称");
+    } else if (needBaseUrl && !hasBaseUrl) {
+      showError("请填写模型接口 Base URL");
+    } else {
+      showError("请填写模型名称");
+    }
+    triggerModelConfigGuide();
+    return false;
+  }, [modelBaseUrl, modelName, modelPreset, showError, triggerModelConfigGuide]);
+
+  const applyModelPreset = useCallback((preset: ModelPreset) => {
+    setModelPreset(preset);
+    setModelConfigGuideActive(false);
+    if (preset === "custom") {
+      setModelBaseUrl("");
+      setModelName("");
+      return;
+    }
+    const selected = MODEL_PRESETS[preset];
+    setModelBaseUrl(selected.baseUrl);
+    setModelName("");
+  }, []);
+
+  const testModelConnection = useCallback(async () => {
+    if (!apiKey) {
+      showError("请输入 API Key");
+      return;
+    }
+    if (!validateModelConfig()) return;
+
+    setTestingModel(true);
+    try {
+      const data = await fetchJson<{ message?: string; reply?: string }>("/test_model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          api_key: apiKey,
+          model_name: modelName,
+          model_base_url: modelBaseUrl,
+        }),
+      });
+
+      const responseText = String(data.reply || "").replace(/\s+/g, " ").trim();
+      const briefReply = responseText ? ` · 返回：${responseText.slice(0, 48)}` : "";
+      showSuccess(`${String(data.message || "模型连接测试成功")}${briefReply}`);
+    } catch (error) {
+      showError(String((error as Error).message || error));
+    } finally {
+      setTestingModel(false);
+    }
+  }, [apiKey, fetchJson, modelBaseUrl, modelName, showError, showSuccess, validateModelConfig]);
 
   const showProgress = useCallback((title: string, text: string) => {
     setProgressTitle(title);
@@ -732,6 +860,8 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           api_key: apiKey,
+          model_name: modelName,
+          model_base_url: modelBaseUrl,
           filepath: file.filepath,
           whisper_model: whisperModel,
           use_video: useVideo,
@@ -785,6 +915,8 @@ export default function App() {
     hideProgress,
     loadHistory,
     maxVision,
+    modelBaseUrl,
+    modelName,
     showError,
     showProgress,
     startSinglePolling,
@@ -811,6 +943,8 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           api_key: apiKey,
+          model_name: modelName,
+          model_base_url: modelBaseUrl,
           filepaths: batchFilesRef.current.map((item) => item.filepath),
           whisper_model: whisperModel,
           use_video: useVideo,
@@ -870,6 +1004,8 @@ export default function App() {
     hideProgress,
     loadHistory,
     maxVision,
+    modelBaseUrl,
+    modelName,
     countBatchStatus,
     showError,
     showProgress,
@@ -884,13 +1020,14 @@ export default function App() {
 
   const startAnalyze = useCallback(async () => {
     if (!apiKey) {
-      showError("请输入 ARK API Key");
+      showError("请输入 API Key");
       return;
     }
+    if (!validateModelConfig()) return;
     if (batchFilesRef.current.length === 1) return analyzeSingle();
     if (batchFilesRef.current.length > 1) return analyzeBatch();
     showError("请先上传视频文件");
-  }, [analyzeBatch, analyzeSingle, apiKey, showError]);
+  }, [analyzeBatch, analyzeSingle, apiKey, showError, validateModelConfig]);
 
   const openHistoryRecord = useCallback(
     async (recordId: string) => {
@@ -957,7 +1094,8 @@ export default function App() {
   );
 
   const saveEditedSteps = useCallback(async () => {
-    if (!apiKey) return showError("请输入 ARK API Key");
+    if (!apiKey) return showError("请输入 API Key");
+    if (!validateModelConfig()) return;
     if (!resultData?.output_dir) return showError("缺少输出目录信息");
     setSavingSteps(true);
     showProgress("重新生成中", "根据编辑步骤生成新文档...");
@@ -968,6 +1106,8 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           api_key: apiKey,
+          model_name: modelName,
+          model_base_url: modelBaseUrl,
           steps: editedSteps,
           output_dir: resultData.output_dir,
           web_search: enableWebSearch,
@@ -995,7 +1135,7 @@ export default function App() {
       setSavingSteps(false);
       hideProgress();
     }
-  }, [apiKey, editedSteps, fetchJson, hideProgress, resultData?.output_dir, showError, showProgress, webSearch]);
+  }, [apiKey, editedSteps, fetchJson, hideProgress, modelBaseUrl, modelName, resultData?.output_dir, showError, showProgress, validateModelConfig, webSearch]);
 
   const triggerDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -1714,7 +1854,7 @@ export default function App() {
                   <div className="history-scroll flex-1 overflow-auto px-4 py-3">
                     <div className="config-field mb-3 space-y-1">
                       <label className="text-sm">
-                        <span className="mr-1 text-rose-300">*</span>火山引擎 ARK API Key
+                        <span className="mr-1 text-rose-300">*</span>模型 API Key
                       </label>
                       <input
                         ref={apiKeyInputRef}
@@ -1723,14 +1863,101 @@ export default function App() {
                           apiKeyGuideActive && "api-key-guide-input",
                         )}
                         type="password"
-                        placeholder="ARK API Key"
+                        placeholder="请输入 API Key"
                         value={apiKey}
                         onChange={(e) => {
                           setApiKey(e.target.value);
                           if (apiKeyGuideActive) setApiKeyGuideActive(false);
                         }}
                       />
-                      <p className="text-xs text-neutral-500">目前仅支持 doubao-seed-2-0-pro-260215</p>
+                      <p className="text-xs text-neutral-500">可填写任意兼容平台的 API Key</p>
+                    </div>
+
+                    <div className="config-field mb-3 space-y-1">
+                      <label className="text-sm">模型预设</label>
+                      <select
+                        className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
+                        value={modelPreset}
+                        onChange={(e) => applyModelPreset(e.target.value as ModelPreset)}
+                      >
+                        <option value="ark">{MODEL_PRESETS.ark.label}</option>
+                        <option value="openai">{MODEL_PRESETS.openai.label}</option>
+                        <option value="deepseek">{MODEL_PRESETS.deepseek.label}</option>
+                        <option value="qwen">{MODEL_PRESETS.qwen.label}</option>
+                        <option value="custom">自定义</option>
+                      </select>
+                      <p className="text-xs text-neutral-500">一键填充常见平台的 Base URL（模型名称需手动填写）</p>
+                    </div>
+
+                    <div className="config-field mb-3 space-y-1">
+                      <label className="text-sm">
+                        {modelPreset === "custom" ? <span className="mr-1 text-rose-300">*</span> : null}
+                        模型接口 Base URL
+                      </label>
+                      <input
+                        ref={modelBaseUrlInputRef}
+                        className={cn(
+                          "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm",
+                          modelPreset === "custom" && modelConfigGuideActive && !String(modelBaseUrl || "").trim() && "model-required-guide-input",
+                        )}
+                        type="text"
+                        placeholder="例如: https://api.openai.com/v1"
+                        value={modelBaseUrl}
+                        required={modelPreset === "custom"}
+                        aria-required={modelPreset === "custom"}
+                        onChange={(e) => {
+                          const nextBaseUrl = e.target.value;
+                          setModelPreset("custom");
+                          setModelBaseUrl(nextBaseUrl);
+                          if (modelConfigGuideActive && nextBaseUrl.trim() && String(modelName || "").trim()) {
+                            setModelConfigGuideActive(false);
+                          }
+                        }}
+                      />
+                      <p className="text-xs text-neutral-500">支持兼容接口（Ark / OpenAI / DeepSeek / Qwen 等）</p>
+                    </div>
+
+                    <div className="config-field mb-3 space-y-1">
+                      <label className="text-sm">
+                        <span className="mr-1 text-rose-300">*</span>
+                        模型名称
+                      </label>
+                      <input
+                        ref={modelNameInputRef}
+                        className={cn(
+                          "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm",
+                          modelConfigGuideActive && !String(modelName || "").trim() && "model-required-guide-input",
+                        )}
+                        type="text"
+                        placeholder="例如: gpt-5.4 / deepseek-chat / qwen-plus / doubao-seed-2-0-pro-260215"
+                        value={modelName}
+                        required
+                        aria-required
+                        onChange={(e) => {
+                          const nextModelName = e.target.value;
+                          setModelName(nextModelName);
+                          const hasBaseUrl = Boolean(String(modelBaseUrl || "").trim());
+                          if (modelConfigGuideActive && nextModelName.trim() && (modelPreset !== "custom" || hasBaseUrl)) {
+                            setModelConfigGuideActive(false);
+                          }
+                        }}
+                      />
+                      <p className="text-xs text-neutral-500">按你所用平台的模型 ID 填写（必填）</p>
+                      {modelPreset === "custom" ? <p className="text-xs text-rose-300">自定义预设下，Base URL 与模型名称均必填</p> : null}
+                    </div>
+
+                    <div className="config-field mb-3 space-y-1">
+                      <button
+                        type="button"
+                        className="history-refresh-btn flex w-full items-center justify-center gap-1 rounded-lg border border-neutral-700 px-2.5 py-2 text-xs font-medium"
+                        disabled={testingModel}
+                        aria-busy={testingModel}
+                        onClick={() => void testModelConnection()}
+                      >
+                        <RefreshIcon className={`h-3.5 w-3.5 ${testingModel ? "history-refresh-icon-spin" : ""}`} />
+                        {testingModel ? "测试中..." : "测试链接"}
+                      </button>
+                      <p className="text-xs text-neutral-500">测试当前参数是否可连通模型（API Key / Base URL / 模型名称）</p>
                     </div>
 
                     <div className="config-field mb-3 space-y-1">
@@ -1790,18 +2017,6 @@ export default function App() {
                       </div>
                     ) : null}
 
-                    <label className="feature-toggle flex items-start gap-2 text-sm">
-                      <input
-                        className="feature-checkbox mt-0.5"
-                        type="checkbox"
-                        checked={webSearch}
-                        onChange={(e) => setWebSearch(e.target.checked)}
-                      />
-                      <span>
-                        <strong className="block font-semibold">联网搜索增强</strong>
-                        <span className="feature-note text-xs text-neutral-500">自动搜索相关信息，丰富文档内容（需提前开通）</span>
-                      </span>
-                    </label>
                   </div>
                 </aside>
               </div>
@@ -1832,6 +2047,17 @@ export default function App() {
             <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
               <div className="toast-anim pointer-events-auto w-[min(92vw,560px)] rounded border border-red-400/40 bg-red-500/10 px-4 py-3 text-center text-sm text-red-200">
                 {errorMessage}
+              </div>
+            </div>,
+            document.body,
+          )
+        : null}
+
+      {showSuccessToast && typeof document !== "undefined"
+        ? createPortal(
+            <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
+              <div className="toast-anim pointer-events-auto w-[min(92vw,560px)] rounded border border-emerald-400/40 bg-emerald-500/10 px-4 py-3 text-center text-sm text-emerald-200">
+                {successMessage}
               </div>
             </div>,
             document.body,

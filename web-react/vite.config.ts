@@ -23,6 +23,7 @@ export default defineConfig({
       "/download_zip": "http://127.0.0.1:5000",
       "/download_batch_zip": "http://127.0.0.1:5000",
       "/regenerate": "http://127.0.0.1:5000",
+      "/test_model": "http://127.0.0.1:5000",
       "/output": "http://127.0.0.1:5000",
     },
   },

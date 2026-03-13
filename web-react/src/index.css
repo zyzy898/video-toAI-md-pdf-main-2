@@ -397,6 +397,23 @@ body {
   }
 }
 
+@keyframes modelRequiredGuidePulse {
+  0%,
+  100% {
+    border-color: rgba(248, 113, 113, 0.56);
+    box-shadow:
+      0 0 0 0 rgba(248, 113, 113, 0),
+      inset 0 1px 0 rgba(254, 202, 202, 0.14);
+  }
+  50% {
+    border-color: rgba(251, 146, 60, 0.92);
+    box-shadow:
+      0 0 0 4px rgba(248, 113, 113, 0.18),
+      0 0 20px rgba(251, 146, 60, 0.2),
+      inset 0 1px 0 rgba(255, 237, 213, 0.24);
+  }
+}
+
 .app-main {
   width: 100%;
   animation: fadeUpIn 0.5s ease-out both;
@@ -1205,6 +1222,10 @@ body {
   animation: apiKeyGuidePulse 1.15s ease-in-out infinite;
 }
 
+.model-required-guide-input {
+  animation: modelRequiredGuidePulse 1.05s ease-in-out infinite;
+}
+
 .file-status-chip {
   position: relative;
   display: inline-flex;
@@ -1305,6 +1326,7 @@ body {
   .zip-download-btn:hover:not(:disabled),
   .zip-download-btn:hover:not(:disabled)::before,
   .api-key-guide-input,
+  .model-required-guide-input,
   .file-status-chip,
   .file-status-chip-success::after,
   .fps-reveal,
