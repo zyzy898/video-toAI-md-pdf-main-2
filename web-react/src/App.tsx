@@ -271,6 +271,9 @@ const ANALYZE_BUTTON_GRADIENT_COLORS = [
   "rgb(96, 165, 250)",
 ];
 
+const MAX_VISION_MIN = 0;
+const MAX_VISION_MAX = 10;
+
 const isValidVideo = (filename: string) => {
   const ext = String(filename || "").split(".").pop()?.toLowerCase() || "";
   return VALID_VIDEO_EXTENSIONS.has(ext);
@@ -1435,6 +1438,27 @@ export default function App() {
           ? "处理中"
           : "待处理";
   const modeLabel = (mode?: string) => (mode === "video" ? "视频模式" : "字幕模式");
+  const clampMaxVision = useCallback(
+    (value: number) => Math.max(MAX_VISION_MIN, Math.min(MAX_VISION_MAX, Math.round(Number(value) || 0))),
+    [],
+  );
+  const handleMaxVisionInput = useCallback(
+    (rawValue: string) => {
+      const parsed = Number(rawValue);
+      if (!Number.isFinite(parsed)) {
+        setMaxVision(MAX_VISION_MIN);
+        return;
+      }
+      setMaxVision(clampMaxVision(parsed));
+    },
+    [clampMaxVision],
+  );
+  const increaseMaxVision = useCallback(() => {
+    setMaxVision((prev) => clampMaxVision(prev + 1));
+  }, [clampMaxVision]);
+  const decreaseMaxVision = useCallback(() => {
+    setMaxVision((prev) => clampMaxVision(prev - 1));
+  }, [clampMaxVision]);
 
   const canAnalyze = !isAnalyzing && batchFiles.length > 0;
   const analyzeButtonText = isAnalyzing
@@ -2201,7 +2225,7 @@ export default function App() {
                     <div className="config-field mb-3 space-y-1">
                       <label className="text-sm">模型预设</label>
                       <select
-                        className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
+                        className="settings-select"
                         value={modelPreset}
                         onChange={(e) => applyModelPreset(e.target.value as ModelPreset)}
                       >
@@ -2288,7 +2312,7 @@ export default function App() {
                     <div className="config-field mb-3 space-y-1">
                       <label className="text-sm">Whisper 字幕识别模型</label>
                       <select
-                        className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
+                        className="settings-select"
                         value={whisperModel}
                         onChange={(e) => setWhisperModel(e.target.value)}
                       >
@@ -2302,14 +2326,37 @@ export default function App() {
 
                     <div className="config-field mb-3 space-y-1">
                       <label className="text-sm">AI 看图增强次数</label>
-                      <input
-                        className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
-                        type="number"
-                        min={0}
-                        max={10}
-                        value={maxVision}
-                        onChange={(e) => setMaxVision(Number(e.target.value) || 0)}
-                      />
+                      <div className="settings-stepper">
+                        <input
+                          className="settings-number-input"
+                          type="number"
+                          min={MAX_VISION_MIN}
+                          max={MAX_VISION_MAX}
+                          value={maxVision}
+                          onChange={(e) => handleMaxVisionInput(e.target.value)}
+                          onBlur={() => setMaxVision((prev) => clampMaxVision(prev))}
+                        />
+                        <div className="settings-stepper-controls">
+                          <button
+                            type="button"
+                            className="settings-stepper-btn"
+                            aria-label="增加 AI 看图增强次数"
+                            onClick={increaseMaxVision}
+                            disabled={maxVision >= MAX_VISION_MAX}
+                          >
+                            ▲
+                          </button>
+                          <button
+                            type="button"
+                            className="settings-stepper-btn"
+                            aria-label="减少 AI 看图增强次数"
+                            onClick={decreaseMaxVision}
+                            disabled={maxVision <= MAX_VISION_MIN}
+                          >
+                            ▼
+                          </button>
+                        </div>
+                      </div>
                       <p className="text-xs text-neutral-500">对低置信度步骤进行 AI 看图增强（0-10 次）</p>
                     </div>
 
