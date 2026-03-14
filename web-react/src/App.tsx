@@ -1,7 +1,7 @@
 ﻿
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { BackgroundBeams } from "@/components/ui/background-beams";
 import { CanvasText } from "@/components/ui/canvas-text";
@@ -534,6 +534,32 @@ function HistoryEmptyIllustration({ className = "h-24 w-24" }: { className?: str
     </svg>
   );
 }
+
+const EMPTY_STEPS: StepItem[] = [];
+
+const ReadonlyStepsList = memo(function ReadonlyStepsList({ steps }: { steps: StepItem[] }) {
+  return (
+    <div className="history-scroll max-h-[min(62vh,40rem)] space-y-2 overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+      {steps.map((step, i) => (
+        <div key={`s-${i}`} className="rounded border border-neutral-800 bg-neutral-950/60 p-2">
+          <p className="text-xs text-neutral-500">
+            #{step.step || i + 1} · {step.time || "00:00"}
+          </p>
+          <p className="text-sm font-medium">{step.title || "未命名步骤"}</p>
+          <p className="text-sm text-neutral-300">{step.description || ""}</p>
+        </div>
+      ))}
+    </div>
+  );
+});
+
+const MarkdownPreview = memo(function MarkdownPreview({ html }: { html: string }) {
+  return (
+    <div className="history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+      <div className="prose prose-invert max-w-none text-sm" dangerouslySetInnerHTML={{ __html: html }} />
+    </div>
+  );
+});
 
 
 
@@ -1499,6 +1525,7 @@ export default function App() {
   const hasSingleResult = Boolean(resultData);
   const hasBatchResult = Boolean(batchResultData);
   const hasAnyResult = hasSingleResult || hasBatchResult;
+  const singleResultSteps = resultData?.steps || EMPTY_STEPS;
   const drawerOverlayActive =
     historyDrawerOpen || settingsDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
   const handleStudioClick = useCallback(() => {
@@ -1808,7 +1835,7 @@ export default function App() {
                 ) : null}
 
                 {hasSingleResult ? (
-                  <section className="panel-card motion-enter rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
+                  <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
                     <div className="mb-2 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <StepsIcon className="h-4 w-4 text-neutral-300" />
@@ -1837,15 +1864,7 @@ export default function App() {
                       ) : null}
                     </div>
                     {!isEditMode ? (
-                      <div className="history-scroll max-h-[min(62vh,40rem)] space-y-2 overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
-                        {(resultData?.steps || []).map((step, i) => (
-                          <div key={`s-${i}`} className="rounded border border-neutral-800 bg-neutral-950/60 p-2">
-                            <p className="text-xs text-neutral-500">#{step.step || i + 1} · {step.time || "00:00"}</p>
-                            <p className="text-sm font-medium">{step.title || "未命名步骤"}</p>
-                            <p className="text-sm text-neutral-300">{step.description || ""}</p>
-                          </div>
-                        ))}
-                      </div>
+                      <ReadonlyStepsList steps={singleResultSteps} />
                     ) : (
                       <div className="steps-edit-scroll history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
                         <div className="steps-edit-actions mb-2 flex gap-2">
@@ -1974,7 +1993,7 @@ export default function App() {
                 ) : null}
 
                 {hasSingleResult ? (
-                  <section className="panel-card motion-enter rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
+                  <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
                     <div className="mb-2 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <DocumentIcon className="h-4 w-4 text-neutral-300" />
@@ -1988,9 +2007,7 @@ export default function App() {
                         下载 ZIP
                       </button>
                     </div>
-                    <div className="history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
-                      <div className="prose prose-invert max-w-none text-sm" dangerouslySetInnerHTML={{ __html: renderedMarkdown }} />
-                    </div>
+                    <MarkdownPreview html={renderedMarkdown} />
                   </section>
                 ) : null}
               </div>

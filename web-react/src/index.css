@@ -431,6 +431,15 @@ body {
   min-width: 0;
 }
 
+.results-grid {
+  contain: layout paint;
+}
+
+.result-heavy-surface {
+  content-visibility: auto;
+  contain-intrinsic-size: 560px;
+}
+
 .motion-enter {
   animation: fadeUpIn 0.58s cubic-bezier(0.2, 0.8, 0.2, 1) both;
 }
@@ -990,33 +999,34 @@ body {
 }
 
 .history-drawer-backdrop {
-  animation: historyBackdropIn 0.16s ease-out both;
+  animation: historyBackdropIn 0.14s ease-out both;
   will-change: opacity;
 }
 
 .history-drawer-panel {
   transform-origin: right center;
-  transform: translateZ(0);
-  contain: paint;
+  transform: translate3d(0, 0, 0);
+  contain: content;
+  backface-visibility: hidden;
   will-change: transform, opacity;
-  animation: historyDrawerSlideIn 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: historyDrawerSlideIn 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .history-drawer-panel > * {
-  opacity: 0;
-  animation: historyDrawerSectionIn 0.26s cubic-bezier(0.22, 1, 0.36, 1) both;
+  opacity: 1;
+  animation: none;
 }
 
 .history-drawer-panel > :nth-child(1) {
-  animation-delay: 0.07s;
+  animation-delay: 0s;
 }
 
 .history-drawer-panel > :nth-child(2) {
-  animation-delay: 0.11s;
+  animation-delay: 0s;
 }
 
 .history-drawer-panel > :nth-child(3) {
-  animation-delay: 0.15s;
+  animation-delay: 0s;
 }
 
 .history-drawer-panel .list-item-pop {

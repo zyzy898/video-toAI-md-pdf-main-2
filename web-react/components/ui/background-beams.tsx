@@ -3,8 +3,13 @@ import React from "react";
 import { motion } from "motion/react";
 import { cn } from "@/lib/utils";
 
+type BackgroundBeamsProps = {
+  className?: string;
+  animated?: boolean;
+};
+
 export const BackgroundBeams = React.memo(
-  ({ className }: { className?: string }) => {
+  ({ className, animated = true }: BackgroundBeamsProps) => {
     const paths = [
       "M-380 -189C-380 -189 -312 216 152 343C616 470 684 875 684 875",
       "M-373 -197C-373 -197 -305 208 159 335C623 462 691 867 691 867",
@@ -57,6 +62,15 @@ export const BackgroundBeams = React.memo(
       "M-44 -573C-44 -573 24 -168 488 -41C952 86 1020 491 1020 491",
       "M-37 -581C-37 -581 31 -176 495 -49C959 78 1027 483 1027 483",
     ];
+    const gradientMeta = React.useMemo(
+      () =>
+        paths.map(() => ({
+          y2: `${93 + Math.random() * 8}%`,
+          duration: Math.random() * 10 + 10,
+          delay: Math.random() * 10,
+        })),
+      [],
+    );
     return (
       <div
         className={cn(
@@ -79,45 +93,75 @@ export const BackgroundBeams = React.memo(
             strokeWidth="0.5"
           ></path>
 
-          {paths.map((path, index) => (
-            <motion.path
-              key={`path-` + index}
-              d={path}
-              stroke={`url(#linearGradient-${index})`}
-              strokeOpacity="0.4"
-              strokeWidth="0.5"
-            ></motion.path>
-          ))}
+          {paths.map((path, index) =>
+            animated ? (
+              <motion.path
+                key={`path-` + index}
+                d={path}
+                stroke={`url(#linearGradient-${index})`}
+                strokeOpacity="0.4"
+                strokeWidth="0.5"
+              ></motion.path>
+            ) : (
+              <path
+                key={`path-` + index}
+                d={path}
+                stroke={`url(#linearGradient-${index})`}
+                strokeOpacity="0.34"
+                strokeWidth="0.5"
+              ></path>
+            ),
+          )}
           <defs>
-            {paths.map((_, index) => (
-              <motion.linearGradient
-                id={`linearGradient-${index}`}
-                key={`gradient-${index}`}
-                initial={{
-                  x1: "0%",
-                  x2: "0%",
-                  y1: "0%",
-                  y2: "0%",
-                }}
-                animate={{
-                  x1: ["0%", "100%"],
-                  x2: ["0%", "95%"],
-                  y1: ["0%", "100%"],
-                  y2: ["0%", `${93 + Math.random() * 8}%`],
-                }}
-                transition={{
-                  duration: Math.random() * 10 + 10,
-                  ease: "easeInOut",
-                  repeat: Infinity,
-                  delay: Math.random() * 10,
-                }}
-              >
-                <stop stopColor="#18CCFC" stopOpacity="0"></stop>
-                <stop stopColor="#18CCFC"></stop>
-                <stop offset="32.5%" stopColor="#6344F5"></stop>
-                <stop offset="100%" stopColor="#AE48FF" stopOpacity="0"></stop>
-              </motion.linearGradient>
-            ))}
+            {paths.map((_, index) => {
+              const meta = gradientMeta[index];
+              if (!animated) {
+                return (
+                  <linearGradient
+                    id={`linearGradient-${index}`}
+                    key={`gradient-${index}`}
+                    x1="0%"
+                    x2="95%"
+                    y1="0%"
+                    y2={meta?.y2 || "95%"}
+                  >
+                    <stop stopColor="#18CCFC" stopOpacity="0"></stop>
+                    <stop stopColor="#18CCFC"></stop>
+                    <stop offset="32.5%" stopColor="#6344F5"></stop>
+                    <stop offset="100%" stopColor="#AE48FF" stopOpacity="0"></stop>
+                  </linearGradient>
+                );
+              }
+              return (
+                <motion.linearGradient
+                  id={`linearGradient-${index}`}
+                  key={`gradient-${index}`}
+                  initial={{
+                    x1: "0%",
+                    x2: "0%",
+                    y1: "0%",
+                    y2: "0%",
+                  }}
+                  animate={{
+                    x1: ["0%", "100%"],
+                    x2: ["0%", "95%"],
+                    y1: ["0%", "100%"],
+                    y2: ["0%", meta?.y2 || "95%"],
+                  }}
+                  transition={{
+                    duration: meta?.duration || 16,
+                    ease: "easeInOut",
+                    repeat: Infinity,
+                    delay: meta?.delay || 0,
+                  }}
+                >
+                  <stop stopColor="#18CCFC" stopOpacity="0"></stop>
+                  <stop stopColor="#18CCFC"></stop>
+                  <stop offset="32.5%" stopColor="#6344F5"></stop>
+                  <stop offset="100%" stopColor="#AE48FF" stopOpacity="0"></stop>
+                </motion.linearGradient>
+              );
+            })}
 
             <radialGradient
               id="paint0_radial_242_278"
