@@ -92,11 +92,15 @@ body {
 @keyframes historyDrawerSlideIn {
   from {
     opacity: 0;
-    transform: translate3d(22px, 0, 0);
+    transform: translate3d(16px, 0, 0) scale(0.992);
+  }
+  72% {
+    opacity: 1;
+    transform: translate3d(-1px, 0, 0) scale(1.001);
   }
   to {
     opacity: 1;
-    transform: translate3d(0, 0, 0);
+    transform: translate3d(0, 0, 0) scale(1);
   }
 }
 
@@ -999,7 +1003,7 @@ body {
 }
 
 .history-drawer-backdrop {
-  animation: historyBackdropIn 0.14s ease-out both;
+  animation: historyBackdropIn 0.2s ease-out both;
   will-change: opacity;
 }
 
@@ -1009,7 +1013,7 @@ body {
   contain: content;
   backface-visibility: hidden;
   will-change: transform, opacity;
-  animation: historyDrawerSlideIn 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: historyDrawerSlideIn 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .history-drawer-panel > * {
@@ -1089,6 +1093,10 @@ body {
   scrollbar-width: thin;
   scrollbar-color: rgba(45, 212, 191, 0.5) rgba(15, 23, 42, 0.72);
   scrollbar-gutter: stable;
+}
+
+.history-virtual-item {
+  contain: layout paint;
 }
 
 .history-scroll::-webkit-scrollbar {

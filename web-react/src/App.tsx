@@ -1,7 +1,7 @@
 ﻿
 import DOMPurify from "dompurify";
 import { marked } from "marked";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
 import { createPortal } from "react-dom";
 import { BackgroundBeams } from "@/components/ui/background-beams";
 import { CanvasText } from "@/components/ui/canvas-text";
@@ -293,6 +293,16 @@ const basename = (value: string | undefined | null) =>
 
 const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
+const isSameProgressBoard = (a: ProgressBoard, b: ProgressBoard) =>
+  a.mode === b.mode &&
+  a.percent === b.percent &&
+  a.stage === b.stage &&
+  a.total === b.total &&
+  a.current === b.current &&
+  a.success === b.success &&
+  a.failed === b.failed &&
+  a.currentFile === b.currentFile;
+
 function BrandStudioIcon({ className = "h-10 w-10" }: { className?: string }) {
   return (
     <svg viewBox="0 0 1024 1024" fill="none" className={className} aria-hidden="true">
@@ -536,6 +546,8 @@ function HistoryEmptyIllustration({ className = "h-24 w-24" }: { className?: str
 }
 
 const EMPTY_STEPS: StepItem[] = [];
+const HISTORY_VIRTUAL_ITEM_HEIGHT = 74;
+const HISTORY_VIRTUAL_OVERSCAN = 6;
 
 const ReadonlyStepsList = memo(function ReadonlyStepsList({ steps }: { steps: StepItem[] }) {
   return (
@@ -549,6 +561,128 @@ const ReadonlyStepsList = memo(function ReadonlyStepsList({ steps }: { steps: St
           <p className="text-sm text-neutral-300">{step.description || ""}</p>
         </div>
       ))}
+    </div>
+  );
+});
+
+type VirtualizedHistoryListProps = {
+  active: boolean;
+  history: HistoryItem[];
+  clearingHistory: boolean;
+  deletingHistoryId: string;
+  onOpenRecord: (id: string) => void;
+  onDeleteRecord: (record: HistoryItem) => void;
+};
+
+const VirtualizedHistoryList = memo(function VirtualizedHistoryList({
+  active,
+  history,
+  clearingHistory,
+  deletingHistoryId,
+  onOpenRecord,
+  onDeleteRecord,
+}: VirtualizedHistoryListProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [scrollTop, setScrollTop] = useState(0);
+  const [viewportHeight, setViewportHeight] = useState(0);
+
+  const totalHeight = useMemo(() => history.length * HISTORY_VIRTUAL_ITEM_HEIGHT, [history.length]);
+
+  const startIndex = useMemo(
+    () => Math.max(0, Math.floor(scrollTop / HISTORY_VIRTUAL_ITEM_HEIGHT) - HISTORY_VIRTUAL_OVERSCAN),
+    [scrollTop],
+  );
+
+  const endIndex = useMemo(() => {
+    const visibleCount = Math.ceil((viewportHeight || 1) / HISTORY_VIRTUAL_ITEM_HEIGHT) + HISTORY_VIRTUAL_OVERSCAN * 2;
+    return Math.min(history.length, startIndex + visibleCount);
+  }, [history.length, startIndex, viewportHeight]);
+
+  const visibleItems = useMemo(() => history.slice(startIndex, endIndex), [endIndex, history, startIndex]);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const syncHeight = () => setViewportHeight(el.clientHeight);
+    syncHeight();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => syncHeight());
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!active) return;
+    const frame = window.requestAnimationFrame(() => {
+      if (containerRef.current) setViewportHeight(containerRef.current.clientHeight);
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [active, history.length]);
+
+  useEffect(() => {
+    const maxScroll = Math.max(0, totalHeight - viewportHeight);
+    if (scrollTop <= maxScroll) return;
+    setScrollTop(maxScroll);
+    if (containerRef.current) containerRef.current.scrollTop = maxScroll;
+  }, [scrollTop, totalHeight, viewportHeight]);
+
+  const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {
+    setScrollTop(event.currentTarget.scrollTop);
+  }, []);
+
+  if (history.length === 0) {
+    return (
+      <div className="history-scroll history-scroll-empty flex-1 overflow-auto px-4 py-3">
+        <div className="history-empty-state">
+          <div className="history-empty-art">
+            <HistoryEmptyIllustration className="h-24 w-24" />
+          </div>
+          <p className="history-empty-title">还没有历史记录</p>
+          <p className="history-empty-desc">
+            上传并分析视频后，结果会自动保存在这里。
+            <br />
+            你可以随时回看、继续编辑或下载文档。
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} className="history-scroll flex-1 overflow-auto px-4 py-3" onScroll={handleScroll}>
+      <div className="relative" style={{ height: `${totalHeight}px` }}>
+        {visibleItems.map((record, offset) => {
+          const index = startIndex + offset;
+          return (
+            <div
+              key={record.id}
+              className="history-virtual-item absolute left-0 right-0"
+              style={{ top: `${index * HISTORY_VIRTUAL_ITEM_HEIGHT}px`, paddingBottom: "8px" }}
+            >
+              <div className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
+                <div className="flex items-start justify-between gap-2">
+                  <button className="min-w-0 flex-1 text-left" onClick={() => onOpenRecord(record.id)}>
+                    <p className="truncate text-sm font-medium">{record.video_name}</p>
+                    <p className="truncate text-xs text-neutral-500">
+                      {record.mode === "video" ? "视频模式" : "字幕模式"} · {record.steps_count || 0} 步 · {record.timestamp || ""}
+                    </p>
+                  </button>
+                  <button
+                    type="button"
+                    title="删除记录"
+                    aria-label="删除记录"
+                    className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => onDeleteRecord(record)}
+                    disabled={clearingHistory || Boolean(deletingHistoryId)}
+                  >
+                    <TrashIcon />
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 });
@@ -825,12 +959,17 @@ export default function App() {
     }
   }, [apiKey, fetchJson, modelBaseUrl, modelName, showError, showSuccess, validateModelConfig]);
 
+  const setProgressTextIfChanged = useCallback((nextText: string) => {
+    const normalized = String(nextText || "");
+    setProgressText((prev) => (prev === normalized ? prev : normalized));
+  }, []);
+
   const showProgress = useCallback((title: string, text: string) => {
     setProgressTitle(title);
-    setProgressText(text);
+    setProgressTextIfChanged(text);
     setProgressBoard(DEFAULT_PROGRESS_BOARD);
     setProgressVisible(true);
-  }, []);
+  }, [setProgressTextIfChanged]);
 
   const hideProgress = useCallback(() => {
     setProgressVisible(false);
@@ -845,7 +984,7 @@ export default function App() {
       next.current = Math.max(0, Number(next.current) || 0);
       next.success = Math.max(0, Number(next.success) || 0);
       next.failed = Math.max(0, Number(next.failed) || 0);
-      return next;
+      return isSameProgressBoard(prev, next) ? prev : next;
     });
   }, []);
 
@@ -898,7 +1037,7 @@ export default function App() {
       const done = status === "completed" || stage === "done";
       const failed = status === "failed" || stage === "failed";
       if (progressVisibleRef.current) {
-        setProgressText(String(progress.message || "正在分析视频..."));
+        setProgressTextIfChanged(String(progress.message || "正在分析视频..."));
       }
       updateProgressBoard({
         mode: "single",
@@ -913,7 +1052,7 @@ export default function App() {
     } catch {
       // ignore polling errors
     }
-  }, [fetchJson, getStageProgress, updateProgressBoard]);
+  }, [fetchJson, getStageProgress, setProgressTextIfChanged, updateProgressBoard]);
 
   const pullBatchProgress = useCallback(async () => {
     try {
@@ -941,7 +1080,7 @@ export default function App() {
       } else {
         percent = Math.min(99, percent);
       }
-      if (progressVisibleRef.current) setProgressText(String(progress.message || "正在批量分析..."));
+      if (progressVisibleRef.current) setProgressTextIfChanged(String(progress.message || "正在批量分析..."));
       updateProgressBoard({
         mode: "batch",
         stage,
@@ -954,22 +1093,25 @@ export default function App() {
       });
 
       if (currentFile) {
-        setBatchFiles((prev) =>
-          prev.map((item) => {
+        setBatchFiles((prev) => {
+          let changed = false;
+          const next: BatchFileItem[] = prev.map((item): BatchFileItem => {
             if (item.status === "success" || item.status === "failed") {
               return item;
             }
-            if (item.filename === currentFile) {
-              return { ...item, status: "processing" };
+            if (item.filename === currentFile && item.status !== "processing") {
+              changed = true;
+              return { ...item, status: "processing" as FileStatus };
             }
             return item;
-          }),
-        );
+          });
+          return changed ? next : prev;
+        });
       }
     } catch {
       // ignore polling errors
     }
-  }, [countBatchStatus, fetchJson, getStageProgress, updateProgressBoard]);
+  }, [countBatchStatus, fetchJson, getStageProgress, setProgressTextIfChanged, updateProgressBoard]);
 
   const startSinglePolling = useCallback(() => {
     stopSinglePolling();
@@ -1019,7 +1161,7 @@ export default function App() {
         formData.append("upload_id", uploadId);
         formData.append("chunk_index", String(chunkIndex));
         formData.append("chunk", file.slice(start, end));
-        setProgressText(`正在上传 ${file.name}（${fileIndex}/${totalFiles}，分片 ${chunkIndex + 1}/${totalChunks}）`);
+        setProgressTextIfChanged(`正在上传 ${file.name}（${fileIndex}/${totalFiles}，分片 ${chunkIndex + 1}/${totalChunks}）`);
         await fetchJson("/upload_chunk", { method: "POST", body: formData });
       }
 
@@ -1031,7 +1173,7 @@ export default function App() {
       window.localStorage.removeItem(resumeKey);
       return finalized;
     },
-    [fetchJson],
+    [fetchJson, setProgressTextIfChanged],
   );
 
   const uploadBatchFiles = useCallback(
@@ -1469,7 +1611,18 @@ export default function App() {
         : status === "processing"
           ? "处理中"
           : "待处理";
-  const modeLabel = (mode?: string) => (mode === "video" ? "视频模式" : "字幕模式");
+  const handleOpenHistoryRecord = useCallback(
+    (id: string) => {
+      void openHistoryRecordFromDrawer(id);
+    },
+    [openHistoryRecordFromDrawer],
+  );
+  const handleDeleteHistoryRecord = useCallback(
+    (record: HistoryItem) => {
+      openDeleteHistoryConfirm(record);
+    },
+    [openDeleteHistoryConfirm],
+  );
   const clampMaxVision = useCallback(
     (value: number) => Math.max(MAX_VISION_MIN, Math.min(MAX_VISION_MAX, Math.round(Number(value) || 0))),
     [],
@@ -2016,9 +2169,13 @@ export default function App() {
         </div>
       </main>
 
-      {historyDrawerOpen && typeof document !== "undefined"
+      {typeof document !== "undefined"
         ? createPortal(
-            <div className="history-drawer-overlay fixed inset-0 z-[45]">
+            <div
+              className="history-drawer-overlay fixed inset-0 z-[45]"
+              hidden={!historyDrawerOpen}
+              aria-hidden={!historyDrawerOpen}
+            >
               <button
                 type="button"
                 aria-label="关闭历史侧边栏"
@@ -2057,46 +2214,14 @@ export default function App() {
                       </div>
                     </div>
                   </div>
-                  <div className={cn("history-scroll flex-1 overflow-auto px-4 py-3", history.length === 0 ? "history-scroll-empty" : "space-y-2")}>
-                    {history.length === 0 ? (
-                      <div className="history-empty-state">
-                        <div className="history-empty-art">
-                          <HistoryEmptyIllustration className="h-24 w-24" />
-                        </div>
-                        <p className="history-empty-title">还没有历史记录</p>
-                        <p className="history-empty-desc">
-                          上传并分析视频后，结果会自动保存在这里。
-                          <br />
-                          你可以随时回看、继续编辑或下载文档。
-                        </p>
-                      </div>
-                    ) : null}
-                    {history.map((record) => (
-                      <div key={record.id} className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
-                        <div className="flex items-start justify-between gap-2">
-                          <button
-                            className="min-w-0 flex-1 text-left"
-                            onClick={() => void openHistoryRecordFromDrawer(record.id)}
-                          >
-                            <p className="truncate text-sm font-medium">{record.video_name}</p>
-                            <p className="text-xs text-neutral-500">
-                              {modeLabel(record.mode)} · {record.steps_count || 0} 步 · {record.timestamp || ""}
-                            </p>
-                          </button>
-                          <button
-                            type="button"
-                            title="删除记录"
-                            aria-label="删除记录"
-                            className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10 disabled:cursor-not-allowed disabled:opacity-60"
-                            onClick={() => openDeleteHistoryConfirm(record)}
-                            disabled={clearingHistory || Boolean(deletingHistoryId)}
-                          >
-                            <TrashIcon />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
+                  <VirtualizedHistoryList
+                    active={historyDrawerOpen}
+                    history={history}
+                    clearingHistory={clearingHistory}
+                    deletingHistoryId={deletingHistoryId}
+                    onOpenRecord={handleOpenHistoryRecord}
+                    onDeleteRecord={handleDeleteHistoryRecord}
+                  />
                   <div className="border-t border-neutral-800 px-4 pt-3">
                     <button
                       type="button"
@@ -2213,9 +2338,13 @@ export default function App() {
           )
         : null}
 
-      {settingsDrawerOpen && typeof document !== "undefined"
+      {typeof document !== "undefined"
         ? createPortal(
-            <div className="history-drawer-overlay fixed inset-0 z-[45]">
+            <div
+              className="history-drawer-overlay fixed inset-0 z-[45]"
+              hidden={!settingsDrawerOpen}
+              aria-hidden={!settingsDrawerOpen}
+            >
               <button
                 type="button"
                 aria-label="关闭设置侧边栏"
