@@ -273,6 +273,9 @@ const ANALYZE_BUTTON_GRADIENT_COLORS = [
 
 const MAX_VISION_MIN = 0;
 const MAX_VISION_MAX = 10;
+const FPS_MIN = 0.1;
+const FPS_MAX = 10;
+const FPS_STEP = 0.1;
 
 const isValidVideo = (filename: string) => {
   const ext = String(filename || "").split(".").pop()?.toLowerCase() || "";
@@ -1459,6 +1462,29 @@ export default function App() {
   const decreaseMaxVision = useCallback(() => {
     setMaxVision((prev) => clampMaxVision(prev - 1));
   }, [clampMaxVision]);
+  const clampFps = useCallback((value: number) => {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return FPS_MIN;
+    const clamped = Math.max(FPS_MIN, Math.min(FPS_MAX, numeric));
+    return Math.round(clamped * 10) / 10;
+  }, []);
+  const handleFpsInput = useCallback(
+    (rawValue: string) => {
+      const parsed = Number(rawValue);
+      if (!Number.isFinite(parsed)) {
+        setFps(FPS_MIN);
+        return;
+      }
+      setFps(clampFps(parsed));
+    },
+    [clampFps],
+  );
+  const increaseFps = useCallback(() => {
+    setFps((prev) => clampFps(prev + FPS_STEP));
+  }, [clampFps]);
+  const decreaseFps = useCallback(() => {
+    setFps((prev) => clampFps(prev - FPS_STEP));
+  }, [clampFps]);
 
   const canAnalyze = !isAnalyzing && batchFiles.length > 0;
   const analyzeButtonText = isAnalyzing
@@ -2376,15 +2402,38 @@ export default function App() {
                     {useVideo ? (
                       <div className="fps-reveal mb-3 space-y-1">
                         <label className="text-sm">抽帧频率 (FPS)</label>
-                        <input
-                          className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm"
-                          type="number"
-                          min={0.1}
-                          max={10}
-                          step={0.1}
-                          value={fps}
-                          onChange={(e) => setFps(Number(e.target.value) || 1)}
-                        />
+                        <div className="settings-stepper">
+                          <input
+                            className="settings-number-input"
+                            type="number"
+                            min={FPS_MIN}
+                            max={FPS_MAX}
+                            step={FPS_STEP}
+                            value={fps}
+                            onChange={(e) => handleFpsInput(e.target.value)}
+                            onBlur={() => setFps((prev) => clampFps(prev))}
+                          />
+                          <div className="settings-stepper-controls">
+                            <button
+                              type="button"
+                              className="settings-stepper-btn"
+                              aria-label="增加抽帧频率"
+                              onClick={increaseFps}
+                              disabled={fps >= FPS_MAX}
+                            >
+                              ▲
+                            </button>
+                            <button
+                              type="button"
+                              className="settings-stepper-btn"
+                              aria-label="减少抽帧频率"
+                              onClick={decreaseFps}
+                              disabled={fps <= FPS_MIN}
+                            >
+                              ▼
+                            </button>
+                          </div>
+                        </div>
                         <p className="text-xs text-neutral-500">视频上传模式下的抽帧频率，默认 1 帧/秒</p>
                       </div>
                     ) : null}
