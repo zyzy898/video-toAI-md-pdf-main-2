@@ -271,6 +271,9 @@ const ANALYZE_BUTTON_GRADIENT_COLORS = [
   "rgb(96, 165, 250)",
 ];
 
+const NEW_STEP_DEFAULT_TITLE = "新步骤";
+const NEW_STEP_DEFAULT_DESCRIPTION = "请输入步骤描述";
+const NEW_STEP_DEFAULT_TIME = "00:00";
 const MAX_VISION_MIN = 0;
 const MAX_VISION_MAX = 10;
 const FPS_MIN = 0.1;
@@ -1485,7 +1488,6 @@ export default function App() {
   const decreaseFps = useCallback(() => {
     setFps((prev) => clampFps(prev - FPS_STEP));
   }, [clampFps]);
-
   const canAnalyze = !isAnalyzing && batchFiles.length > 0;
   const analyzeButtonText = isAnalyzing
     ? batchFiles.length === 1
@@ -1814,7 +1816,7 @@ export default function App() {
                       </div>
                       {!isEditMode ? (
                         <button
-                          className="flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
+                          className="steps-edit-btn flex items-center gap-1 rounded px-2 py-1 text-xs"
                           onClick={() => {
                             if (!resultData?.steps?.length) return showError("当前没有可编辑步骤");
                             setEditedSteps(
@@ -1845,18 +1847,20 @@ export default function App() {
                         ))}
                       </div>
                     ) : (
-                      <div className="history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
-                        <div className="mb-2 flex gap-2">
+                      <div className="steps-edit-scroll history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+                        <div className="steps-edit-actions mb-2 flex gap-2">
                           <button
+                            type="button"
                             disabled={savingSteps}
-                            className="rounded-md border border-teal-400/55 bg-gradient-to-b from-teal-500/88 to-cyan-600/78 px-2.5 py-1 text-xs font-semibold text-white shadow-[0_6px_14px_rgba(13,148,136,0.32),inset_0_1px_0_rgba(255,255,255,0.18)] transition-all duration-200 hover:-translate-y-0.5 hover:from-teal-400 hover:to-cyan-500 hover:shadow-[0_10px_18px_rgba(14,116,144,0.34)] active:translate-y-0 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-300/70 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-950 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none"
+                            className="steps-edit-save-btn"
                             onClick={() => void saveEditedSteps()}
                           >
                             保存并重生成
                           </button>
                           <button
+                            type="button"
                             disabled={savingSteps}
-                            className="rounded-md border border-neutral-600/90 bg-neutral-900/70 px-2.5 py-1 text-xs font-medium text-neutral-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition-all duration-200 hover:-translate-y-0.5 hover:border-neutral-500 hover:bg-neutral-800/90 hover:text-neutral-100 active:translate-y-0 active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-950 disabled:cursor-not-allowed disabled:opacity-60"
+                            className="steps-edit-cancel-btn"
                             onClick={() => {
                               setIsEditMode(false);
                               setEditedSteps([]);
@@ -1902,8 +1906,9 @@ export default function App() {
                             >
                               <div className="mb-1 flex gap-2">
                                 <input
-                                  className="flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
+                                  className="steps-edit-input flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
                                   value={step.title || ""}
+                                  placeholder={NEW_STEP_DEFAULT_TITLE}
                                   onChange={(e) =>
                                     setEditedSteps((prev) =>
                                       prev.map((item, idx) => (idx === index ? { ...item, title: e.target.value } : item)),
@@ -1911,8 +1916,9 @@ export default function App() {
                                   }
                                 />
                                 <input
-                                  className="w-24 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
+                                  className="steps-edit-input w-24 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
                                   value={step.time || ""}
+                                  placeholder={NEW_STEP_DEFAULT_TIME}
                                   onChange={(e) =>
                                     setEditedSteps((prev) =>
                                       prev.map((item, idx) => (idx === index ? { ...item, time: e.target.value } : item)),
@@ -1921,8 +1927,9 @@ export default function App() {
                                 />
                               </div>
                               <textarea
-                                className="min-h-16 w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
+                                className="steps-edit-textarea min-h-16 w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
                                 value={step.description || ""}
+                                placeholder={NEW_STEP_DEFAULT_DESCRIPTION}
                                 onChange={(e) =>
                                   setEditedSteps((prev) =>
                                     prev.map((item, idx) => (idx === index ? { ...item, description: e.target.value } : item)),
@@ -1950,7 +1957,12 @@ export default function App() {
                           onClick={() =>
                             setEditedSteps((prev) => [
                               ...prev,
-                              { step: prev.length + 1, time: "00:00", title: "新步骤", description: "请输入步骤描述" },
+                              {
+                                step: prev.length + 1,
+                                time: "",
+                                title: "",
+                                description: "",
+                              },
                             ])
                           }
                         >
