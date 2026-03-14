@@ -29,6 +29,28 @@ const WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_
 const ALIYUN_APIKEY_DOC_URL = "https://help.aliyun.com/zh/model-studio/error-code#apikey-error";
 const DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_RESUME_KEY_PREFIX = "video-upload-resume-v1";
+const HISTORY_CLIENT_ID_KEY = "video-insights-client-id-v1";
+const HISTORY_CLIENT_ID_HEADER = "X-Client-ID";
+
+const createHistoryClientId = () => {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `cid_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const getOrCreateHistoryClientId = () => {
+  if (typeof window === "undefined") return "";
+  try {
+    const stored = window.localStorage.getItem(HISTORY_CLIENT_ID_KEY) || "";
+    if (stored) return stored;
+    const next = createHistoryClientId();
+    window.localStorage.setItem(HISTORY_CLIENT_ID_KEY, next);
+    return next;
+  } catch {
+    return "";
+  }
+};
 
 const extractRequestId = (message: string) => {
   const match = String(message || "").match(/request[_\s-]*id['"]?\s*[:：]\s*['"]?([A-Za-z0-9._-]+)/i);
@@ -600,22 +622,31 @@ export default function App() {
     }
   }, [historyDrawerOpen, pendingDeleteHistory, showClearHistoryConfirm]);
 
+  const withHistoryClientHeader = useCallback((options: RequestInit = {}) => {
+    const headers = new Headers(options.headers || {});
+    const clientId = getOrCreateHistoryClientId();
+    if (clientId && !headers.has(HISTORY_CLIENT_ID_HEADER)) {
+      headers.set(HISTORY_CLIENT_ID_HEADER, clientId);
+    }
+    return { ...options, headers };
+  }, []);
+
   const fetchJson = useCallback(async <T,>(url: string, options: RequestInit = {}) => {
-    const response = await fetch(url, options);
+    const response = await fetch(url, withHistoryClientHeader(options));
     const data = (await response.json().catch(() => ({}))) as { error?: string } & T;
     if (!response.ok || data.error) {
       throw new Error(data.error || `请求失败 (${response.status})`);
     }
     return data;
-  }, []);
+  }, [withHistoryClientHeader]);
 
   const fetchBlob = useCallback(async (url: string, options: RequestInit = {}) => {
-    const response = await fetch(url, options);
+    const response = await fetch(url, withHistoryClientHeader(options));
     if (!response.ok) {
       throw new Error(`下载失败 (${response.status})`);
     }
     return response.blob();
-  }, []);
+  }, [withHistoryClientHeader]);
 
   const showError = useCallback((message: string) => {
     const rawMessage = String(message || "");

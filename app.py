@@ -2,6 +2,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
 import traceback
 import zipfile
@@ -12,7 +13,7 @@ from threading import Lock, RLock
 from typing import Any, Callable, Dict, List, Tuple
 from uuid import uuid4
 
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, g, jsonify, request, send_file, send_from_directory
 from werkzeug.utils import secure_filename
 
 from video_analyzer_agent import VideoAnalyzerAgent
@@ -54,6 +55,11 @@ DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 MAX_UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024
 DEFAULT_MODEL_NAME = "doubao-seed-2-0-pro-260215"
 DEFAULT_MODEL_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+HISTORY_OWNER_HEADER = "X-Client-ID"
+HISTORY_OWNER_COOKIE = "video_insights_client_id"
+HISTORY_OWNER_COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 2
+HISTORY_OWNER_MAX_LEN = 120
+HISTORY_OWNER_PATTERN = re.compile(r"[^A-Za-z0-9._-]")
 
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -186,23 +192,110 @@ def _write_history_unlocked(history: List[Dict[str, Any]]) -> None:
     tmp_path.replace(HISTORY_PATH)
 
 
-def load_history() -> List[Dict[str, Any]]:
-    with history_lock:
-        return _read_history_unlocked()
+def _normalize_history_owner(raw_owner: Any) -> str:
+    owner = str(raw_owner or "").strip()
+    if not owner:
+        return ""
+    owner = HISTORY_OWNER_PATTERN.sub("", owner)
+    if len(owner) > HISTORY_OWNER_MAX_LEN:
+        owner = owner[:HISTORY_OWNER_MAX_LEN]
+    return owner
 
 
-def save_history(record: Dict[str, Any]) -> None:
+def _extract_history_owner() -> str:
+    from_header = _normalize_history_owner(request.headers.get(HISTORY_OWNER_HEADER))
+    if from_header:
+        return from_header
+    from_cookie = _normalize_history_owner(request.cookies.get(HISTORY_OWNER_COOKIE))
+    if from_cookie:
+        return from_cookie
+    return ""
+
+
+def _ensure_history_owner() -> str:
+    owner = _extract_history_owner()
+    if owner:
+        return owner
+    owner = uuid4().hex
+    g.history_owner_cookie = owner
+    return owner
+
+
+def _record_owner(record: Dict[str, Any]) -> str:
+    return _normalize_history_owner(record.get("owner_id"))
+
+
+def _trim_history_per_owner(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    owner_counts: Dict[str, int] = {}
+    trimmed: List[Dict[str, Any]] = []
+    for record in history:
+        owner = _record_owner(record)
+        if not owner:
+            # Keep legacy records (no owner_id) to avoid accidental data loss.
+            trimmed.append(record)
+            continue
+        count = owner_counts.get(owner, 0)
+        if count >= MAX_HISTORY:
+            continue
+        owner_counts[owner] = count + 1
+        trimmed.append(record)
+    return trimmed
+
+
+def _strip_owner_field(record: Dict[str, Any]) -> Dict[str, Any]:
+    payload = dict(record)
+    payload.pop("owner_id", None)
+    return payload
+
+
+def load_history(owner_id: str) -> List[Dict[str, Any]]:
+    owner = _normalize_history_owner(owner_id)
+    if not owner:
+        return []
     with history_lock:
         history = _read_history_unlocked()
-        history.insert(0, record)
-        _write_history_unlocked(history[:MAX_HISTORY])
+        user_history = [item for item in history if _record_owner(item) == owner]
+        return user_history[:MAX_HISTORY]
 
 
-def delete_history_record(record_id: str) -> None:
+def save_history(record: Dict[str, Any], owner_id: str) -> None:
+    owner = _normalize_history_owner(owner_id)
+    if not owner:
+        return
+    record_to_save = dict(record)
+    record_to_save["owner_id"] = owner
     with history_lock:
         history = _read_history_unlocked()
-        history = [r for r in history if r.get("id") != record_id]
+        history.insert(0, record_to_save)
+        _write_history_unlocked(_trim_history_per_owner(history))
+
+
+def delete_history_record(record_id: str, owner_id: str) -> None:
+    owner = _normalize_history_owner(owner_id)
+    if not owner:
+        return
+    with history_lock:
+        history = _read_history_unlocked()
+        history = [
+            r
+            for r in history
+            if not (str(r.get("id")) == str(record_id) and _record_owner(r) == owner)
+        ]
         _write_history_unlocked(history)
+
+
+@app.after_request
+def attach_history_owner_cookie(response):
+    pending_owner = _normalize_history_owner(getattr(g, "history_owner_cookie", ""))
+    if pending_owner:
+        response.set_cookie(
+            HISTORY_OWNER_COOKIE,
+            pending_owner,
+            max_age=HISTORY_OWNER_COOKIE_MAX_AGE,
+            samesite="Lax",
+            httponly=False,
+        )
+    return response
 
 
 def _run_async(coro):
@@ -340,6 +433,7 @@ def process_video(
     web_search: bool,
     max_vision: int,
     fps: float = 1.0,
+    history_owner_id: str = "",
     progress_callback: Callable[[str, str], None] | None = None,
 ) -> Tuple[List[Dict[str, Any]], str, str, str, bool]:
     def report(stage: str, message: str) -> None:
@@ -428,7 +522,7 @@ def process_video(
             "max_vision": max_vision,
             "pdf_path": str(output_pdf),
         }
-        save_history(record)
+        save_history(record, history_owner_id)
 
     with open(output_md, "r", encoding="utf-8") as f:
         md_content = f.read()
@@ -661,6 +755,7 @@ def upload_chunk_finalize():
 @app.route("/analyze", methods=["POST"])
 def analyze():
     data = _json_payload()
+    history_owner_id = _ensure_history_owner()
     api_key = str(data.get("api_key", "")).strip()
     if not api_key:
         return jsonify({"error": "请输入 API Key"}), 400
@@ -703,6 +798,7 @@ def analyze():
             web_search,
             max_vision,
             fps,
+            history_owner_id=history_owner_id,
             progress_callback=_single_progress_callback,
         )
         if not has_steps:
@@ -909,17 +1005,20 @@ def cleanup(filename):
 
 @app.route("/history", methods=["GET"])
 def get_history():
-    return jsonify({"history": load_history()})
+    owner_id = _ensure_history_owner()
+    history = [_strip_owner_field(item) for item in load_history(owner_id)]
+    return jsonify({"history": history})
 
 
 @app.route("/history/<record_id>", methods=["GET"])
 def get_history_record(record_id):
-    history = load_history()
+    owner_id = _ensure_history_owner()
+    history = load_history(owner_id)
     for item in history:
         if item.get("id") != record_id:
             continue
 
-        record = dict(item)
+        record = _strip_owner_field(item)
         output_dir_value = record.get("output_dir")
         if output_dir_value:
             try:
@@ -945,8 +1044,9 @@ def get_history_record(record_id):
 
 @app.route("/history/<record_id>", methods=["DELETE"])
 def delete_history(record_id):
+    owner_id = _ensure_history_owner()
     try:
-        delete_history_record(record_id)
+        delete_history_record(record_id, owner_id)
         return jsonify({"success": True})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -996,6 +1096,7 @@ def get_single_progress():
 @app.route("/analyze_batch", methods=["POST"])
 def analyze_batch():
     data = _json_payload()
+    history_owner_id = _ensure_history_owner()
     api_key = str(data.get("api_key", "")).strip()
     if not api_key:
         return jsonify({"error": "请输入 API Key"}), 400
@@ -1056,6 +1157,7 @@ def analyze_batch():
                     web_search,
                     max_vision,
                     fps,
+                    history_owner_id=history_owner_id,
                     progress_callback=_batch_progress_callback,
                 )
 
