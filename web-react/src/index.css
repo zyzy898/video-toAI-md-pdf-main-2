@@ -83,29 +83,20 @@ body {
 @keyframes historyBackdropIn {
   from {
     opacity: 0;
-    backdrop-filter: blur(0);
   }
   to {
     opacity: 1;
-    backdrop-filter: blur(2px);
   }
 }
 
 @keyframes historyDrawerSlideIn {
   from {
     opacity: 0;
-    transform: translateX(34px) scale(0.992);
-    filter: blur(5px);
-  }
-  68% {
-    opacity: 1;
-    transform: translateX(-3px) scale(1.002);
-    filter: blur(0);
+    transform: translate3d(22px, 0, 0);
   }
   to {
     opacity: 1;
-    transform: translateX(0);
-    filter: blur(0);
+    transform: translate3d(0, 0, 0);
   }
 }
 
@@ -839,14 +830,16 @@ body {
 }
 
 .history-drawer-backdrop {
-  animation: historyBackdropIn 0.24s ease-out both;
-  will-change: opacity, backdrop-filter;
+  animation: historyBackdropIn 0.16s ease-out both;
+  will-change: opacity;
 }
 
 .history-drawer-panel {
   transform-origin: right center;
-  will-change: transform, opacity, filter;
-  animation: historyDrawerSlideIn 0.36s cubic-bezier(0.16, 1, 0.3, 1) both;
+  transform: translateZ(0);
+  contain: paint;
+  will-change: transform, opacity;
+  animation: historyDrawerSlideIn 0.24s cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .history-drawer-panel > * {

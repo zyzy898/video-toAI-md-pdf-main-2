@@ -244,6 +244,33 @@ const DEFAULT_PROGRESS_BOARD: ProgressBoard = {
   currentFile: "",
 };
 
+const HERO_TITLE_CANVAS_COLORS = [
+  "rgba(0, 153, 255, 1)",
+  "rgba(0, 153, 255, 0.9)",
+  "rgba(0, 153, 255, 0.8)",
+  "rgba(0, 153, 255, 0.7)",
+  "rgba(0, 153, 255, 0.6)",
+  "rgba(0, 153, 255, 0.5)",
+  "rgba(0, 153, 255, 0.4)",
+  "rgba(0, 153, 255, 0.3)",
+  "rgba(0, 153, 255, 0.2)",
+  "rgba(0, 153, 255, 0.1)",
+];
+
+const HERO_SUBTITLE_CANVAS_COLORS = [
+  "rgba(0, 153, 255, 0.9)",
+  "rgba(0, 153, 255, 0.75)",
+  "rgba(56, 189, 248, 0.68)",
+  "rgba(96, 165, 250, 0.56)",
+  "rgba(147, 197, 253, 0.46)",
+];
+
+const ANALYZE_BUTTON_GRADIENT_COLORS = [
+  "rgb(45, 212, 191)",
+  "rgb(56, 189, 248)",
+  "rgb(96, 165, 250)",
+];
+
 const isValidVideo = (filename: string) => {
   const ext = String(filename || "").split(".").pop()?.toLowerCase() || "";
   return VALID_VIDEO_EXTENSIONS.has(ext);
@@ -912,13 +939,13 @@ export default function App() {
   const startSinglePolling = useCallback(() => {
     stopSinglePolling();
     void pullSingleProgress();
-    singleTimerRef.current = setInterval(() => void pullSingleProgress(), 1200);
+    singleTimerRef.current = setInterval(() => void pullSingleProgress(), 2000);
   }, [pullSingleProgress, stopSinglePolling]);
 
   const startBatchPolling = useCallback(() => {
     stopBatchPolling();
     void pullBatchProgress();
-    batchTimerRef.current = setInterval(() => void pullBatchProgress(), 1200);
+    batchTimerRef.current = setInterval(() => void pullBatchProgress(), 2000);
   }, [pullBatchProgress, stopBatchPolling]);
 
   const uploadSingleFileWithResume = useCallback(
@@ -1420,6 +1447,8 @@ export default function App() {
   const hasSingleResult = Boolean(resultData);
   const hasBatchResult = Boolean(batchResultData);
   const hasAnyResult = hasSingleResult || hasBatchResult;
+  const drawerOverlayActive =
+    historyDrawerOpen || settingsDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
   const handleStudioClick = useCallback(() => {
     if (typeof window === "undefined") return;
 
@@ -1512,18 +1541,8 @@ export default function App() {
                 text=" 不止是提取   更是理解"
                 className="hero-toast-anchor inline align-middle"
                 backgroundClassName="bg-blue-600 dark:bg-blue-700"
-                colors={[
-                  "rgba(0, 153, 255, 1)",
-                  "rgba(0, 153, 255, 0.9)",
-                  "rgba(0, 153, 255, 0.8)",
-                  "rgba(0, 153, 255, 0.7)",
-                  "rgba(0, 153, 255, 0.6)",
-                  "rgba(0, 153, 255, 0.5)",
-                  "rgba(0, 153, 255, 0.4)",
-                  "rgba(0, 153, 255, 0.3)",
-                  "rgba(0, 153, 255, 0.2)",
-                  "rgba(0, 153, 255, 0.1)",
-                ]}
+                colors={HERO_TITLE_CANVAS_COLORS}
+                animating={!drawerOverlayActive}
                 lineGap={4}
                 animationDuration={20}
               />
@@ -1536,13 +1555,8 @@ export default function App() {
                 text="让信息沉淀更高效，Turn insights into docs。"
                 className="inline align-middle"
                 backgroundClassName="bg-blue-600/80 dark:bg-blue-700/80"
-                colors={[
-                  "rgba(0, 153, 255, 0.9)",
-                  "rgba(0, 153, 255, 0.75)",
-                  "rgba(56, 189, 248, 0.68)",
-                  "rgba(96, 165, 250, 0.56)",
-                  "rgba(147, 197, 253, 0.46)",
-                ]}
+                colors={HERO_SUBTITLE_CANVAS_COLORS}
+                animating={!drawerOverlayActive}
                 lineGap={4}
                 animationDuration={22}
               />
@@ -1673,13 +1687,10 @@ export default function App() {
               <NoiseBackground
                 containerClassName="mt-3 mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5"
                 className="w-full"
-                gradientColors={[
-                  "rgb(45, 212, 191)",
-                  "rgb(56, 189, 248)",
-                  "rgb(96, 165, 250)",
-                ]}
+                gradientColors={ANALYZE_BUTTON_GRADIENT_COLORS}
                 noiseIntensity={0.07}
                 speed={0.13}
+                animating={!drawerOverlayActive}
               >
                 <button
                   aria-busy={isAnalyzing}
@@ -1938,7 +1949,7 @@ export default function App() {
               <div className="pointer-events-none relative h-full w-full">
                 <aside
                   id="history-drawer"
-                  className="history-drawer-panel pointer-events-auto ml-auto flex h-full w-[min(92vw,360px)] flex-col border-l border-neutral-700/80 bg-neutral-900/96 py-4 shadow-[-16px_0_34px_rgba(2,6,23,0.45)] backdrop-blur-xl"
+                  className="history-drawer-panel pointer-events-auto ml-auto flex h-full w-[min(92vw,360px)] flex-col border-l border-neutral-700/80 bg-neutral-900/97 py-4 shadow-[-16px_0_34px_rgba(2,6,23,0.45)]"
                 >
                   <div className="border-b border-neutral-800 px-4 pb-3">
                     <div className="flex items-center justify-between gap-2">
@@ -2135,7 +2146,7 @@ export default function App() {
               <div className="pointer-events-none relative h-full w-full">
                 <aside
                   id="settings-drawer"
-                  className="history-drawer-panel pointer-events-auto ml-auto flex h-full w-[min(92vw,360px)] flex-col border-l border-neutral-700/80 bg-neutral-900/96 py-4 shadow-[-16px_0_34px_rgba(2,6,23,0.45)] backdrop-blur-xl"
+                  className="history-drawer-panel pointer-events-auto ml-auto flex h-full w-[min(92vw,360px)] flex-col border-l border-neutral-700/80 bg-neutral-900/97 py-4 shadow-[-16px_0_34px_rgba(2,6,23,0.45)]"
                 >
                   <div className="border-b border-neutral-800 px-4 pb-3">
                     <div className="flex items-center justify-between gap-2">

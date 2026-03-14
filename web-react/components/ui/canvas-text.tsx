@@ -12,6 +12,7 @@ interface CanvasTextProps {
   lineGap?: number;
   curveIntensity?: number;
   overlay?: boolean;
+  animating?: boolean;
 }
 
 function resolveColor(color: string): string {
@@ -35,6 +36,7 @@ export function CanvasText({
   lineGap = 10,
   curveIntensity = 60,
   overlay = false,
+  animating = true,
 }: CanvasTextProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textRef = useRef<HTMLSpanElement>(null);
@@ -85,10 +87,7 @@ export function CanvasText({
     const numLines = Math.floor(height / lineGap) + 10;
     startTimeRef.current = performance.now();
 
-    const animate = (currentTime: number) => {
-      const elapsed = (currentTime - startTimeRef.current) / 1000;
-      const phase = (elapsed / animationDuration) * Math.PI * 2;
-
+    const renderFrame = (phase: number) => {
       ctx.fillStyle = bgColor;
       ctx.fillRect(0, 0, width, height);
 
@@ -117,6 +116,17 @@ export function CanvasText({
 
       textEl.style.backgroundImage = `url(${canvas.toDataURL()})`;
       textEl.style.backgroundSize = `${width}px ${height}px`;
+    };
+
+    if (!animating) {
+      renderFrame(0);
+      return;
+    }
+
+    const animate = (currentTime: number) => {
+      const elapsed = (currentTime - startTimeRef.current) / 1000;
+      const phase = (elapsed / animationDuration) * Math.PI * 2;
+      renderFrame(phase);
       animationRef.current = requestAnimationFrame(animate);
     };
 
@@ -132,6 +142,7 @@ export function CanvasText({
     lineWidth,
     lineGap,
     curveIntensity,
+    animating,
   ]);
 
   return (
