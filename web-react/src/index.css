@@ -793,6 +793,47 @@ body {
   transform: translateX(1px) scale(1.05);
 }
 
+.brand-nav-btn {
+  line-height: 1;
+}
+
+.brand-nav-icon-wrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.08rem;
+  height: 2.08rem;
+  flex-shrink: 0;
+  transition: transform 0.16s ease;
+}
+
+.brand-nav-icon {
+  width: 1.88rem;
+  height: 1.88rem;
+  display: block;
+  filter: saturate(1) brightness(0.98);
+  transition: filter 0.2s ease, transform 0.2s ease;
+}
+
+.brand-nav-btn:hover .brand-nav-icon-wrap,
+.brand-nav-btn:focus-visible .brand-nav-icon-wrap {
+  transform: translateY(-0.5px);
+}
+
+.brand-nav-btn:hover .brand-nav-icon,
+.brand-nav-btn:focus-visible .brand-nav-icon {
+  filter: saturate(1.08) brightness(1.05);
+  transform: scale(1.04);
+}
+
+.brand-nav-btn:active .brand-nav-icon-wrap {
+  transform: translateY(0.5px) scale(0.98);
+}
+
+.brand-nav-btn:active .brand-nav-icon {
+  transform: scale(0.96);
+}
+
 .history-drawer-overlay {
   animation: overlayIn 0.2s ease-out both;
 }
@@ -1397,6 +1438,9 @@ body {
   .zip-download-btn,
   .file-status-chip,
   .history-nav-btn,
+  .brand-nav-btn,
+  .brand-nav-icon-wrap,
+  .brand-nav-icon,
   .app-main button:not(.analyze-action-btn),
   .list-item-pop,
   .progress-fill-anim {

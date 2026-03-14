@@ -1428,9 +1428,12 @@ export default function App() {
           <button
             type="button"
             onClick={handleStudioClick}
-            className="cursor-cursor-pointer rounded-sm text-sm uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:text-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70 font-bold rounded-sm text-sm uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:text-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70"
+            className="brand-nav-btn inline-flex items-center gap-1.5 rounded-sm text-sm font-bold uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:text-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70"
           >
-            Video Insights
+            <span className="brand-nav-icon-wrap" aria-hidden="true">
+              <img src="/vite.ico" alt="" className="brand-nav-icon" />
+            </span>
+            <span>Video Insights</span>
           </button>
           <div className="flex items-center gap-2">
             <button
