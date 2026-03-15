@@ -287,6 +287,7 @@ const MAX_VISION_MAX = 10;
 const FPS_MIN = 0.1;
 const FPS_MAX = 10;
 const FPS_STEP = 0.1;
+const HERO_ANIMATION_TOP_THRESHOLD = 4;
 
 const isValidVideo = (filename: string) => {
   const ext = String(filename || "").split(".").pop()?.toLowerCase() || "";
@@ -749,6 +750,7 @@ export default function App() {
   const [showErrorToast, setShowErrorToast] = useState(false);
   const [successMessage, setSuccessMessage] = useState("");
   const [showSuccessToast, setShowSuccessToast] = useState(false);
+  const [heroAnimationActive, setHeroAnimationActive] = useState(true);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
@@ -825,6 +827,32 @@ export default function App() {
       if (pendingDeleteHistory) setPendingDeleteHistory(null);
     }
   }, [historyDrawerOpen, pendingDeleteHistory, showClearHistoryConfirm]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    let rafId = 0;
+    const syncHeroAnimationState = () => {
+      const currentScrollTop = window.scrollY || document.documentElement.scrollTop || 0;
+      const nextActive = currentScrollTop <= HERO_ANIMATION_TOP_THRESHOLD;
+      setHeroAnimationActive((prev) => (prev === nextActive ? prev : nextActive));
+    };
+
+    const handleScroll = () => {
+      if (rafId) return;
+      rafId = window.requestAnimationFrame(() => {
+        rafId = 0;
+        syncHeroAnimationState();
+      });
+    };
+
+    syncHeroAnimationState();
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      if (rafId) window.cancelAnimationFrame(rafId);
+      window.removeEventListener("scroll", handleScroll);
+    };
+  }, []);
 
   const withHistoryClientHeader = useCallback((options: RequestInit = {}) => {
     const headers = new Headers(options.headers || {});
@@ -1689,6 +1717,7 @@ export default function App() {
   const singleResultSteps = resultData?.steps || EMPTY_STEPS;
   const drawerOverlayActive =
     historyDrawerOpen || settingsDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
+  const heroCanvasAnimating = !drawerOverlayActive && heroAnimationActive;
   const handleStudioClick = useCallback(() => {
     if (typeof window === "undefined") return;
 
@@ -1782,7 +1811,7 @@ export default function App() {
                 className="hero-toast-anchor inline align-middle"
                 backgroundClassName="bg-blue-600 dark:bg-blue-700"
                 colors={HERO_TITLE_CANVAS_COLORS}
-                animating={!drawerOverlayActive}
+                animating={heroCanvasAnimating}
                 lineGap={4}
                 animationDuration={20}
               />
@@ -1796,7 +1825,7 @@ export default function App() {
                 className="inline align-middle"
                 backgroundClassName="bg-blue-600/80 dark:bg-blue-700/80"
                 colors={HERO_SUBTITLE_CANVAS_COLORS}
-                animating={!drawerOverlayActive}
+                animating={heroCanvasAnimating}
                 lineGap={4}
                 animationDuration={22}
               />
