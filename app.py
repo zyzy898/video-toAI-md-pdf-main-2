@@ -1,4 +1,5 @@
-import asyncio
+﻿import asyncio
+import base64
 import json
 import logging
 import os
@@ -13,6 +14,7 @@ from threading import Lock, RLock
 from typing import Any, Callable, Dict, List, Tuple
 from uuid import uuid4
 
+from dotenv import load_dotenv
 from flask import Flask, g, jsonify, request, send_file, send_from_directory
 from werkzeug.utils import secure_filename
 
@@ -20,6 +22,7 @@ from video_analyzer_agent import VideoAnalyzerAgent
 
 app = Flask(__name__)
 app.secret_key = "video-analyzer-secret-key"
+load_dotenv()
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 UPLOAD_ROOT = (PROJECT_ROOT / "uploads").resolve()
@@ -53,18 +56,37 @@ FPS_MIN = 0.1
 FPS_MAX = 10.0
 DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 MAX_UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024
+UPLOAD_IN_MEMORY_MAX_FILE_SIZE = 64 * 1024 * 1024
+UPLOAD_IN_MEMORY_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 DEFAULT_MODEL_NAME = "doubao-seed-2-0-pro-260215"
 DEFAULT_MODEL_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_content_plugin"
+RISK_MAX_FRAMES = 6
+RISK_BLOCK_THRESHOLD = 0.8
+RISK_RESTRICT_THRESHOLD = 0.55
+RISK_BLOCK_ON_RESTRICT = True
+RISK_DIMENSION_HARD_BLOCK_SCORE = 0.72
+RISK_CRITICAL_SCORE = 0.9
+CONTENT_POLICY_BLOCK_MESSAGE = (
+    "上传已被风控强拦截：检测到高风险色情/裸露/血腥/暴力内容，"
+    "系统已直接拒绝该视频上传。请删除敏感画面后重试"
+)
+TEXT_RISK_BLOCK_THRESHOLD = 0.78
+TEXT_RISK_RESTRICT_THRESHOLD = 0.5
 HISTORY_OWNER_HEADER = "X-Client-ID"
 HISTORY_OWNER_COOKIE = "video_insights_client_id"
 HISTORY_OWNER_COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 2
 HISTORY_OWNER_MAX_LEN = 120
 HISTORY_OWNER_PATTERN = re.compile(r"[^A-Za-z0-9._-]")
+QUARANTINE_ROOT = (UPLOAD_ROOT / ".quarantine").resolve()
+UPLOAD_STAGING_ROOT = (UPLOAD_ROOT / ".staging").resolve()
+RISK_KEYWORD_LEXICON_PATH = (PROJECT_ROOT / "risk_keyword_lexicon.json").resolve()
 
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
 UPLOAD_SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+QUARANTINE_ROOT.mkdir(parents=True, exist_ok=True)
+UPLOAD_STAGING_ROOT.mkdir(parents=True, exist_ok=True)
 
 logger = logging.getLogger(__name__)
 history_lock = RLock()
@@ -85,6 +107,18 @@ single_progress: Dict[str, Any] = {
     "stage": "idle",
     "message": "",
 }
+upload_memory_buffers: Dict[str, Dict[int, bytes]] = {}
+upload_memory_reserved_bytes: Dict[str, int] = {}
+upload_memory_reserved_total_bytes = 0
+risk_keyword_lexicon_lock = RLock()
+risk_keyword_lexicon_cache_mtime_ns: int | None = None
+risk_keyword_lexicon_cache_data: Dict[str, Dict[str, Any]] | None = None
+
+
+class ContentPolicyBlockedError(RuntimeError):
+    def __init__(self, message: str, risk: Dict[str, Any]):
+        super().__init__(message)
+        self.risk = risk
 
 
 def _update_batch_progress(**kwargs: Any) -> None:
@@ -184,7 +218,7 @@ def _normalize_provider_error(error: Any, default_status: int = 500) -> Tuple[st
     )
     if is_web_search_not_open:
         return (
-            f"联网搜索功能未开通。请前往火山引擎控制台开通后重试：{WEB_SEARCH_ACTIVATION_URL}{request_id_text}",
+            f"联网搜索功能未开通。请先开通后重试：{WEB_SEARCH_ACTIVATION_URL}{request_id_text}",
             400,
             True,
         )
@@ -195,17 +229,11 @@ def _normalize_provider_error(error: Any, default_status: int = 500) -> Tuple[st
         or "invalid_api_key" in lower
         or "incorrect api key provided" in lower
         or "api key format is incorrect" in lower
-        or (
-            "api key" in lower
-            and ("invalid" in lower or "is invalid" in lower or "无效" in raw_message)
-        )
+        or ("api key" in lower and ("invalid" in lower or "is invalid" in lower or "无效" in raw_message))
     )
     if is_auth_error:
         return (
-            (
-                "模型鉴权失败：API Key 无效、已过期，或与当前平台 / Base URL 不匹配。"
-                f"请检查后重试{request_id_text}"
-            ),
+            f"模型鉴权失败：API Key 无效、已过期，或与当前平台/Base URL 不匹配。{request_id_text}",
             401,
             True,
         )
@@ -214,27 +242,27 @@ def _normalize_provider_error(error: Any, default_status: int = 500) -> Tuple[st
         "model or endpoint" in lower and "not found" in lower
     ):
         return (
-            f"模型连接失败：模型或接口不存在，请检查 Base URL 和模型名称{request_id_text}",
+            f"模型连接失败：模型或接口不存在，请检查 Base URL 和模型名称。{request_id_text}",
             400,
             True,
         )
 
     if "does not exist or you do not have access" in lower:
         return (
-            f"模型连接失败：模型不存在，或当前账号没有访问权限{request_id_text}",
+            f"模型连接失败：模型不存在或当前账号无访问权限。{request_id_text}",
             403,
             True,
         )
 
     if "rate limit" in lower or "too many requests" in lower:
-        return (f"请求过于频繁，请稍后重试{request_id_text}", 429, True)
+        return (f"请求过于频繁，请稍后重试。{request_id_text}", 429, True)
 
     if "timeout" in lower or "timed out" in lower:
-        return (f"模型服务请求超时，请稍后重试{request_id_text}", 504, True)
+        return (f"模型服务请求超时，请稍后重试。{request_id_text}", 504, True)
 
     status_code = _extract_http_status_code(raw_message)
     if status_code is not None and 400 <= status_code <= 599:
-        return (f"模型服务调用失败（HTTP {status_code}）{request_id_text}", status_code, True)
+        return (f"模型服务调用失败（HTTP {status_code}）。{request_id_text}", status_code, True)
 
     return raw_message, default_status, False
 
@@ -471,6 +499,7 @@ def _save_upload_session(upload_id: str, session: Dict[str, Any]) -> None:
 
 
 def _delete_upload_session(upload_id: str) -> None:
+    _release_upload_memory(upload_id)
     for path in (_upload_session_json_path(upload_id), _upload_session_temp_path(upload_id)):
         if not path.exists():
             continue
@@ -478,6 +507,35 @@ def _delete_upload_session(upload_id: str) -> None:
             path.unlink()
         except OSError:
             logger.warning("删除上传会话文件失败: %s", path)
+
+
+def _reserve_upload_memory(upload_id: str, total_size: int) -> bool:
+    global upload_memory_reserved_total_bytes
+    size = _safe_int(total_size, 0, 0)
+    if size <= 0:
+        return False
+    if upload_id in upload_memory_reserved_bytes:
+        upload_memory_buffers.setdefault(upload_id, {})
+        return True
+    if upload_memory_reserved_total_bytes + size > UPLOAD_IN_MEMORY_MAX_TOTAL_BYTES:
+        return False
+    upload_memory_reserved_bytes[upload_id] = size
+    upload_memory_reserved_total_bytes += size
+    upload_memory_buffers.setdefault(upload_id, {})
+    return True
+
+
+def _release_upload_memory(upload_id: str) -> None:
+    global upload_memory_reserved_total_bytes
+    reserved = upload_memory_reserved_bytes.pop(upload_id, 0)
+    if reserved > 0:
+        upload_memory_reserved_total_bytes = max(0, upload_memory_reserved_total_bytes - reserved)
+    upload_memory_buffers.pop(upload_id, None)
+
+
+def _get_chunk_storage_mode(session: Dict[str, Any]) -> str:
+    mode = str(session.get("storage_mode", "disk")).strip().lower()
+    return "memory" if mode == "memory" else "disk"
 
 
 def _create_unique_output_dir(video_path: Path) -> Path:
@@ -492,6 +550,750 @@ def _create_unique_output_dir(video_path: Path) -> Path:
 
     candidate.mkdir(parents=True, exist_ok=False)
     return candidate
+
+
+def _normalize_risk_score(value: Any, default: float = 0.0) -> float:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        score = default
+    return max(0.0, min(1.0, score))
+
+
+def _risk_decision_rank(decision: str) -> int:
+    order = {"allow": 0, "restrict": 1, "block": 2}
+    return order.get(str(decision or "").strip().lower(), 0)
+
+
+def _risk_decision_from_rank(rank: int) -> str:
+    if rank >= 2:
+        return "block"
+    if rank <= 0:
+        return "allow"
+    return "restrict"
+
+
+def _build_risk_timestamps(max_frames: int) -> List[int]:
+    base = [0, 2, 5, 10, 15, 25, 35, 50, 70, 95]
+    frame_count = _safe_int(max_frames, RISK_MAX_FRAMES, 3, len(base))
+    return base[:frame_count]
+
+
+def _is_image_input_not_supported_error(error: Any) -> bool:
+    text = str(error or "").lower()
+    if not text:
+        return False
+    image_tokens = ("image_url", "image input", "vision", "multimodal", "multi-modal")
+    unsupported_tokens = (
+        "not support",
+        "unsupported",
+        "only supported",
+        "does not support",
+        "invalid content type",
+        "not allowed",
+    )
+    has_image_hint = any(token in text for token in image_tokens)
+    has_unsupported_hint = any(token in text for token in unsupported_tokens)
+    return has_image_hint and has_unsupported_hint
+
+
+def _normalize_risk_keyword_text(raw_text: str) -> str:
+    text = str(raw_text or "").lower()
+    text = re.sub(r"[^\w\u4e00-\u9fff]+", " ", text, flags=re.UNICODE)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _count_keyword_hits(
+    text: str, explicit_keywords: List[str], medium_keywords: List[str]
+) -> Tuple[int, int, List[str]]:
+    hit_keywords: List[str] = []
+    explicit_hits = 0
+    medium_hits = 0
+
+    for keyword in explicit_keywords:
+        if keyword and keyword in text:
+            explicit_hits += 1
+            if len(hit_keywords) < 6:
+                hit_keywords.append(keyword)
+    for keyword in medium_keywords:
+        if keyword and keyword in text:
+            medium_hits += 1
+            if len(hit_keywords) < 6 and keyword not in hit_keywords:
+                hit_keywords.append(keyword)
+    return explicit_hits, medium_hits, hit_keywords
+
+
+def _default_text_risk_keyword_lexicon() -> Dict[str, Dict[str, Any]]:
+    # Keep a minimal in-code schema fallback.
+    # The runtime source of truth should be risk_keyword_lexicon.json.
+    return {
+        "nudity": {
+            "explicit": [],
+            "medium": [],
+            "reason_code_high": "EXPLICIT_PORNOGRAPHIC_CONTENT",
+            "reason_code_medium": "POTENTIAL_PORNOGRAPHIC_CONTENT",
+            "reason_label": "色情/裸露",
+        },
+        "violence": {
+            "explicit": [],
+            "medium": [],
+            "reason_code_high": "SEVERE_VIOLENCE_CONTENT",
+            "reason_code_medium": "POTENTIAL_VIOLENCE_CONTENT",
+            "reason_label": "暴力",
+        },
+        "gore": {
+            "explicit": [],
+            "medium": [],
+            "reason_code_high": "GORE_CONTENT",
+            "reason_code_medium": "POTENTIAL_GORE_CONTENT",
+            "reason_label": "血腥",
+        },
+    }
+
+
+def _normalize_text_risk_keyword_list(raw_keywords: Any) -> List[str]:
+    if not isinstance(raw_keywords, list):
+        return []
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in raw_keywords:
+        keyword = str(item or "").strip().lower()
+        if not keyword or keyword in seen:
+            continue
+        seen.add(keyword)
+        normalized.append(keyword)
+    return normalized
+
+
+def _normalize_text_risk_reason_code(raw_code: Any, fallback: str) -> str:
+    code = re.sub(r"[^A-Z0-9_]+", "_", str(raw_code or "").strip().upper()).strip("_")
+    return code or fallback
+
+
+def _normalize_text_risk_keyword_lexicon(
+    loaded: Any, defaults: Dict[str, Dict[str, Any]]
+) -> Dict[str, Dict[str, Any]]:
+    source = loaded if isinstance(loaded, dict) else {}
+    normalized: Dict[str, Dict[str, Any]] = {}
+
+    for dimension in ("nudity", "violence", "gore"):
+        default_item = defaults[dimension]
+        source_item = source.get(dimension, {})
+        source_dict = source_item if isinstance(source_item, dict) else {}
+
+        explicit_keywords = _normalize_text_risk_keyword_list(source_dict.get("explicit"))
+        medium_keywords = _normalize_text_risk_keyword_list(source_dict.get("medium"))
+        reason_code_high = _normalize_text_risk_reason_code(
+            source_dict.get("reason_code_high"), str(default_item["reason_code_high"])
+        )
+        reason_code_medium = _normalize_text_risk_reason_code(
+            source_dict.get("reason_code_medium"), str(default_item["reason_code_medium"])
+        )
+        reason_label = str(source_dict.get("reason_label", "")).strip() or str(
+            default_item["reason_label"]
+        )
+
+        normalized[dimension] = {
+            "explicit": explicit_keywords,
+            "medium": medium_keywords,
+            "reason_code_high": reason_code_high,
+            "reason_code_medium": reason_code_medium,
+            "reason_label": reason_label,
+        }
+
+    return normalized
+
+
+def _load_text_risk_keyword_lexicon() -> Dict[str, Dict[str, Any]]:
+    global risk_keyword_lexicon_cache_mtime_ns, risk_keyword_lexicon_cache_data
+
+    defaults = _default_text_risk_keyword_lexicon()
+    lexicon_path = RISK_KEYWORD_LEXICON_PATH
+
+    try:
+        stat_info = lexicon_path.stat()
+        current_mtime_ns = int(getattr(stat_info, "st_mtime_ns", int(stat_info.st_mtime * 1e9)))
+    except OSError:
+        logger.warning("字幕关键词风控词库文件不存在，已使用空词库默认配置: %s", lexicon_path)
+        return defaults
+
+    with risk_keyword_lexicon_lock:
+        if (
+            risk_keyword_lexicon_cache_data is not None
+            and risk_keyword_lexicon_cache_mtime_ns == current_mtime_ns
+        ):
+            return risk_keyword_lexicon_cache_data
+
+        try:
+            with open(lexicon_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            merged = _normalize_text_risk_keyword_lexicon(loaded, defaults)
+        except Exception as exc:
+            logger.warning("加载字幕关键词风控词库失败，已使用空词库默认配置: %s", exc)
+            merged = defaults
+
+        risk_keyword_lexicon_cache_mtime_ns = current_mtime_ns
+        risk_keyword_lexicon_cache_data = merged
+        return merged
+
+
+def _build_text_fallback_risk_result(
+    combined_text: str, subtitle_text: str, filename_text: str
+) -> Dict[str, Any]:
+    keyword_groups = _load_text_risk_keyword_lexicon()
+
+    dimensions: Dict[str, Dict[str, Any]] = {}
+    scores: Dict[str, float] = {}
+    fallback_evidence: Dict[str, Any] = {"subtitle_used": bool(subtitle_text), "filename_used": bool(filename_text)}
+
+    for key, config in keyword_groups.items():
+        explicit_hits, medium_hits, hit_keywords = _count_keyword_hits(
+            combined_text, config["explicit"], config["medium"]
+        )
+        subtitle_explicit_hits, subtitle_medium_hits, _ = _count_keyword_hits(
+            subtitle_text, config["explicit"], config["medium"]
+        )
+        filename_explicit_hits, filename_medium_hits, _ = _count_keyword_hits(
+            filename_text, config["explicit"], config["medium"]
+        )
+
+        score = min(
+            1.0,
+            explicit_hits * 0.36
+            + medium_hits * 0.12
+            + filename_explicit_hits * 0.25
+            + filename_medium_hits * 0.1,
+        )
+        scores[key] = round(score, 3)
+        dimensions[key] = {
+            "score": scores[key],
+            "label": "explicit" if explicit_hits > 0 else ("mild" if medium_hits > 0 else "none"),
+            "evidence": ", ".join(hit_keywords[:4]),
+            "subtitle_hits": subtitle_explicit_hits + subtitle_medium_hits,
+            "filename_hits": filename_explicit_hits + filename_medium_hits,
+        }
+
+    max_dimension = max(scores, key=scores.get) if scores else "nudity"
+    max_score = scores.get(max_dimension, 0.0)
+    decision = "allow"
+    if max_score >= TEXT_RISK_BLOCK_THRESHOLD:
+        decision = "block"
+    elif max_score >= TEXT_RISK_RESTRICT_THRESHOLD:
+        decision = "restrict"
+
+    risk_level = "low"
+    if decision == "block":
+        risk_level = "high"
+    elif decision == "restrict":
+        risk_level = "medium"
+
+    selected_group = keyword_groups[max_dimension]
+    reason_code = "TEXT_SAFE_CONTENT"
+    if decision == "block":
+        reason_code = str(selected_group["reason_code_high"])
+    elif decision == "restrict":
+        reason_code = str(selected_group["reason_code_medium"])
+
+    if decision == "allow":
+        reason = "未在字幕/文件名中检测到明显黄暴血腥关键词。"
+    else:
+        reason = (
+            f"字幕关键词风控检测到{selected_group['reason_label']}相关高风险线索，已触发{risk_level}拦截策略。"
+        )
+
+    hit_total = sum(
+        int(dimensions[item].get("subtitle_hits", 0)) + int(dimensions[item].get("filename_hits", 0))
+        for item in dimensions
+    )
+    confidence = min(0.95, 0.45 + hit_total * 0.07)
+
+    return {
+        "decision": decision,
+        "risk_level": risk_level,
+        "reason_code": reason_code,
+        "reason": reason,
+        "confidence": round(confidence, 3),
+        "scores": scores,
+        "dimensions": dimensions,
+        "frame_count": 0,
+        "fallback_mode": "subtitle_keyword_risk_gate",
+        "fallback_evidence": fallback_evidence,
+    }
+
+
+def _run_text_fallback_risk_gate(
+    agent: VideoAnalyzerAgent, video_path: Path, output_dir: Path
+) -> Dict[str, Any]:
+    subtitle_dir = output_dir / ".risk_subtitles"
+    subtitle_dir.mkdir(parents=True, exist_ok=True)
+
+    subtitle_text = ""
+    filename_text = _normalize_risk_keyword_text(video_path.name)
+    try:
+        srt_path = agent.generate_subtitles(str(video_path), str(subtitle_dir))
+        subtitles = agent.parse_srt(srt_path)
+        subtitle_text = _normalize_risk_keyword_text(
+            "\n".join(str(item.get("text", "")).strip() for item in subtitles if item.get("text"))
+        )
+    except Exception as exc:
+        logger.warning("Text fallback subtitle generation failed: %s", exc)
+    finally:
+        shutil.rmtree(subtitle_dir, ignore_errors=True)
+
+    combined_text = " ".join(part for part in [subtitle_text, filename_text] if part).strip()
+    if not combined_text:
+        return {
+            "decision": "block",
+            "risk_level": "high",
+            "reason_code": "TEXT_RISK_SIGNAL_INSUFFICIENT",
+            "reason": "视觉模型不支持图片输入，且字幕关键词信号不足，已按高风险默认拒绝上传。",
+            "confidence": 0.62,
+            "scores": {"nudity": 0.0, "violence": 0.0, "gore": 0.0},
+            "dimensions": {},
+            "frame_count": 0,
+            "fallback_mode": "subtitle_keyword_risk_gate",
+            "fallback_evidence": {"subtitle_used": False, "filename_used": bool(filename_text)},
+        }
+    return _build_text_fallback_risk_result(combined_text, subtitle_text, filename_text)
+
+
+def _sample_risk_frames(
+    agent: VideoAnalyzerAgent, video_path: Path, output_dir: Path, max_frames: int
+) -> Tuple[List[Path], Path]:
+    frame_dir = output_dir / ".risk_frames"
+    frame_dir.mkdir(parents=True, exist_ok=True)
+    frame_paths: List[Path] = []
+    for idx, second in enumerate(_build_risk_timestamps(max_frames), start=1):
+        frame_path = agent.generate_screenshot(video_path, frame_dir, second, step_num=idx)
+        if frame_path is not None and frame_path.exists():
+            frame_paths.append(frame_path)
+    return frame_paths, frame_dir
+
+
+def _normalize_risk_result(raw_result: Dict[str, Any], frame_count: int) -> Dict[str, Any]:
+    dimensions: Dict[str, Dict[str, Any]] = {}
+    for key in ("nudity", "violence", "gore"):
+        section = raw_result.get(key, {})
+        if isinstance(section, dict):
+            score = _normalize_risk_score(section.get("score", section.get("probability", 0.0)))
+            label = str(section.get("label", "") or "").strip().lower()
+            evidence = str(section.get("evidence", section.get("reason", "")) or "").strip()
+        else:
+            score = _normalize_risk_score(section, 0.0)
+            label = ""
+            evidence = ""
+        dimensions[key] = {"score": score, "label": label, "evidence": evidence[:180]}
+
+    scores = {key: dimensions[key]["score"] for key in dimensions}
+    max_dimension = max(scores, key=scores.get) if scores else "nudity"
+    max_score = scores.get(max_dimension, 0.0)
+    has_explicit_or_severe_label = any(
+        str(dimensions.get(key, {}).get("label", "")).lower() in {"explicit", "severe"}
+        and float(dimensions.get(key, {}).get("score", 0.0)) >= 0.45
+        for key in dimensions
+    )
+    has_hard_block_score = any(
+        float(dimensions.get(key, {}).get("score", 0.0)) >= RISK_DIMENSION_HARD_BLOCK_SCORE
+        for key in dimensions
+    )
+    has_critical_score = any(
+        float(dimensions.get(key, {}).get("score", 0.0)) >= RISK_CRITICAL_SCORE
+        for key in dimensions
+    )
+    model_reason_code = str(raw_result.get("reason_code", "") or "").strip().upper()
+    has_hard_block_reason_code = model_reason_code in {
+        "EXPLICIT_PORNOGRAPHIC_CONTENT",
+        "SEVERE_VIOLENCE_CONTENT",
+        "GORE_CONTENT",
+        "SEXUAL_VIOLENCE_CONTENT",
+    } or model_reason_code.endswith("_HIGH")
+    has_hard_block_evidence = (
+        has_explicit_or_severe_label
+        or has_hard_block_score
+        or has_critical_score
+        or has_hard_block_reason_code
+    )
+
+    score_based_decision = "allow"
+    if max_score >= RISK_BLOCK_THRESHOLD:
+        score_based_decision = "block"
+    elif max_score >= RISK_RESTRICT_THRESHOLD:
+        score_based_decision = "restrict"
+    if has_hard_block_evidence:
+        score_based_decision = "block"
+
+    decision = str(raw_result.get("decision", "") or "").strip().lower()
+    if decision not in {"allow", "restrict", "block"}:
+        decision = score_based_decision
+    else:
+        # Use the stricter result between model text decision and numeric evidence.
+        decision = _risk_decision_from_rank(
+            max(_risk_decision_rank(decision), _risk_decision_rank(score_based_decision))
+        )
+
+    confidence = _normalize_risk_score(raw_result.get("confidence", 0.6), 0.6)
+    # Keep strict blocking when hard evidence exists; only mild low-confidence results may downgrade.
+    if confidence < 0.35 and not has_hard_block_evidence:
+        if decision == "restrict":
+            decision = "allow"
+
+    risk_level = str(raw_result.get("risk_level", "") or "").strip().lower()
+    if risk_level not in {"low", "medium", "high"}:
+        if decision == "block":
+            risk_level = "high"
+        elif decision == "restrict":
+            risk_level = "medium"
+        else:
+            risk_level = "low"
+
+    reason_code = str(raw_result.get("reason_code", "") or "").strip().upper()
+    if not reason_code:
+        if decision == "allow":
+            reason_code = "SAFE_CONTENT"
+        elif decision == "restrict":
+            reason_code = f"{max_dimension.upper()}_MEDIUM"
+        else:
+            reason_code = f"{max_dimension.upper()}_HIGH"
+
+    reason = str(raw_result.get("reason", "") or "").strip()
+    if not reason:
+        if decision == "allow":
+            reason = "No high-risk nudity, violence, or gore was detected."
+        elif decision == "restrict":
+            reason = "Potentially sensitive content was detected."
+        else:
+            reason = "High-risk sensitive content was detected."
+
+    return {
+        "decision": decision,
+        "risk_level": risk_level,
+        "reason_code": reason_code,
+        "reason": reason,
+        "confidence": confidence,
+        "scores": scores,
+        "dimensions": dimensions,
+        "frame_count": frame_count,
+    }
+
+
+async def _request_risk_decision(
+    agent: VideoAnalyzerAgent, frame_paths: List[Path]
+) -> Dict[str, Any]:
+    prompt_schema = {
+        "nudity": {"score": 0.0, "label": "none|mild|explicit", "evidence": ""},
+        "violence": {"score": 0.0, "label": "none|mild|severe", "evidence": ""},
+        "gore": {"score": 0.0, "label": "none|mild|severe", "evidence": ""},
+        "decision": "allow|restrict|block",
+        "risk_level": "low|medium|high",
+        "confidence": 0.0,
+        "reason_code": "UPPER_SNAKE_CASE",
+        "reason": "short explanation",
+    }
+    user_content: List[Dict[str, Any]] = [
+        {
+            "type": "text",
+            "text": (
+                "You are a video safety moderator. "
+                "Classify nudity, violence, and gore from the provided frames. "
+                "Use block only when clear, explicit high-risk evidence exists. "
+                "If uncertain, keep scores conservative and explain uncertainty. "
+                f"Return JSON only with this schema: {json.dumps(prompt_schema, ensure_ascii=False)}"
+            ),
+        }
+    ]
+
+    for frame_path in frame_paths:
+        with open(frame_path, "rb") as f:
+            img_base64 = base64.b64encode(f.read()).decode("utf-8")
+        user_content.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"},
+            }
+        )
+
+    result = await agent._chat_completion_text(
+        [
+            {
+                "role": "system",
+                "content": "You are a content safety classifier for nudity, violence, and gore.",
+            },
+            {"role": "user", "content": user_content},
+        ],
+        temperature=0.0,
+    )
+    parsed = agent._parse_json_object_response(result)
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _run_video_risk_gate(
+    agent: VideoAnalyzerAgent, video_path: Path, output_dir: Path
+) -> Tuple[Dict[str, Any], Path]:
+    frame_paths, frame_dir = _sample_risk_frames(
+        agent=agent,
+        video_path=video_path,
+        output_dir=output_dir,
+        max_frames=RISK_MAX_FRAMES,
+    )
+    if not frame_paths:
+        logger.warning(
+            "Risk gate frame extraction failed, fallback to subtitle keyword gate: %s",
+            video_path,
+        )
+        fallback = _run_text_fallback_risk_gate(agent, video_path, output_dir)
+        fallback["reason_code"] = (
+            str(fallback.get("reason_code", "")).strip() or "TEXT_RISK_FRAME_FALLBACK"
+        )
+        fallback["reason"] = (
+            f"{str(fallback.get('reason', '')).strip()}（视觉帧提取失败，已自动启用字幕关键词风控兜底）"
+        )
+        fallback["frame_count"] = 0
+        return fallback, frame_dir
+
+    try:
+        raw = _run_async(_request_risk_decision(agent, frame_paths))
+        normalized = _normalize_risk_result(
+            raw if isinstance(raw, dict) else {}, frame_count=len(frame_paths)
+        )
+        return normalized, frame_dir
+    except Exception as exc:
+        if _is_image_input_not_supported_error(exc):
+            logger.warning(
+                "Risk gate model does not support image input, fallback to subtitle keyword gate: %s",
+                exc,
+            )
+            fallback = _run_text_fallback_risk_gate(agent, video_path, output_dir)
+            fallback["reason_code"] = str(fallback.get("reason_code", "")).strip() or "TEXT_RISK_FALLBACK"
+            fallback["reason"] = (
+                f"{str(fallback.get('reason', '')).strip()}（已自动启用字幕关键词风控兜底）"
+            )
+            return fallback, frame_dir
+
+        error_message, status_code, normalized = _normalize_provider_error(
+            exc, default_status=500
+        )
+        if status_code not in {400, 401, 403}:
+            logger.warning(
+                "Risk gate unavailable, fallback to subtitle keyword gate: status=%s error=%s",
+                status_code,
+                error_message,
+            )
+            fallback = _run_text_fallback_risk_gate(agent, video_path, output_dir)
+            fallback["reason_code"] = (
+                str(fallback.get("reason_code", "")).strip() or "TEXT_RISK_MODEL_FALLBACK"
+            )
+            fallback["reason"] = (
+                f"{str(fallback.get('reason', '')).strip()}（视觉风控服务暂不可用，已自动启用字幕关键词风控兜底）"
+            )
+            fallback["provider_status"] = status_code
+            fallback["provider_error"] = error_message
+            return fallback, frame_dir
+
+        reason_code = "RISK_MODEL_UNAVAILABLE"
+        if status_code == 401:
+            reason_code = "RISK_MODEL_AUTH_FAILED"
+        elif status_code in {400, 403}:
+            reason_code = "RISK_MODEL_CONFIG_INVALID"
+        logger.warning("Risk gate request failed, blocking by default: %s", error_message)
+        return (
+            {
+                "decision": "block",
+                "risk_level": "high",
+                "reason_code": reason_code,
+                "reason": (
+                    error_message
+                    if normalized
+                    else "Risk gate model is unavailable, request is blocked by default."
+                ),
+                "confidence": 1.0,
+                "scores": {"nudity": 1.0, "violence": 1.0, "gore": 1.0},
+                "dimensions": {},
+                "frame_count": len(frame_paths),
+                "error": str(exc),
+                "provider_status": status_code,
+                "provider_error": error_message,
+            },
+            frame_dir,
+        )
+
+
+def _reason_code_slug(reason_code: str) -> str:
+    slug = secure_filename(str(reason_code or "").strip().lower()).replace("-", "_")
+    return slug or "content_policy"
+
+
+def _quarantine_upload_file(video_path: Path, reason_code: str) -> Path | None:
+    try:
+        resolved = video_path.resolve(strict=False)
+        _assert_within(resolved, UPLOAD_ROOT, "filepath")
+    except ValueError:
+        return None
+
+    if not resolved.exists() or not resolved.is_file():
+        return None
+
+    reason_dir = QUARANTINE_ROOT / _reason_code_slug(reason_code)
+    reason_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    target = reason_dir / f"{resolved.stem}_{timestamp}{resolved.suffix}"
+    counter = 1
+    while target.exists():
+        target = reason_dir / f"{resolved.stem}_{timestamp}_{counter}{resolved.suffix}"
+        counter += 1
+
+    try:
+        shutil.move(str(resolved), str(target))
+        return target
+    except OSError as exc:
+        logger.warning("Failed to quarantine blocked video: %s", exc)
+        return None
+
+
+def _should_block_by_risk(decision: str) -> bool:
+    return decision == "block" or (decision == "restrict" and RISK_BLOCK_ON_RESTRICT)
+
+
+def _build_upload_staging_path(filename: str) -> Path:
+    safe_name = secure_filename(filename)
+    if not safe_name:
+        safe_name = f"staging_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+
+    suffix = Path(safe_name).suffix or ".mp4"
+    stem = Path(safe_name).stem or "staging"
+    candidate = UPLOAD_STAGING_ROOT / f"{stem}_{uuid4().hex[:10]}{suffix}"
+    _assert_within(candidate.resolve(strict=False), UPLOAD_STAGING_ROOT, "staging_path")
+    return candidate
+
+
+def _safe_remove_file(path: Path) -> None:
+    try:
+        if path.exists() and path.is_file():
+            path.unlink()
+    except OSError:
+        logger.warning("删除文件失败: %s", path)
+
+
+def _resolve_upload_risk_api_key() -> str:
+    # Fallback chain when no upload-time key is provided by the caller.
+    for key_name in ("RISK_API_KEY", "MODEL_API_KEY", "ARK_API_KEY", "OPENAI_API_KEY"):
+        value = str(os.getenv(key_name, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _upload_risk_unavailable_message() -> str:
+    return (
+        "上传风控服务不可用，已拒绝上传。"
+        "请前往设置检查 API Key、模型名称与模型接口配置后重试上传。"
+    )
+
+
+def _upload_risk_unavailable_payload() -> Dict[str, Any]:
+    return {
+        "error": _upload_risk_unavailable_message(),
+        "code": "risk_service_unavailable",
+    }
+
+
+def _build_risk_agent_for_upload(
+    api_key: str = "", model_name: str = "", model_base_url: str = ""
+) -> VideoAnalyzerAgent:
+    risk_api_key = str(api_key or "").strip() or _resolve_upload_risk_api_key()
+    if not risk_api_key:
+        raise ValueError("上传风控模型 API Key 未配置")
+
+    risk_model_name = (
+        str(model_name or "").strip()
+        or str(os.getenv("RISK_MODEL_NAME", "")).strip()
+        or DEFAULT_MODEL_NAME
+    )
+    risk_model_base_url = (
+        str(model_base_url or "").strip()
+        or str(os.getenv("RISK_MODEL_BASE_URL", "")).strip()
+        or DEFAULT_MODEL_BASE_URL
+    )
+    return VideoAnalyzerAgent(
+        api_key=risk_api_key,
+        whisper_model="base",
+        model_name=risk_model_name,
+        model_base_url=risk_model_base_url,
+    )
+
+
+def _moderate_staged_upload(
+    staged_video_path: Path, risk_agent: VideoAnalyzerAgent
+) -> Dict[str, Any]:
+    output_dir = _create_unique_output_dir(staged_video_path)
+    try:
+        risk, _ = _run_video_risk_gate(risk_agent, staged_video_path, output_dir)
+        return risk
+    finally:
+        shutil.rmtree(output_dir, ignore_errors=True)
+
+
+def _risk_reject_payload(risk: Dict[str, Any]) -> Dict[str, Any]:
+    reason_code = str(risk.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip()
+    return {
+        "error": CONTENT_POLICY_BLOCK_MESSAGE,
+        "code": "content_policy_violation",
+        "risk": {**risk, "reason_code": reason_code},
+    }
+
+
+def _is_risk_infra_failure(risk: Dict[str, Any]) -> bool:
+    reason_code = str(risk.get("reason_code", "")).strip().upper()
+    return reason_code in {
+        "RISK_MODEL_AUTH_FAILED",
+        "RISK_MODEL_CONFIG_INVALID",
+        "RISK_MODEL_UNAVAILABLE",
+        "RISK_FRAME_EXTRACTION_FAILED",
+        "RISK_GATE_INTERNAL_ERROR",
+    }
+
+
+def _build_upload_risk_failure_response(risk: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
+    reason_code = str(risk.get("reason_code", "")).strip().upper()
+    provider_error = str(risk.get("provider_error", "")).strip()
+    request_id = _extract_request_id(provider_error)
+    request_id_text = f"（请求 ID：{request_id}）" if request_id else ""
+    if reason_code == "RISK_MODEL_AUTH_FAILED":
+        auth_error = provider_error
+        if not auth_error or "HTTP 401" in auth_error.upper():
+            auth_error = (
+                "模型鉴权失败：API Key 无效、已过期，或与当前平台/Base URL 不匹配。"
+                f"{request_id_text}"
+            )
+        return (
+            {
+                "error": auth_error,
+                "code": "risk_model_auth_failed",
+            },
+            401,
+        )
+    if reason_code == "RISK_MODEL_CONFIG_INVALID":
+        config_error = provider_error
+        has_specific_hint = (
+            "模型连接失败：" in config_error
+            or "模型鉴权失败：" in config_error
+            or "模型服务请求超时" in config_error
+            or "请求过于频繁" in config_error
+        )
+        if not has_specific_hint:
+            config_error = (
+                "上传前模型配置校验失败：请检查模型接口 Base URL 与模型名称是否匹配当前平台，"
+                "并确认模型支持图片理解（风控检测依赖图片输入）。"
+                f"{request_id_text}"
+            )
+        return (
+            {
+                "error": config_error,
+                "code": "risk_model_config_invalid",
+            },
+            400,
+        )
+    return _upload_risk_unavailable_payload(), 503
 
 
 def _normalize_processing_options(data: Dict[str, Any]) -> Tuple[str, bool, bool, int, float]:
@@ -518,6 +1320,36 @@ def _normalize_model_options(data: Dict[str, Any]) -> Tuple[str, str]:
     return model_name, model_base_url
 
 
+def _normalize_upload_model_options(
+    data: Dict[str, Any],
+    require_api_key: bool = False,
+    require_model_name: bool = False,
+) -> Tuple[str, str, str]:
+    api_key = str(data.get("api_key", "")).strip()
+    model_name = str(data.get("model_name", "")).strip()
+    model_base_url = str(data.get("model_base_url", "")).strip()
+
+    if len(api_key) > 500:
+        api_key = api_key[:500]
+    if len(model_name) > 200:
+        model_name = model_name[:200]
+    if len(model_base_url) > 300:
+        model_base_url = model_base_url[:300]
+
+    if require_api_key and not api_key:
+        raise ValueError("请输入 API Key")
+    if require_model_name and not model_name:
+        raise ValueError("请填写模型名称")
+
+    if not model_name:
+        model_name = str(os.getenv("RISK_MODEL_NAME", "")).strip() or DEFAULT_MODEL_NAME
+    if not model_base_url:
+        model_base_url = (
+            str(os.getenv("RISK_MODEL_BASE_URL", "")).strip() or DEFAULT_MODEL_BASE_URL
+        )
+    return api_key, model_name, model_base_url
+
+
 def process_video(
     video_path: Path,
     api_key: str,
@@ -538,16 +1370,38 @@ def process_video(
     report("prepare", "\u6b63\u5728\u51c6\u5907\u5206\u6790\u4efb\u52a1...")
     output_dir = _create_unique_output_dir(video_path)
 
-    video_dest = output_dir / video_path.name
-    if not video_dest.exists():
-        shutil.copy2(video_path, video_dest)
-
     agent = VideoAnalyzerAgent(
         api_key if api_key else None,
         whisper_model,
         model_name=model_name,
         model_base_url=model_base_url,
     )
+    report("moderation", "正在执行内容风控检测...")
+    risk, risk_frame_dir = _run_video_risk_gate(agent, video_path, output_dir)
+    if _is_risk_infra_failure(risk):
+        if risk_frame_dir.exists():
+            shutil.rmtree(risk_frame_dir, ignore_errors=True)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise RuntimeError(
+            str(risk.get("provider_error") or risk.get("reason") or "风控服务不可用")
+        )
+    if _should_block_by_risk(str(risk.get("decision", ""))):
+        quarantine_path = _quarantine_upload_file(video_path, str(risk.get("reason_code", "")))
+        if quarantine_path is not None:
+            risk["quarantine_path"] = str(quarantine_path)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise ContentPolicyBlockedError(
+            f"视频触发风控策略（{risk.get('reason_code', 'CONTENT_POLICY_VIOLATION')}）：{risk.get('reason', '内容敏感')}",
+            risk,
+        )
+
+    if risk_frame_dir.exists():
+        shutil.rmtree(risk_frame_dir, ignore_errors=True)
+
+    video_dest = output_dir / video_path.name
+    if not video_dest.exists():
+        shutil.copy2(video_path, video_dest)
+
     srt_path = None
 
     if not use_video:
@@ -616,6 +1470,9 @@ def process_video(
             "web_search": web_search,
             "max_vision": max_vision,
             "pdf_path": str(output_pdf),
+            "risk_decision": str(risk.get("decision", "allow")),
+            "risk_level": str(risk.get("risk_level", "low")),
+            "risk_reason_code": str(risk.get("reason_code", "SAFE_CONTENT")),
         }
         save_history(record, history_owner_id)
 
@@ -648,9 +1505,40 @@ def upload_file():
     if not allowed_file(file.filename):
         return jsonify({"error": "不支持的文件格式"}), 400
 
-    save_path = _build_unique_upload_path(file.filename)
-    file.save(str(save_path))
-    return jsonify({"filename": save_path.name, "filepath": str(save_path)})
+    upload_api_key, upload_model_name, upload_model_base_url = _normalize_upload_model_options(
+        {
+            "api_key": request.form.get("api_key", ""),
+            "model_name": request.form.get("model_name", ""),
+            "model_base_url": request.form.get("model_base_url", ""),
+        }
+    )
+
+    staged_path = _build_upload_staging_path(file.filename)
+    try:
+        file.save(str(staged_path))
+        risk_agent = _build_risk_agent_for_upload(
+            upload_api_key, upload_model_name, upload_model_base_url
+        )
+        risk = _moderate_staged_upload(staged_path, risk_agent)
+        if _is_risk_infra_failure(risk):
+            _safe_remove_file(staged_path)
+            logger.warning("上传风控服务异常（single upload）: %s", risk)
+            payload, status_code = _build_upload_risk_failure_response(risk)
+            return jsonify(payload), status_code
+        if _should_block_by_risk(str(risk.get("decision", ""))):
+            _safe_remove_file(staged_path)
+            return jsonify(_risk_reject_payload(risk)), 403
+
+        save_path = _build_unique_upload_path(file.filename)
+        shutil.move(str(staged_path), str(save_path))
+        return jsonify({"filename": save_path.name, "filepath": str(save_path)})
+    except ValueError as exc:
+        _safe_remove_file(staged_path)
+        logger.warning("上传风控不可用（single upload）: %s", exc)
+        return jsonify(_upload_risk_unavailable_payload()), 503
+    except Exception as exc:
+        _safe_remove_file(staged_path)
+        return jsonify({"error": f"上传失败: {str(exc)}"}), 500
 
 
 @app.route("/upload_chunk_init", methods=["POST"])
@@ -673,6 +1561,16 @@ def upload_chunk_init():
         MAX_UPLOAD_CHUNK_SIZE,
     )
     file_key = str(data.get("file_key", "")).strip()
+    try:
+        upload_api_key, upload_model_name, upload_model_base_url = (
+            _normalize_upload_model_options(
+                data,
+                require_api_key=True,
+                require_model_name=True,
+            )
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     try:
         requested_upload_id = _normalize_upload_id(data.get("upload_id", ""))
@@ -690,12 +1588,40 @@ def upload_chunk_init():
                 same_name = str(session.get("filename", "")) == filename
                 same_size = _safe_int(session.get("total_size"), -1) == total_size
                 same_key = not file_key or str(session.get("file_key", "")) == file_key
-                if not (same_name and same_size and same_key):
+                same_model = (
+                    str(session.get("risk_api_key", "")).strip() == upload_api_key
+                    and str(session.get("risk_model_name", "")).strip()
+                    == upload_model_name
+                    and str(session.get("risk_model_base_url", "")).strip()
+                    == upload_model_base_url
+                )
+                if not (same_name and same_size and same_key and same_model):
                     session = None
+                else:
+                    total_chunks = _safe_int(session.get("total_chunks"), 1, 1)
+                    received_chunks = _normalize_received_chunks(
+                        session.get("received_chunks", []), total_chunks
+                    )
+                    session["received_chunks"] = received_chunks
+                    if _get_chunk_storage_mode(session) == "memory":
+                        if upload_id not in upload_memory_buffers and received_chunks:
+                            # Memory-mode sessions cannot recover buffered chunks after process restart.
+                            _delete_upload_session(upload_id)
+                            session = None
+                        elif upload_id not in upload_memory_buffers:
+                            if _reserve_upload_memory(upload_id, total_size):
+                                session["storage_mode"] = "memory"
+                            else:
+                                session["storage_mode"] = "disk"
 
         if session is None:
             upload_id = uuid4().hex
             total_chunks = max(1, (total_size + requested_chunk_size - 1) // requested_chunk_size)
+            storage_mode = "disk"
+            if total_size <= UPLOAD_IN_MEMORY_MAX_FILE_SIZE and _reserve_upload_memory(
+                upload_id, total_size
+            ):
+                storage_mode = "memory"
             session = {
                 "upload_id": upload_id,
                 "filename": filename,
@@ -704,15 +1630,32 @@ def upload_chunk_init():
                 "chunk_size": requested_chunk_size,
                 "total_chunks": total_chunks,
                 "received_chunks": [],
+                "storage_mode": storage_mode,
+                "risk_api_key": upload_api_key,
+                "risk_model_name": upload_model_name,
+                "risk_model_base_url": upload_model_base_url,
                 "created_at": now_text,
                 "updated_at": now_text,
             }
-            _save_upload_session(upload_id, session)
+            try:
+                _save_upload_session(upload_id, session)
+            except Exception:
+                if storage_mode == "memory":
+                    _release_upload_memory(upload_id)
+                raise
         else:
             total_chunks = _safe_int(session.get("total_chunks"), 1, 1)
             session["received_chunks"] = _normalize_received_chunks(
                 session.get("received_chunks", []), total_chunks
             )
+            if _get_chunk_storage_mode(session) == "memory":
+                if not _reserve_upload_memory(upload_id, total_size):
+                    session["storage_mode"] = "disk"
+            else:
+                _release_upload_memory(upload_id)
+            session["risk_api_key"] = upload_api_key
+            session["risk_model_name"] = upload_model_name
+            session["risk_model_base_url"] = upload_model_base_url
             session["updated_at"] = now_text
             _save_upload_session(upload_id, session)
 
@@ -723,6 +1666,7 @@ def upload_chunk_init():
             "chunk_size": _safe_int(session.get("chunk_size"), DEFAULT_UPLOAD_CHUNK_SIZE, 1),
             "total_chunks": _safe_int(session.get("total_chunks"), 1, 1),
             "received_chunks": session.get("received_chunks", []),
+            "storage_mode": _get_chunk_storage_mode(session),
         }
     )
 
@@ -770,15 +1714,31 @@ def upload_chunk():
         if len(chunk_data) > expected_max_size:
             return jsonify({"error": "分片大小超出限制"}), 400
 
-        temp_path = _upload_session_temp_path(upload_id)
-        temp_path.parent.mkdir(parents=True, exist_ok=True)
-        if not temp_path.exists():
-            with open(temp_path, "wb"):
-                pass
+        storage_mode = _get_chunk_storage_mode(session)
+        if storage_mode == "memory":
+            chunk_buffer = upload_memory_buffers.get(upload_id)
+            existing_received = _normalize_received_chunks(
+                session.get("received_chunks", []), total_chunks
+            )
+            if chunk_buffer is None and existing_received:
+                _delete_upload_session(upload_id)
+                return jsonify({"error": "上传会话已过期，请重新开始上传"}), 409
+            if chunk_buffer is None:
+                if not _reserve_upload_memory(upload_id, total_size):
+                    return jsonify({"error": "上传繁忙，请稍后重试"}), 503
+                session["storage_mode"] = "memory"
+                chunk_buffer = upload_memory_buffers.setdefault(upload_id, {})
+            chunk_buffer[chunk_index] = chunk_data
+        else:
+            temp_path = _upload_session_temp_path(upload_id)
+            temp_path.parent.mkdir(parents=True, exist_ok=True)
+            if not temp_path.exists():
+                with open(temp_path, "wb"):
+                    pass
 
-        with open(temp_path, "r+b") as f:
-            f.seek(offset)
-            f.write(chunk_data)
+            with open(temp_path, "r+b") as f:
+                f.seek(offset)
+                f.write(chunk_data)
 
         received_chunks = set(
             _normalize_received_chunks(session.get("received_chunks", []), total_chunks)
@@ -809,6 +1769,13 @@ def upload_chunk_finalize():
     if not upload_id:
         return jsonify({"error": "upload_id 不能为空"}), 400
 
+    filename = ""
+    total_size = 0
+    staging_path: Path | None = None
+    risk_api_key = ""
+    risk_model_name = ""
+    risk_model_base_url = ""
+
     with upload_session_lock:
         session = _load_upload_session(upload_id)
         if session is None:
@@ -817,11 +1784,13 @@ def upload_chunk_finalize():
         filename = str(session.get("filename", "")).strip()
         if not filename or not allowed_file(filename):
             return jsonify({"error": "原始文件名无效"}), 400
+        risk_api_key = str(session.get("risk_api_key", "")).strip()
+        risk_model_name = str(session.get("risk_model_name", "")).strip()
+        risk_model_base_url = str(session.get("risk_model_base_url", "")).strip()
 
         total_chunks = _safe_int(session.get("total_chunks"), 0, 1)
         total_size = _safe_int(session.get("total_size"), 0, 1)
         received_chunks = _normalize_received_chunks(session.get("received_chunks", []), total_chunks)
-
         if len(received_chunks) < total_chunks:
             received_set = set(received_chunks)
             missing_chunks = [i for i in range(total_chunks) if i not in received_set][:10]
@@ -829,22 +1798,71 @@ def upload_chunk_finalize():
             suffix = "..." if len(received_chunks) + len(missing_chunks) < total_chunks else ""
             return jsonify({"error": f"分片未上传完整，缺少分片: {missing_text}{suffix}"}), 400
 
-        temp_path = _upload_session_temp_path(upload_id)
-        if not temp_path.exists():
-            return jsonify({"error": "临时文件不存在，请重新上传"}), 400
+        storage_mode = _get_chunk_storage_mode(session)
+        staging_path = _build_upload_staging_path(filename)
+        if storage_mode == "memory":
+            chunk_buffer = upload_memory_buffers.get(upload_id)
+            if chunk_buffer is None:
+                _delete_upload_session(upload_id)
+                return jsonify({"error": "上传会话已过期，请重新开始上传"}), 409
 
-        if temp_path.stat().st_size < total_size:
-            return jsonify({"error": "文件尚未完整上传，请继续上传缺失分片"}), 400
+            all_missing = [i for i in range(total_chunks) if i not in chunk_buffer]
+            missing_buffer = all_missing[:10]
+            if missing_buffer:
+                missing_text = ",".join(str(i) for i in missing_buffer)
+                suffix = "..." if len(all_missing) > len(missing_buffer) else ""
+                return jsonify({"error": f"分片缓存不完整，缺少分片: {missing_text}{suffix}"}), 400
+
+            with open(staging_path, "wb") as f:
+                for idx in range(total_chunks):
+                    f.write(chunk_buffer.get(idx, b""))
+                if f.tell() > total_size:
+                    f.truncate(total_size)
+        else:
+            temp_path = _upload_session_temp_path(upload_id)
+            if not temp_path.exists():
+                return jsonify({"error": "临时文件不存在，请重新上传"}), 400
+
+            if temp_path.stat().st_size < total_size:
+                return jsonify({"error": "文件尚未完整上传，请继续上传缺失分片"}), 400
+
+            if temp_path.stat().st_size > total_size:
+                with open(temp_path, "r+b") as f:
+                    f.truncate(total_size)
+
+            shutil.move(str(temp_path), str(staging_path))
+        _delete_upload_session(upload_id)
+
+    if staging_path is None:
+        return jsonify({"error": "上传文件状态异常"}), 500
+
+    try:
+        risk_agent = _build_risk_agent_for_upload(
+            risk_api_key, risk_model_name, risk_model_base_url
+        )
+        risk = _moderate_staged_upload(staging_path, risk_agent)
+        if _is_risk_infra_failure(risk):
+            _safe_remove_file(staging_path)
+            logger.warning("上传风控服务异常（chunk finalize）: %s", risk)
+            payload, status_code = _build_upload_risk_failure_response(risk)
+            return jsonify(payload), status_code
+        if _should_block_by_risk(str(risk.get("decision", ""))):
+            _safe_remove_file(staging_path)
+            return jsonify(_risk_reject_payload(risk)), 403
 
         save_path = _build_unique_upload_path(filename)
-        shutil.move(str(temp_path), str(save_path))
+        shutil.move(str(staging_path), str(save_path))
         if save_path.stat().st_size > total_size:
             with open(save_path, "r+b") as f:
                 f.truncate(total_size)
-
-        _delete_upload_session(upload_id)
-
-    return jsonify({"success": True, "filename": save_path.name, "filepath": str(save_path)})
+        return jsonify({"success": True, "filename": save_path.name, "filepath": str(save_path)})
+    except ValueError as exc:
+        _safe_remove_file(staging_path)
+        logger.warning("上传风控不可用（chunk finalize）: %s", exc)
+        return jsonify(_upload_risk_unavailable_payload()), 503
+    except Exception as exc:
+        _safe_remove_file(staging_path)
+        return jsonify({"error": f"上传失败: {str(exc)}"}), 500
 
 
 @app.route("/analyze", methods=["POST"])
@@ -917,6 +1935,22 @@ def analyze():
                 "output_dir": output_dir,
                 "pdf_path": output_pdf,
             }
+        )
+    except ContentPolicyBlockedError as exc:
+        _update_single_progress(
+            status="failed",
+            stage="moderation",
+            message=str(exc),
+        )
+        return (
+            jsonify(
+                {
+                    "error": str(exc),
+                    "code": "content_policy_violation",
+                    "risk": exc.risk,
+                }
+            ),
+            403,
         )
     except Exception as exc:
         error_message, status_code, normalized = _normalize_provider_error(
@@ -1169,8 +2203,23 @@ def upload_batch_files():
     if not files:
         return jsonify({"error": "没有选择文件"}), 400
 
+    upload_api_key, upload_model_name, upload_model_base_url = _normalize_upload_model_options(
+        {
+            "api_key": request.form.get("api_key", ""),
+            "model_name": request.form.get("model_name", ""),
+            "model_base_url": request.form.get("model_base_url", ""),
+        }
+    )
+
     uploaded = []
     errors = []
+    try:
+        risk_agent = _build_risk_agent_for_upload(
+            upload_api_key, upload_model_name, upload_model_base_url
+        )
+    except ValueError as exc:
+        logger.warning("上传风控不可用（batch upload）: %s", exc)
+        return jsonify(_upload_risk_unavailable_payload()), 503
 
     for file in files:
         if not file or file.filename == "":
@@ -1179,11 +2228,25 @@ def upload_batch_files():
             errors.append(f"{file.filename}: 不支持的格式")
             continue
 
+        staged_path = _build_upload_staging_path(file.filename)
         try:
+            file.save(str(staged_path))
+            risk = _moderate_staged_upload(staged_path, risk_agent)
+            if _is_risk_infra_failure(risk):
+                _safe_remove_file(staged_path)
+                payload, _ = _build_upload_risk_failure_response(risk)
+                errors.append(f"{file.filename}: {str(payload.get('error', '上传风控服务不可用'))}")
+                continue
+            if _should_block_by_risk(str(risk.get("decision", ""))):
+                _safe_remove_file(staged_path)
+                errors.append(f"{file.filename}: {CONTENT_POLICY_BLOCK_MESSAGE}")
+                continue
+
             save_path = _build_unique_upload_path(file.filename)
-            file.save(str(save_path))
+            shutil.move(str(staged_path), str(save_path))
             uploaded.append({"filename": save_path.name, "filepath": str(save_path)})
         except Exception as exc:
+            _safe_remove_file(staged_path)
             errors.append(f"{file.filename}: {str(exc)}")
 
     return jsonify({"uploaded": uploaded, "errors": errors, "total": len(files)})
@@ -1304,6 +2367,23 @@ def analyze_batch():
                     stage="done",
                     message=f"{filepath.name} \u5206\u6790\u5b8c\u6210",
                 )
+            except ContentPolicyBlockedError as exc:
+                _update_batch_progress(
+                    current=idx,
+                    current_file=filepath.name,
+                    stage="moderation",
+                    message=str(exc),
+                )
+                results.append(
+                    {
+                        "index": idx,
+                        "filename": filepath.name,
+                        "success": False,
+                        "error": str(exc),
+                        "code": "content_policy_violation",
+                        "risk": exc.risk,
+                    }
+                )
             except Exception as exc:
                 error_msg, _, _ = _normalize_provider_error(exc, default_status=500)
                 _update_batch_progress(
@@ -1383,3 +2463,4 @@ def download_batch_zip():
 if __name__ == "__main__":
     debug_mode = os.getenv("FLASK_DEBUG", "").strip().lower() in {"1", "true", "yes"}
     app.run(debug=debug_mode, port=5000)
+

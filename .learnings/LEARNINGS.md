@@ -21,6 +21,40 @@ Before broad UI refactors, confirm the required scope and default to minimal-dif
 - Tags: scope_control, migration
 
 ---
+
+## [LRN-20260315-001] best_practice
+
+**Logged**: 2026-03-15T23:30:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+Prevent Chinese mojibake in source files by enforcing UTF-8 write/read flow and adding a post-edit encoding check.
+
+### Details
+Several user-facing strings in `app.py` became mojibake (for example `璇疯緭鍏?API Key`) after iterative edits. This typically happens when text is copied from a console/session using a different code page, or when file writes are not explicitly UTF-8. Because these strings are API error messages and logs, mojibake directly impacts usability and troubleshooting.
+
+### Suggested Action
+1. Always save edited markdown/text/code with UTF-8 explicitly (especially when using PowerShell file output commands).
+2. Avoid copying localized terminal output directly into source strings.
+3. After text-heavy edits, run a quick mojibake scan in touched files:
+   - `rg -n "鍒|娌|璇|鏂|缂|瓒|鏈|杈撳|瑙嗛|鍐呭|涓嶆敮" app.py`
+4. Run syntax validation after cleanup:
+   - `python -m py_compile app.py`
+5. If mojibake is found, replace by intent (based on endpoint behavior), not by blind conversion.
+
+### Metadata
+- Source: conversation
+- Related Files: app.py, updata.md
+- Tags: encoding, mojibake, utf8, backend, prevention
+
+### Resolution
+- **Resolved**: 2026-03-15T23:35:00+08:00
+- **Commit/PR**: local_workspace_change
+- **Notes**: Repaired mojibake in upload/analyze/test_model/batch error paths and standardized human-readable Chinese messages by functional context.
+
+---
 ## [LRN-20260311-001] correction
 
 **Logged**: 2026-03-11T00:00:00+08:00

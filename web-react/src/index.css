@@ -409,6 +409,23 @@ body {
   }
 }
 
+@keyframes modelTestGuidePulse {
+  0%,
+  100% {
+    border-color: rgba(56, 189, 248, 0.56);
+    box-shadow:
+      0 0 0 0 rgba(56, 189, 248, 0),
+      inset 0 1px 0 rgba(186, 230, 253, 0.12);
+  }
+  50% {
+    border-color: rgba(125, 211, 252, 0.95);
+    box-shadow:
+      0 0 0 4px rgba(56, 189, 248, 0.18),
+      0 0 20px rgba(14, 165, 233, 0.2),
+      inset 0 1px 0 rgba(224, 242, 254, 0.28);
+  }
+}
+
 .app-main {
   width: 100%;
   animation: fadeUpIn 0.5s ease-out both;
@@ -1681,6 +1698,10 @@ body {
   animation: modelRequiredGuidePulse 1.05s ease-in-out infinite;
 }
 
+.model-test-guide-btn {
+  animation: modelTestGuidePulse 1.05s ease-in-out infinite;
+}
+
 .file-status-chip {
   position: relative;
   display: inline-flex;
@@ -1784,6 +1805,7 @@ body {
   .app-main button.steps-edit-save-btn:hover:not(:disabled)::before,
   .api-key-guide-input,
   .model-required-guide-input,
+  .model-test-guide-btn,
   .file-status-chip,
   .file-status-chip-success::after,
   .fps-reveal,

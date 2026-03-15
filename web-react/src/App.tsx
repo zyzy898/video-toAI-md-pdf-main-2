@@ -27,6 +27,8 @@ const VALID_VIDEO_EXTENSIONS = new Set([
 const WEB_SEARCH_ERROR_HINTS = ["toolnotopen", "web search", "联网搜索"];
 const WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_content_plugin";
 const ALIYUN_APIKEY_DOC_URL = "https://help.aliyun.com/zh/model-studio/error-code#apikey-error";
+const CONTENT_POLICY_BLOCK_MESSAGE =
+  "上传已被风控强拦截：检测到高风险色情/裸露/血腥/暴力内容，系统已直接拒绝该视频上传。请删除敏感画面后重试";
 const DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_RESUME_KEY_PREFIX = "video-upload-resume-v1";
 const HISTORY_CLIENT_ID_KEY = "video-insights-client-id-v1";
@@ -55,6 +57,15 @@ const getOrCreateHistoryClientId = () => {
 const extractRequestId = (message: string) => {
   const match = String(message || "").match(/request[_\s-]*id['"]?\s*[:：]\s*['"]?([A-Za-z0-9._-]+)/i);
   return match?.[1] || "";
+};
+
+const extractErrorCode = (message: string) => {
+  const match = String(message || "").match(/(?:^|\|)\s*code=([A-Za-z0-9._-]+)/i);
+  return String(match?.[1] || "").trim().toLowerCase();
+};
+
+const formatContentPolicyViolationMessage = (_message: string, _inline = false) => {
+  return CONTENT_POLICY_BLOCK_MESSAGE;
 };
 
 const extractModelNameFromNotFound = (message: string) => {
@@ -99,14 +110,40 @@ const formatModelConnectionError = (message: string) => {
   return "";
 };
 
+const formatRiskHint = (risk?: RiskResult) => {
+  if (!risk) return "";
+  const level = String(risk.risk_level || "").trim();
+  const code = String(risk.reason_code || "").trim();
+  const reason = String(risk.reason || "").trim();
+  const scoreText = risk.scores
+    ? Object.entries(risk.scores)
+        .filter(([, value]) => typeof value === "number")
+        .map(([key, value]) => `${key}:${Number(value).toFixed(2)}`)
+        .join(" / ")
+    : "";
+  const parts = [level ? `等级: ${level}` : "", code ? `规则: ${code}` : "", reason, scoreText].filter(Boolean);
+  return parts.join(" | ");
+};
+
 const formatErrorMessage = (rawMessage: string) => {
   const message = String(rawMessage || "").trim();
   if (!message) return "操作失败";
+  const requestId = extractRequestId(message);
+  const requestIdText = requestId ? `（请求 ID：${requestId}）` : "";
+  const errorCode = extractErrorCode(message);
+
+  if (errorCode === "risk_model_config_invalid") {
+    return `上传前模型配置校验失败：请检查 Base URL 与模型名称是否匹配当前平台，并确认模型支持图片理解（风控检测依赖图片输入）${requestIdText}`;
+  }
+  if (errorCode === "risk_model_auth_failed") {
+    return `上传前模型鉴权失败：请检查 API Key 是否有效，并确认与当前 Base URL/平台匹配${requestIdText}`;
+  }
+  if (errorCode === "content_policy_violation" || message.includes("上传被拒绝")) {
+    return formatContentPolicyViolationMessage(message);
+  }
 
   const lower = message.toLowerCase();
   if (WEB_SEARCH_ERROR_HINTS.some((hint) => lower.includes(hint))) {
-    const requestId = extractRequestId(message);
-    const requestIdText = requestId ? `（请求 ID：${requestId}）` : "";
     return `联网搜索功能未开通。请前往火山引擎控制台开通后重试：${WEB_SEARCH_ACTIVATION_URL}${requestIdText}`;
   }
 
@@ -119,10 +156,22 @@ const formatErrorMessage = (rawMessage: string) => {
 const formatInlineErrorMessage = (rawMessage: string) => {
   const message = String(rawMessage || "").trim();
   if (!message) return "";
+  const requestId = extractRequestId(message);
+  const requestIdText = requestId ? `（请求 ID：${requestId}）` : "";
+  const errorCode = extractErrorCode(message);
+
+  if (errorCode === "risk_model_config_invalid") {
+    return `模型配置校验失败，请检查 Base URL、模型名称与视觉能力${requestIdText}`;
+  }
+  if (errorCode === "risk_model_auth_failed") {
+    return `模型鉴权失败，请检查 API Key 与平台匹配关系${requestIdText}`;
+  }
+  if (errorCode === "content_policy_violation" || message.includes("上传被拒绝")) {
+    return formatContentPolicyViolationMessage(message, true);
+  }
   const lower = message.toLowerCase();
 
   if (WEB_SEARCH_ERROR_HINTS.some((hint) => lower.includes(hint))) {
-    const requestId = extractRequestId(message);
     return requestId ? `联网搜索未开通（请求 ID：${requestId}）` : "联网搜索未开通，请在火山引擎控制台开通后重试";
   }
 
@@ -135,6 +184,7 @@ const formatInlineErrorMessage = (rawMessage: string) => {
 const STAGE_LABELS: Record<string, string> = {
   prepare: "准备中",
   upload: "上传中",
+  moderation: "安全检测",
   subtitle: "字幕识别",
   analysis: "内容分析",
   screenshots: "截图生成",
@@ -148,6 +198,7 @@ const STAGE_LABELS: Record<string, string> = {
 const STAGE_PERCENT: Record<string, number> = {
   prepare: 8,
   upload: 35,
+  moderation: 70,
   subtitle: 28,
   analysis: 55,
   screenshots: 75,
@@ -159,6 +210,22 @@ const STAGE_PERCENT: Record<string, number> = {
 };
 
 type ModelPreset = "ark" | "openai" | "deepseek" | "qwen" | "custom";
+
+const normalizeModelBaseUrlForSignature = (value: string) =>
+  String(value || "").trim().replace(/\/+$/u, "");
+
+const buildModelConfigSignature = (
+  apiKey: string,
+  modelPreset: ModelPreset,
+  modelName: string,
+  modelBaseUrl: string,
+) =>
+  [
+    modelPreset,
+    String(apiKey || "").trim(),
+    String(modelName || "").trim(),
+    normalizeModelBaseUrlForSignature(modelBaseUrl),
+  ].join("||");
 
 const MODEL_PRESETS: Record<Exclude<ModelPreset, "custom">, { label: string; baseUrl: string }> = {
   ark: {
@@ -197,6 +264,20 @@ type BatchFileItem = {
   error: string;
 };
 
+type RiskResult = {
+  decision?: "allow" | "restrict" | "block" | string;
+  risk_level?: "low" | "medium" | "high" | string;
+  reason_code?: string;
+  reason?: string;
+  scores?: Partial<Record<"nudity" | "violence" | "gore", number>>;
+};
+
+type ApiErrorPayload = {
+  error?: string;
+  code?: string;
+  risk?: RiskResult;
+};
+
 type SingleResultData = {
   steps: StepItem[];
   markdown: string;
@@ -211,6 +292,8 @@ type BatchResultItem = {
   steps_count?: number;
   output_dir?: string;
   error?: string;
+  code?: string;
+  risk?: RiskResult;
 };
 
 type BatchResultData = {
@@ -730,6 +813,7 @@ export default function App() {
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const [apiKeyGuideActive, setApiKeyGuideActive] = useState(false);
   const [modelConfigGuideActive, setModelConfigGuideActive] = useState(false);
+  const [modelTestGuideActive, setModelTestGuideActive] = useState(false);
 
   const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
@@ -756,6 +840,7 @@ export default function App() {
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
   const modelBaseUrlInputRef = useRef<HTMLInputElement | null>(null);
   const modelNameInputRef = useRef<HTMLInputElement | null>(null);
+  const modelTestButtonRef = useRef<HTMLButtonElement | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -763,10 +848,13 @@ export default function App() {
   const apiKeyGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelConfigGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelConfigGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modelTestGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modelTestGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const singleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progressVisibleRef = useRef(false);
   const batchFilesRef = useRef<BatchFileItem[]>([]);
+  const verifiedModelConfigSignatureRef = useRef("");
 
   useEffect(() => {
     progressVisibleRef.current = progressVisible;
@@ -784,6 +872,8 @@ export default function App() {
       if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
       if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
       if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
+      if (modelTestGuideTimerRef.current) clearTimeout(modelTestGuideTimerRef.current);
+      if (modelTestGuideFocusTimerRef.current) clearTimeout(modelTestGuideFocusTimerRef.current);
       if (batchTimerRef.current) clearInterval(batchTimerRef.current);
       if (singleTimerRef.current) clearInterval(singleTimerRef.current);
     };
@@ -865,9 +955,13 @@ export default function App() {
 
   const fetchJson = useCallback(async <T,>(url: string, options: RequestInit = {}) => {
     const response = await fetch(url, withHistoryClientHeader(options));
-    const data = (await response.json().catch(() => ({}))) as { error?: string } & T;
+    const data = (await response.json().catch(() => ({}))) as ApiErrorPayload & T;
     if (!response.ok || data.error) {
-      throw new Error(data.error || `请求失败 (${response.status})`);
+      const base = String(data.error || `请求失败 (${response.status})`);
+      const riskHint = formatRiskHint(data.risk);
+      const codeText = data.code ? `code=${data.code}` : "";
+      const merged = [base, codeText, riskHint].filter(Boolean).join(" | ");
+      throw new Error(merged);
     }
     return data;
   }, [withHistoryClientHeader]);
@@ -889,21 +983,59 @@ export default function App() {
     if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
     errorTimerRef.current = setTimeout(() => setShowErrorToast(false), 5000);
 
-    if (rawMessage.includes("请输入 ARK API Key") || rawMessage.includes("请输入 API Key")) {
+    const isUploadRiskUnavailable =
+      rawMessage.includes("上传风控服务不可用") || rawMessage.includes("code=risk_service_unavailable");
+    const isApiKeyMissing =
+      rawMessage.includes("请输入 ARK API Key") ||
+      rawMessage.includes("请输入 API Key") ||
+      rawMessage.includes("code=risk_model_auth_failed");
+    const isModelConfigMissing =
+      rawMessage.includes("请填写模型名称") ||
+      rawMessage.includes("请填写模型接口 Base URL") ||
+      rawMessage.includes("模型连接失败：模型或接口不存在") ||
+      rawMessage.includes("code=risk_model_config_invalid");
+    const needApiGuide = isUploadRiskUnavailable || isApiKeyMissing;
+    const needModelGuide = isUploadRiskUnavailable || isModelConfigMissing;
+
+    if (needApiGuide || needModelGuide) {
       setHistoryDrawerOpen(false);
       setSettingsDrawerOpen(true);
-      setApiKeyGuideActive(true);
 
-      if (apiKeyGuideTimerRef.current) clearTimeout(apiKeyGuideTimerRef.current);
-      apiKeyGuideTimerRef.current = setTimeout(() => setApiKeyGuideActive(false), 2800);
+      if (needApiGuide) {
+        setApiKeyGuideActive(true);
 
-      if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
-      apiKeyGuideFocusTimerRef.current = setTimeout(() => {
-        apiKeyInputRef.current?.focus();
-        apiKeyInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-      }, 220);
+        if (apiKeyGuideTimerRef.current) clearTimeout(apiKeyGuideTimerRef.current);
+        apiKeyGuideTimerRef.current = setTimeout(() => setApiKeyGuideActive(false), 2800);
+      }
+
+      if (needModelGuide) {
+        setModelConfigGuideActive(true);
+        if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
+        modelConfigGuideTimerRef.current = setTimeout(() => setModelConfigGuideActive(false), 3200);
+      }
+
+      if (needApiGuide) {
+        if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
+        apiKeyGuideFocusTimerRef.current = setTimeout(() => {
+          apiKeyInputRef.current?.focus();
+          apiKeyInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 220);
+      } else if (needModelGuide) {
+        if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
+        modelConfigGuideFocusTimerRef.current = setTimeout(() => {
+          const missingBaseUrl = modelPreset === "custom" && !String(modelBaseUrl || "").trim();
+          const missingModelName = !String(modelName || "").trim();
+          const target = missingBaseUrl
+            ? modelBaseUrlInputRef.current
+            : missingModelName
+              ? modelNameInputRef.current
+              : modelNameInputRef.current;
+          target?.focus();
+          target?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 220);
+      }
     }
-  }, []);
+  }, [modelBaseUrl, modelName, modelPreset]);
 
   const showSuccess = useCallback((message: string) => {
     const rawMessage = String(message || "").trim() || "操作成功";
@@ -936,6 +1068,21 @@ export default function App() {
       target?.scrollIntoView({ behavior: "smooth", block: "center" });
     }, 220);
   }, [modelBaseUrl, modelName, modelPreset]);
+
+  const triggerModelTestGuide = useCallback(() => {
+    setHistoryDrawerOpen(false);
+    setSettingsDrawerOpen(true);
+    setModelTestGuideActive(true);
+
+    if (modelTestGuideTimerRef.current) clearTimeout(modelTestGuideTimerRef.current);
+    modelTestGuideTimerRef.current = setTimeout(() => setModelTestGuideActive(false), 3200);
+
+    if (modelTestGuideFocusTimerRef.current) clearTimeout(modelTestGuideFocusTimerRef.current);
+    modelTestGuideFocusTimerRef.current = setTimeout(() => {
+      modelTestButtonRef.current?.focus();
+      modelTestButtonRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 260);
+  }, []);
 
   const validateModelConfig = useCallback(() => {
     const hasBaseUrl = Boolean(String(modelBaseUrl || "").trim());
@@ -987,13 +1134,88 @@ export default function App() {
 
       const responseText = String(data.reply || "").replace(/\s+/g, " ").trim();
       const briefReply = responseText ? ` · 返回：${responseText.slice(0, 48)}` : "";
+      verifiedModelConfigSignatureRef.current = buildModelConfigSignature(
+        apiKey,
+        modelPreset,
+        modelName,
+        modelBaseUrl,
+      );
       showSuccess(`${String(data.message || "模型连接测试成功")}${briefReply}`);
     } catch (error) {
       showError(String((error as Error).message || error));
     } finally {
       setTestingModel(false);
     }
-  }, [apiKey, fetchJson, modelBaseUrl, modelName, showError, showSuccess, validateModelConfig]);
+  }, [apiKey, fetchJson, modelBaseUrl, modelName, modelPreset, showError, showSuccess, validateModelConfig]);
+
+  const pickUploadPrecheckError = useCallback((message: string) => {
+    const raw = String(message || "").trim();
+    const normalized = raw.replace(/^模型连接测试失败[:：]\s*/u, "").trim();
+    const errorCode = extractErrorCode(normalized);
+    if (errorCode === "risk_model_config_invalid") {
+      return "模型配置无效：请检查 Base URL、模型名称是否匹配，并确认模型支持图片理解";
+    }
+    if (errorCode === "risk_model_auth_failed") {
+      return "模型鉴权失败：请检查 API Key 是否有效且与当前平台匹配";
+    }
+    const parts = normalized.split("|").map((item) => item.trim()).filter(Boolean);
+    const preferredHints = [
+      "模型鉴权失败",
+      "模型连接失败",
+      "请求过于频繁",
+      "模型服务请求超时",
+      "模型服务调用失败",
+      "联网搜索功能未开通",
+    ];
+    for (const hint of preferredHints) {
+      const matched = parts.find((item) => item.includes(hint));
+      if (matched) return matched;
+    }
+    return parts[0] || normalized || "模型连通测试失败";
+  }, []);
+
+  const verifyModelConnectionForUpload = useCallback(async () => {
+    if (!apiKey) {
+      showError("请输入 API Key");
+      return false;
+    }
+    if (!validateModelConfig()) return false;
+    const currentSignature = buildModelConfigSignature(apiKey, modelPreset, modelName, modelBaseUrl);
+    if (verifiedModelConfigSignatureRef.current === currentSignature) return true;
+    if (!settingsDrawerOpen) triggerModelTestGuide();
+
+    setTestingModel(true);
+    try {
+      await fetchJson("/test_model", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          api_key: apiKey,
+          model_name: modelName,
+          model_base_url: modelBaseUrl,
+        }),
+      });
+      verifiedModelConfigSignatureRef.current = currentSignature;
+      return true;
+    } catch (error) {
+      const message = String((error as Error).message || error);
+      showError(`上传前模型校验失败：${pickUploadPrecheckError(message)}`);
+      return false;
+    } finally {
+      setTestingModel(false);
+    }
+  }, [
+    apiKey,
+    fetchJson,
+    modelBaseUrl,
+    modelName,
+    modelPreset,
+    pickUploadPrecheckError,
+    settingsDrawerOpen,
+    showError,
+    triggerModelTestGuide,
+    validateModelConfig,
+  ]);
 
   const setProgressTextIfChanged = useCallback((nextText: string) => {
     const normalized = String(nextText || "");
@@ -1162,7 +1384,12 @@ export default function App() {
   }, [pullBatchProgress, stopBatchPolling]);
 
   const uploadSingleFileWithResume = useCallback(
-    async (file: File, fileIndex: number, totalFiles: number) => {
+    async (
+      file: File,
+      fileIndex: number,
+      totalFiles: number,
+      onSafetyCheckStart?: (currentFile: File, currentIndex: number, total: number) => void,
+    ) => {
       const resumeKey = `${UPLOAD_RESUME_KEY_PREFIX}:${file.name}:${file.size}:${file.lastModified}`;
       const storedUploadId = window.localStorage.getItem(resumeKey) || "";
       const initData = await fetchJson<{
@@ -1179,6 +1406,9 @@ export default function App() {
           chunk_size: DEFAULT_UPLOAD_CHUNK_SIZE,
           upload_id: storedUploadId,
           file_key: resumeKey,
+          api_key: apiKey,
+          model_name: modelName,
+          model_base_url: modelBaseUrl,
         }),
       });
       const uploadId = String(initData.upload_id || "");
@@ -1201,6 +1431,8 @@ export default function App() {
         await fetchJson("/upload_chunk", { method: "POST", body: formData });
       }
 
+      onSafetyCheckStart?.(file, fileIndex, totalFiles);
+      setProgressTextIfChanged(`已上传完成，正在进行安全检测：${file.name}（${fileIndex}/${totalFiles}）`);
       const finalized = await fetchJson<{ filename: string; filepath: string }>("/upload_chunk_finalize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1209,7 +1441,7 @@ export default function App() {
       window.localStorage.removeItem(resumeKey);
       return finalized;
     },
-    [fetchJson, setProgressTextIfChanged],
+    [apiKey, fetchJson, modelBaseUrl, modelName, setProgressTextIfChanged],
   );
 
   const uploadBatchFiles = useCallback(
@@ -1219,12 +1451,36 @@ export default function App() {
         showError("没有可用的视频文件");
         return;
       }
+
+      const readyForUpload = await verifyModelConnectionForUpload();
+      if (!readyForUpload) return;
+
       showProgress("上传中", "正在上传视频...");
       updateProgressBoard({ mode: "upload", stage: "prepare", total: files.length, percent: 0 });
       try {
         const uploaded: BatchFileItem[] = [];
         for (let i = 0; i < files.length; i += 1) {
-          const item = await uploadSingleFileWithResume(files[i], i + 1, files.length);
+          const item = await uploadSingleFileWithResume(
+            files[i],
+            i + 1,
+            files.length,
+            (currentFile, currentIndex, total) => {
+              const moderationPercent = Math.min(
+                99,
+                Math.round(((Math.max(0, currentIndex - 1) + STAGE_PERCENT.moderation / 100) / total) * 100),
+              );
+              setProgressTextIfChanged(`已上传完成，正在进行安全检测：${currentFile.name}（${currentIndex}/${total}）`);
+              updateProgressBoard({
+                mode: "upload",
+                stage: "moderation",
+                total,
+                current: currentIndex,
+                success: Math.max(0, currentIndex - 1),
+                percent: moderationPercent,
+                currentFile: currentFile.name,
+              });
+            },
+          );
           uploaded.push({ filename: item.filename, filepath: item.filepath, status: "pending", error: "" });
           updateProgressBoard({
             mode: "upload",
@@ -1242,7 +1498,15 @@ export default function App() {
         hideProgress();
       }
     },
-    [hideProgress, showError, showProgress, updateProgressBoard, uploadSingleFileWithResume],
+    [
+      hideProgress,
+      setProgressTextIfChanged,
+      showError,
+      showProgress,
+      updateProgressBoard,
+      uploadSingleFileWithResume,
+      verifyModelConnectionForUpload,
+    ],
   );
   const analyzeSingle = useCallback(async () => {
     if (batchFilesRef.current.length !== 1) return;
@@ -1360,7 +1624,13 @@ export default function App() {
       const nextFiles: BatchFileItem[] = batchFilesRef.current.map((item, index) => ({
         ...item,
         status: data.results?.[index]?.success ? "success" : "failed",
-        error: data.results?.[index]?.error || "",
+        error: (() => {
+          const result = data.results?.[index];
+          const base = String(result?.error || "");
+          const riskHint = formatRiskHint(result?.risk);
+          const codeText = result?.code ? `code=${result.code}` : "";
+          return [base, codeText, riskHint].filter(Boolean).join(" | ");
+        })(),
       }));
       setBatchFiles(nextFiles);
       const success = nextFiles.filter((item) => item.status === "success").length;
@@ -2518,11 +2788,18 @@ export default function App() {
 
                     <div className="config-field mb-3 space-y-1">
                       <button
+                        ref={modelTestButtonRef}
                         type="button"
-                        className="history-refresh-btn flex w-full items-center justify-center gap-1 rounded-lg border border-neutral-700 px-2.5 py-2 text-xs font-medium"
+                        className={cn(
+                          "history-refresh-btn flex w-full items-center justify-center gap-1 rounded-lg border border-neutral-700 px-2.5 py-2 text-xs font-medium",
+                          modelTestGuideActive && "model-test-guide-btn",
+                        )}
                         disabled={testingModel}
                         aria-busy={testingModel}
-                        onClick={() => void testModelConnection()}
+                        onClick={() => {
+                          if (modelTestGuideActive) setModelTestGuideActive(false);
+                          void testModelConnection();
+                        }}
                       >
                         <RefreshIcon className={`h-3.5 w-3.5 ${testingModel ? "history-refresh-icon-spin" : ""}`} />
                         {testingModel ? "测试中..." : "测试链接"}

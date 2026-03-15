@@ -1,192 +1,203 @@
-# 🎬 视频转文档项目（API + web-react）
+# 视频总结项目（Flask API + React 前端）
 
-将视频自动整理为结构化步骤文档，输出 `Markdown`、`PDF` 和关键截图。  
-本仓库支持两种使用方式：
+将视频自动提取为结构化步骤，并输出 `Markdown`、`PDF` 与关键截图。
 
-1. 页面使用（后端 API + web-react 前端）
-2. 单代码调用（直接使用 `video_analyzer_agent.py`）
+项目由两部分组成：
+- 后端：`app.py`（Flask，上传/分析/风控/下载）
+- 前端：`web-react/`（React + TypeScript + Vite）
 
 ---
 
-## 📦 环境要求
+## 核心能力
+
+- 视频上传（单文件、批量、分片续传）
+- 字幕分析 / 画面分析
+- 自动生成步骤文档（Markdown + PDF）
+- 历史记录查看、重生成文档、批量打包下载
+
+---
+
+## v2.0.0 新增与升级
+
+### 1) 无人工复审风控链路（自动分级）
+- 后端增加自动风控分级：`allow / restrict / block`
+- 风控结果标准化返回：`decision`、`risk_level`、`reason_code`、`reason`、`scores`
+- 命中策略时返回 `403`，并附 `code=content_policy_violation` 与结构化 `risk` 数据
+
+### 2) 上传前置风控（阻止入库）
+- 上传先进入 `uploads/.staging`，风控通过后才移动到正式 `uploads/`
+- 命中风控直接拒绝，不进入正式上传目录
+- 支持单文件、分片 finalize、批量上传的统一拒绝策略
+
+### 3) 分片上传“内存优先”
+- 分片会话增加 `storage_mode`：`memory` / `disk`
+- 小文件优先内存缓存，减少中间 `.part` 落盘
+- 超过阈值自动回退到磁盘模式
+
+默认阈值（见 `app.py`）：
+- 单文件内存模式上限：`64MB`
+- 全局内存缓冲上限：`256MB`
+
+### 4) 前端风控提示增强
+- 前端统一解析 `error/code/risk`
+- 单个分析、批量分析、上传失败场景都会展示可读风控信息
+
+### 5) pre-commit 自动检查（提交前）
+- 新增 `.pre-commit-config.yaml`
+- 新增自定义检查脚本：
+  - `scripts/check_mojibake.py`（中文乱码/编码异常扫描）
+  - `scripts/check_py_compile.py`（Python 语法编译检查）
+
+---
+
+## 项目结构
+
+```text
+.
+├─ app.py
+├─ video_analyzer_agent.py
+├─ requirements.txt
+├─ .pre-commit-config.yaml
+├─ scripts/
+│  ├─ check_mojibake.py
+│  └─ check_py_compile.py
+└─ web-react/
+   ├─ src/
+   ├─ components/
+   ├─ package.json
+   └─ vite.config.ts
+```
+
+---
+
+## 环境要求
 
 - Python `3.10+`
 - Node.js `18+`（建议 `20+`）
-- 可用的模型 API Key（Ark/OpenAI 兼容接口）
-- `ffmpeg`（代码会优先使用 `imageio-ffmpeg` 自动提供的二进制）
+- 可用模型 API Key（ARK/OpenAI 兼容接口）
+- `ffmpeg`（代码会优先尝试 `imageio-ffmpeg`）
 
-安装 Python 依赖：
+---
+
+## 快速启动
+
+### 1) 安装后端依赖
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
-
-## 方式一：页面使用方法（推荐）
-
-### 1) 安装前端依赖
-
-```bash
-cd web-react
-npm install
-```
-
-### 2) 启动后端 API（5000）
+### 2) 启动后端
 
 ```bash
 python app.py
 ```
 
-### 3) 启动前端（5173）
+默认地址：`http://127.0.0.1:5000`
+
+### 3) 启动前端
 
 ```bash
 cd web-react
+npm install
 npm run dev -- --host 127.0.0.1 --port 5173 --strictPort
 ```
 
-### 4) 打开页面
-
-- 前端：`http://127.0.0.1:5173`
-- 后端：`http://127.0.0.1:5000`
-
-### 5) 页面操作流程
-
-1. 右上角进入「设置」，填写：
-   - 模型 API Key
-   - 模型 Base URL（自定义模式必填）
-   - 模型名称（必填）
-2. 上传视频（支持单个/批量、分片上传）。
-3. 点击分析，等待步骤、文档和截图生成。
-4. 可在页面编辑步骤并重新生成文档。
-5. 在历史记录中查看、删除、下载 ZIP。
+前端地址：`http://127.0.0.1:5173`
 
 ---
 
-## 方式二：单代码 `video_analyzer_agent.py` 使用方法
+## 模型配置
 
-适合你在脚本/服务中直接集成，不依赖前端页面。
+前端设置页或请求参数中可配置：
+- `api_key`
+- `model_name`
+- `model_base_url`
 
-### 1) 准备配置（可选 `.env`）
+`VideoAnalyzerAgent` 的 Key 读取优先级：
+1. 显式传入参数
+2. `MODEL_API_KEY`
+3. `ARK_API_KEY`
+4. `OPENAI_API_KEY`
 
-可在项目根目录创建 `.env`：
+---
 
-```env
-MODEL_API_KEY=your_api_key
-MODEL_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
-MODEL_NAME=doubao-seed-2-0-pro-260215
-```
+## 风控流程说明（无人工复审）
 
-`VideoAnalyzerAgent` 会按优先级读取：
+### 单文件上传
+1. 文件先写入 `uploads/.staging`
+2. 后端执行风控
+3. 命中策略：删除暂存并 `403` 拒绝
+4. 通过：移动到 `uploads/`
 
-- 传入参数 `api_key`
-- `MODEL_API_KEY`
-- `ARK_API_KEY`
-- `OPENAI_API_KEY`
+### 分片上传
+1. `upload_chunk_init` 建立会话并决定 `storage_mode`
+2. `upload_chunk` 写入内存或 `.part`
+3. `upload_chunk_finalize` 组装到 `.staging`
+4. 执行风控后决定拒绝或入库
 
-### 2) 最小可运行示例
+### 分析接口
+1. `process_video` 先执行风控抽帧判定
+2. 命中策略直接返回 `403`
+3. 通过后才继续字幕/步骤/文档流程
 
-新建 `run_agent_example.py`：
+---
 
-```python
-import asyncio
-from pathlib import Path
+## pre-commit 使用（建议启用）
 
-from video_analyzer_agent import VideoAnalyzerAgent
-
-
-async def main():
-    video_path = "demo.mp4"  # 改成你的视频路径
-    out_dir = Path("outputs/demo_manual")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    images_dir = out_dir / "images"
-
-    agent = VideoAnalyzerAgent(
-        api_key=None,  # 优先从 .env 读取；也可直接传字符串
-        whisper_model="base",
-        model_name=None,      # 可留空，使用默认或 .env
-        model_base_url=None,  # 可留空，使用默认或 .env
-    )
-
-    # 1) 生成字幕
-    srt_path = agent.generate_subtitles(video_path, output_dir=str(out_dir))
-
-    # 2) 基于字幕提取步骤（更省）
-    steps = await agent.analyze_subtitles(srt_path)
-
-    # 如果你想直接让模型看视频，可改用：
-    # steps = await agent.analyze_video(video_path, fps=1.0)
-
-    # 3) 生成步骤截图
-    agent.generate_screenshots_from_steps(video_path, steps, output_dir=str(images_dir))
-
-    # 4) 可选：低置信度步骤看图增强
-    steps = await agent.enhance_steps_with_vision(
-        steps=steps,
-        image_dir=str(images_dir),
-        srt_path=srt_path,
-        max_calls=10,
-    )
-
-    # 5) 生成 Markdown
-    md_path = out_dir / "operation_guide.md"
-    await agent.generate_step_document(
-        steps=steps,
-        output_path=str(md_path),
-        srt_path=srt_path,
-        image_dir="images",   # markdown 中图片相对目录
-        web_search=False,     # 开启需平台支持联网搜索
-        respect_step_content=False,
-    )
-
-    # 6) 生成 PDF + 保存步骤 JSON
-    pdf_path = out_dir / "operation_guide.pdf"
-    agent.generate_pdf(str(md_path), str(pdf_path))
-    agent.save_results(steps, str(out_dir / "steps.json"))
-
-    print("完成：", out_dir.resolve())
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-```
-
-运行：
+### 安装
 
 ```bash
-python run_agent_example.py
+pip install pre-commit
 ```
 
-### 3) 常用方法说明（`VideoAnalyzerAgent`）
+如果系统 Python 权限受限，建议在项目本地虚拟环境中安装：
 
-- `generate_subtitles(video_path, output_dir)`：视频转 SRT
-- `analyze_subtitles(srt_path)`：从字幕提取步骤
-- `analyze_video(video_path, fps=1.0)`：直接看视频提取步骤
-- `generate_screenshots_from_steps(video_path, steps, output_dir)`：按步骤截图
-- `enhance_steps_with_vision(steps, image_dir, srt_path, max_calls)`：低置信度步骤增强
-- `generate_step_document(...)`：生成 Markdown 文档
-- `generate_pdf(md_path, pdf_path)`：Markdown 转 PDF
-- `save_results(steps, output_path)`：保存步骤 JSON
+```bash
+python -m venv .venv
+.venv\Scripts\python -m pip install pre-commit
+```
+
+### 启用 Git Hook
+
+```bash
+pre-commit install
+```
+
+如果使用本地虚拟环境：
+
+```bash
+.venv\Scripts\pre-commit install
+```
+
+### 手动执行全部检查
+
+```bash
+pre-commit run --all-files
+```
 
 ---
 
-## 🧪 前端构建命令
+## 常见问题
+
+1. `401 invalid_api_key`
+- API Key 无效，或与 `Base URL` / 模型平台不匹配
+
+2. `404 model not found`
+- 模型名称或 Base URL 错误，或账号无权限
+
+3. 上传被风控拒绝（`content_policy_violation`）
+- 视频命中自动风控策略，系统按无人工复审流程直接拒绝
+
+4. 分片会话过期
+- 内存模式下服务重启后无法恢复缓存，需要重新上传
+
+---
+
+## 构建前端
 
 ```bash
 cd web-react
 npm run build
 npm run preview
 ```
-
----
-
-## ❗常见问题
-
-1. 模型连接 401 / invalid_api_key
-   - API Key 无效，或 Key 与 Base URL 不匹配。
-2. 模型连接 404 / model not found
-   - 模型名或 Base URL 错误，或账号无权限访问该模型。
-3. “请输入 API Key”
-   - 在页面设置中填写，或在 `.env` 配置 `MODEL_API_KEY`。
-4. 字幕/截图失败
-   - 检查视频格式、ffmpeg/whisper 是否可用。

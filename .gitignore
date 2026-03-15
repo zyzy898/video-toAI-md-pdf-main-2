@@ -52,8 +52,5 @@ Thumbs.db
 .vscode/
 !.vscode/extensions.json
 
-# -----------------------------
-# Local agent/workspace metadata
-# -----------------------------
-.codex/
-.learnings/
+
+
