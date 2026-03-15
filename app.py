@@ -55,6 +55,7 @@ DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 MAX_UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024
 DEFAULT_MODEL_NAME = "doubao-seed-2-0-pro-260215"
 DEFAULT_MODEL_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_content_plugin"
 HISTORY_OWNER_HEADER = "X-Client-ID"
 HISTORY_OWNER_COOKIE = "video_insights_client_id"
 HISTORY_OWNER_COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 2
@@ -142,6 +143,100 @@ def _as_bool(value: Any) -> bool:
 def _json_payload() -> Dict[str, Any]:
     payload = request.get_json(silent=True)
     return payload if isinstance(payload, dict) else {}
+
+
+def _extract_request_id(message: str) -> str:
+    match = re.search(
+        r"request[_\s-]*id['\"]?\s*[:]\s*['\"]?([A-Za-z0-9._-]+)",
+        str(message or ""),
+        flags=re.IGNORECASE,
+    )
+    return str(match.group(1)).strip() if match else ""
+
+
+def _extract_http_status_code(message: str) -> int | None:
+    text = str(message or "")
+    patterns = (
+        r"(?:error\s*code|status\s*code|http(?:\s*status)?)\s*[:=]?\s*(\d{3})",
+        r"['\"]status['\"]\s*[:=]\s*(\d{3})",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            status_code = int(match.group(1))
+        except (TypeError, ValueError):
+            continue
+        if 100 <= status_code <= 599:
+            return status_code
+    return None
+
+
+def _normalize_provider_error(error: Any, default_status: int = 500) -> Tuple[str, int, bool]:
+    raw_message = str(error or "").strip() or "模型服务调用失败"
+    lower = raw_message.lower()
+    request_id = _extract_request_id(raw_message)
+    request_id_text = f"（请求 ID：{request_id}）" if request_id else ""
+
+    is_web_search_not_open = (
+        "toolnotopen" in lower or "web search" in lower or "联网搜索" in raw_message
+    )
+    if is_web_search_not_open:
+        return (
+            f"联网搜索功能未开通。请前往火山引擎控制台开通后重试：{WEB_SEARCH_ACTIVATION_URL}{request_id_text}",
+            400,
+            True,
+        )
+
+    is_auth_error = (
+        "authentication fails" in lower
+        or "authentication_error" in lower
+        or "invalid_api_key" in lower
+        or "incorrect api key provided" in lower
+        or "api key format is incorrect" in lower
+        or (
+            "api key" in lower
+            and ("invalid" in lower or "is invalid" in lower or "无效" in raw_message)
+        )
+    )
+    if is_auth_error:
+        return (
+            (
+                "模型鉴权失败：API Key 无效、已过期，或与当前平台 / Base URL 不匹配。"
+                f"请检查后重试{request_id_text}"
+            ),
+            401,
+            True,
+        )
+
+    if "invalidendpointormodel.notfound" in lower or (
+        "model or endpoint" in lower and "not found" in lower
+    ):
+        return (
+            f"模型连接失败：模型或接口不存在，请检查 Base URL 和模型名称{request_id_text}",
+            400,
+            True,
+        )
+
+    if "does not exist or you do not have access" in lower:
+        return (
+            f"模型连接失败：模型不存在，或当前账号没有访问权限{request_id_text}",
+            403,
+            True,
+        )
+
+    if "rate limit" in lower or "too many requests" in lower:
+        return (f"请求过于频繁，请稍后重试{request_id_text}", 429, True)
+
+    if "timeout" in lower or "timed out" in lower:
+        return (f"模型服务请求超时，请稍后重试{request_id_text}", 504, True)
+
+    status_code = _extract_http_status_code(raw_message)
+    if status_code is not None and 400 <= status_code <= 599:
+        return (f"模型服务调用失败（HTTP {status_code}）{request_id_text}", status_code, True)
+
+    return raw_message, default_status, False
 
 
 def _assert_within(path: Path, root: Path, field_name: str) -> None:
@@ -824,12 +919,18 @@ def analyze():
             }
         )
     except Exception as exc:
+        error_message, status_code, normalized = _normalize_provider_error(
+            exc, default_status=500
+        )
         _update_single_progress(
             status="failed",
             stage="failed",
-            message=str(exc),
+            message=error_message,
         )
-        return jsonify({"error": str(exc), "trace": traceback.format_exc()}), 500
+        payload: Dict[str, Any] = {"error": error_message}
+        if status_code >= 500 and not normalized:
+            payload["trace"] = traceback.format_exc()
+        return jsonify(payload), status_code
 
 
 @app.route("/test_model", methods=["POST"])
@@ -868,7 +969,8 @@ def test_model():
             }
         )
     except Exception as exc:
-        return jsonify({"error": f"模型连接测试失败: {str(exc)}"}), 500
+        error_message, status_code, _ = _normalize_provider_error(exc, default_status=500)
+        return jsonify({"error": f"模型连接测试失败：{error_message}"}), status_code
 
 
 @app.route("/download/<filename>")
@@ -972,7 +1074,13 @@ def regenerate_document():
             }
         )
     except Exception as exc:
-        return jsonify({"error": str(exc), "trace": traceback.format_exc()}), 500
+        error_message, status_code, normalized = _normalize_provider_error(
+            exc, default_status=500
+        )
+        payload: Dict[str, Any] = {"error": error_message}
+        if status_code >= 500 and not normalized:
+            payload["trace"] = traceback.format_exc()
+        return jsonify(payload), status_code
 
 
 @app.route("/cleanup/<filename>")
@@ -1197,12 +1305,7 @@ def analyze_batch():
                     message=f"{filepath.name} \u5206\u6790\u5b8c\u6210",
                 )
             except Exception as exc:
-                error_msg = str(exc)
-                if "ToolNotOpen" in error_msg or "web search" in error_msg.lower():
-                    error_msg = (
-                        "联网搜索功能未开通，请在火山引擎控制台开通："
-                        "https://console.volcengine.com/common-buy/CC_content_plugin"
-                    )
+                error_msg, _, _ = _normalize_provider_error(exc, default_status=500)
                 _update_batch_progress(
                     current=idx,
                     current_file=filepath.name,

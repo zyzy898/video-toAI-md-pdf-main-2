@@ -67,6 +67,14 @@ const formatModelConnectionError = (message: string) => {
   const requestId = extractRequestId(message);
   const requestIdText = requestId ? `（请求 ID：${requestId}）` : "";
 
+  if (
+    lower.includes("authentication fails") ||
+    (lower.includes("your api key") && lower.includes("is invalid")) ||
+    (lower.includes("api key") && lower.includes("is invalid"))
+  ) {
+    return `模型连接失败：API Key 无效，或与当前平台不匹配。请检查 API Key 与 Base URL 是否对应${requestIdText}`;
+  }
+
   if (lower.includes("authenticationerror") || lower.includes("api key format is incorrect")) {
     return `模型连接失败：API Key 格式不正确，请检查密钥后重试${requestIdText}`;
   }
