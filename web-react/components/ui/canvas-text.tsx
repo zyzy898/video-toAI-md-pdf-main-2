@@ -1,6 +1,6 @@
 "use client";
 import { cn } from "@/lib/utils";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback, useMemo, type CSSProperties } from "react";
 
 interface CanvasTextProps {
   text: string;
@@ -17,10 +17,11 @@ interface CanvasTextProps {
 
 const MOBILE_MEDIA_QUERY = "(max-width: 768px)";
 const REDUCED_MOTION_MEDIA_QUERY = "(prefers-reduced-motion: reduce)";
-const DESKTOP_TARGET_FPS = 18;
 const MOBILE_TARGET_FPS = 10;
 const MAX_DESKTOP_DPR = 1.75;
 const MAX_MOBILE_DPR = 1.25;
+
+type RenderMode = "canvas" | "static";
 
 function resolveColor(color: string): string {
   if (color.startsWith("var(")) {
@@ -41,6 +42,44 @@ function isSameStringArray(left: string[], right: string[]): boolean {
   return true;
 }
 
+function supportsTextBackgroundClip(): boolean {
+  if (typeof window === "undefined") return false;
+  if (typeof CSS === "undefined" || typeof CSS.supports !== "function") return false;
+  return (
+    CSS.supports("background-clip", "text") ||
+    CSS.supports("-webkit-background-clip", "text")
+  );
+}
+
+function isDesktopPlatform(): boolean {
+  if (typeof window === "undefined" || typeof navigator === "undefined") return true;
+
+  const uaData = (
+    navigator as Navigator & { userAgentData?: { mobile?: boolean } }
+  ).userAgentData;
+  if (uaData && typeof uaData.mobile === "boolean") {
+    return !uaData.mobile;
+  }
+
+  const ua = navigator.userAgent || "";
+  const isMobileUa = /android|iphone|ipad|ipod|mobile|windows phone|blackberry|opera mini/i.test(
+    ua,
+  );
+  const isIpadDesktopUa = /macintosh/i.test(ua) && (navigator.maxTouchPoints || 0) > 1;
+  return !isMobileUa && !isIpadDesktopUa;
+}
+function buildStaticGradient(colors: string[]): string {
+  const palette = colors.length > 0 ? colors : ["#38bdf8", "#60a5fa", "#22d3ee"];
+  if (palette.length === 1) {
+    return `linear-gradient(90deg, ${palette[0]}, ${palette[0]})`;
+  }
+  const lastIndex = Math.max(1, palette.length - 1);
+  const stops = palette
+    .map((color, index) => `${color} ${(index / lastIndex) * 100}%`)
+    .join(", ");
+  return `linear-gradient(90deg, ${stops})`;
+}
+
 export function CanvasText({
   text,
   className = "",
@@ -58,8 +97,22 @@ export function CanvasText({
   const bgRef = useRef<HTMLSpanElement>(null);
   const animationRef = useRef<number>(0);
   const startTimeRef = useRef<number>(0);
+  const hasReportedRenderErrorRef = useRef(false);
+
   const [bgColor, setBgColor] = useState("#0a0a0a");
   const [resolvedColors, setResolvedColors] = useState<string[]>([]);
+  const [isDesktop, setIsDesktop] = useState<boolean>(() => isDesktopPlatform());
+  const [supportsTextClip, setSupportsTextClip] = useState<boolean>(() =>
+    supportsTextBackgroundClip(),
+  );
+  const [renderMode, setRenderMode] = useState<RenderMode>(() =>
+    supportsTextBackgroundClip() || isDesktopPlatform() ? "canvas" : "static",
+  );
+  const shouldEnableFallback = !isDesktop;
+
+  const fallbackToStatic = useCallback(() => {
+    setRenderMode((prev) => (prev === "static" ? prev : "static"));
+  }, []);
 
   const updateColors = useCallback(() => {
     if (bgRef.current) {
@@ -74,6 +127,16 @@ export function CanvasText({
   }, [colors]);
 
   useEffect(() => {
+    const desktop = isDesktopPlatform();
+    setIsDesktop((prev) => (prev === desktop ? prev : desktop));
+    const supports = supportsTextBackgroundClip();
+    setSupportsTextClip(supports);
+    if (!desktop && !supports) {
+      fallbackToStatic();
+    }
+  }, [fallbackToStatic]);
+
+  useEffect(() => {
     updateColors();
 
     const observer = new MutationObserver(updateColors);
@@ -86,19 +149,47 @@ export function CanvasText({
   }, [updateColors]);
 
   useEffect(() => {
+    if (renderMode !== "canvas") return;
+
     const canvas = canvasRef.current;
     const textEl = textRef.current;
-    if (!canvas || !textEl || resolvedColors.length === 0) return;
+    if (!canvas || !textEl || resolvedColors.length === 0) {
+      if (shouldEnableFallback) {
+        fallbackToStatic();
+      }
+      return;
+    }
 
     const ctx = canvas.getContext("2d", { alpha: false });
-    if (!ctx) return;
+    if (!ctx) {
+      if (shouldEnableFallback) {
+        fallbackToStatic();
+      }
+      return;
+    }
+
+    hasReportedRenderErrorRef.current = false;
+    let renderFailed = false;
+
+    const reportRenderError = (error: unknown, stage: string) => {
+      if (renderFailed) return;
+      renderFailed = true;
+      if (!hasReportedRenderErrorRef.current) {
+        hasReportedRenderErrorRef.current = true;
+        console.warn(`[CanvasText] fallback to static mode at ${stage}`, error);
+      }
+      if (shouldEnableFallback) {
+        fallbackToStatic();
+      }
+    };
 
     const isMobileViewport = window.matchMedia(MOBILE_MEDIA_QUERY).matches;
     const prefersReducedMotion = window
       .matchMedia(REDUCED_MOTION_MEDIA_QUERY)
       .matches;
-    const targetFps = isMobileViewport ? MOBILE_TARGET_FPS : DESKTOP_TARGET_FPS;
-    const frameIntervalMs = 1000 / Math.max(1, targetFps);
+    const frameIntervalMs = isMobileViewport
+      ? 1000 / Math.max(1, MOBILE_TARGET_FPS)
+      : 0;
     const dprCap = isMobileViewport ? MAX_MOBILE_DPR : MAX_DESKTOP_DPR;
     const shouldAnimate = animating && !prefersReducedMotion;
 
@@ -158,9 +249,15 @@ export function CanvasText({
       textEl.style.backgroundImage = `url(${canvas.toDataURL()})`;
     };
 
-    const redraw = (phase: number) => {
-      updateMetrics();
-      renderFrame(phase);
+    const redraw = (phase: number): boolean => {
+      try {
+        updateMetrics();
+        renderFrame(phase);
+        return true;
+      } catch (error) {
+        reportRenderError(error, "redraw");
+        return false;
+      }
     };
 
     const onVisibilityChange = () => {
@@ -186,7 +283,7 @@ export function CanvasText({
     }
 
     const handleResize = () => {
-      redraw(currentPhase);
+      if (!redraw(currentPhase)) return;
       lastRenderTime = 0;
     };
 
@@ -198,7 +295,15 @@ export function CanvasText({
       window.addEventListener("resize", handleResize);
     }
 
-    redraw(0);
+    if (!redraw(0)) {
+      resizeObserver?.disconnect();
+      intersectionObserver?.disconnect();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      if (!resizeObserver) {
+        window.removeEventListener("resize", handleResize);
+      }
+      return;
+    }
 
     const cleanup = () => {
       if (rafId) {
@@ -219,13 +324,21 @@ export function CanvasText({
     startTimeRef.current = performance.now();
 
     const animate = (currentTime: number) => {
+      if (renderFailed) {
+        return;
+      }
+
       if (!isInView || !isPageVisible) {
         rafId = window.requestAnimationFrame(animate);
         animationRef.current = rafId;
         return;
       }
 
-      if (lastRenderTime > 0 && currentTime - lastRenderTime < frameIntervalMs) {
+      if (
+        frameIntervalMs > 0 &&
+        lastRenderTime > 0 &&
+        currentTime - lastRenderTime < frameIntervalMs
+      ) {
         rafId = window.requestAnimationFrame(animate);
         animationRef.current = rafId;
         return;
@@ -234,7 +347,15 @@ export function CanvasText({
       lastRenderTime = currentTime;
       const elapsed = (currentTime - startTimeRef.current) / 1000;
       currentPhase = (elapsed / animationDuration) * Math.PI * 2;
-      renderFrame(currentPhase);
+
+      try {
+        renderFrame(currentPhase);
+      } catch (error) {
+        reportRenderError(error, "animate");
+        return;
+      }
+
+      if (renderFailed) return;
       rafId = window.requestAnimationFrame(animate);
       animationRef.current = rafId;
     };
@@ -251,7 +372,48 @@ export function CanvasText({
     lineGap,
     curveIntensity,
     animating,
+    renderMode,
+    fallbackToStatic,
+    shouldEnableFallback,
   ]);
+
+  const staticGradient = useMemo(
+    () => buildStaticGradient(resolvedColors),
+    [resolvedColors],
+  );
+
+  const textClassName = cn(
+    renderMode === "canvas" || supportsTextClip
+      ? "bg-clip-text text-transparent"
+      : "text-sky-300",
+    overlay ? "absolute inset-0" : "inline",
+    className,
+  );
+
+  const textStyle = useMemo<CSSProperties>(() => {
+    if (renderMode === "canvas") {
+      return {
+        WebkitBackgroundClip: "text",
+        backgroundClip: "text",
+        WebkitTextFillColor: "transparent",
+      };
+    }
+
+    if (supportsTextClip) {
+      return {
+        backgroundImage: staticGradient,
+        backgroundSize: "100% 100%",
+        WebkitBackgroundClip: "text",
+        backgroundClip: "text",
+        WebkitTextFillColor: "transparent",
+        color: "transparent",
+      };
+    }
+
+    return {
+      color: resolvedColors[0] || "#7dd3fc",
+    };
+  }, [renderMode, resolvedColors, staticGradient, supportsTextClip]);
 
   return (
     <span className={cn("relative inline", overlay && "absolute inset-0")}>
@@ -268,17 +430,7 @@ export function CanvasText({
         className="pointer-events-none absolute h-0 w-0 opacity-0"
         aria-hidden="true"
       />
-      <span
-        ref={textRef}
-        className={cn(
-          "bg-clip-text text-transparent",
-          overlay ? "absolute inset-0" : "inline",
-          className,
-        )}
-        style={{
-          WebkitBackgroundClip: "text",
-        }}
-      >
+      <span ref={textRef} className={textClassName} style={textStyle}>
         {text}
       </span>
     </span>
