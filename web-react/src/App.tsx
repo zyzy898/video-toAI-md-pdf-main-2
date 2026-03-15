@@ -1116,13 +1116,13 @@ export default function App() {
   const startSinglePolling = useCallback(() => {
     stopSinglePolling();
     void pullSingleProgress();
-    singleTimerRef.current = setInterval(() => void pullSingleProgress(), 2000);
+    singleTimerRef.current = setInterval(() => void pullSingleProgress(), 5000);
   }, [pullSingleProgress, stopSinglePolling]);
 
   const startBatchPolling = useCallback(() => {
     stopBatchPolling();
     void pullBatchProgress();
-    batchTimerRef.current = setInterval(() => void pullBatchProgress(), 2000);
+    batchTimerRef.current = setInterval(() => void pullBatchProgress(), 5000);
   }, [pullBatchProgress, stopBatchPolling]);
 
   const uploadSingleFileWithResume = useCallback(
@@ -2614,7 +2614,13 @@ export default function App() {
               <div className="h-2 overflow-hidden rounded bg-neutral-800"><div className="progress-fill-anim h-full bg-teal-500" style={{ width: `${progressPercent}%` }} /></div>
               {progressBoard.total > 0 ? <p className="mt-1 text-xs text-neutral-400">进度 {progressBoard.current}/{progressBoard.total}</p> : null}
               {progressBoard.success > 0 || progressBoard.failed > 0 ? <p className="text-xs text-neutral-400">成功 {progressBoard.success} · 失败 {progressBoard.failed}</p> : null}
-              {progressBoard.stage ? <p className="text-xs text-neutral-400">阶段: {STAGE_LABELS[progressBoard.stage] || progressBoard.stage}</p> : null}
+              {progressBoard.stage ? (
+                <p className="text-xs text-neutral-400">
+                  阶段: {progressBoard.stage === "idle" ? "正在准备分析..." : STAGE_LABELS[progressBoard.stage] || progressBoard.stage}
+                </p>
+              ) : (
+                <p className="text-xs text-neutral-400">阶段: 正在准备分析...</p>
+              )}
               {progressBoard.currentFile ? <p className="truncate text-xs text-teal-300">当前文件: {progressBoard.currentFile}</p> : null}
             </div>
           </div>

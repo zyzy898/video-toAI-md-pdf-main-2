@@ -10,6 +10,7 @@ export default defineConfig({
     },
   },
   server: {
+    port:80,
     proxy: {
       "/upload": "http://127.0.0.1:5000",
       "/upload_chunk_init": "http://127.0.0.1:5000",
