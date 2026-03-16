@@ -1,10 +1,13 @@
 ﻿import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
+import random
 import re
 import shutil
+import subprocess
 import traceback
 import zipfile
 from datetime import datetime
@@ -62,6 +65,10 @@ DEFAULT_MODEL_NAME = "doubao-seed-2-0-pro-260215"
 DEFAULT_MODEL_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_content_plugin"
 RISK_MAX_FRAMES = 6
+RISK_MIN_FRAMES = 3
+RISK_DYNAMIC_MAX_FRAMES = 15
+RISK_FRAME_GROWTH_START_SECONDS = 20
+RISK_FRAME_GROWTH_EVERY_SECONDS = 45
 RISK_BLOCK_THRESHOLD = 0.8
 RISK_RESTRICT_THRESHOLD = 0.55
 RISK_BLOCK_ON_RESTRICT = True
@@ -73,6 +80,14 @@ CONTENT_POLICY_BLOCK_MESSAGE = (
 )
 TEXT_RISK_BLOCK_THRESHOLD = 0.78
 TEXT_RISK_RESTRICT_THRESHOLD = 0.5
+ENV_FILE_PATH = (PROJECT_ROOT / ".env").resolve()
+RISK_FALLBACK_ENV_BLOCK_MARKER = "# ===== 风控视觉兜底（仅系统管理员） ====="
+RISK_FALLBACK_ENV_BLOCK_MARKER_LEGACY = "# ===== RISK VISUAL FALLBACK (SYSTEM ADMIN ONLY) ====="
+RISK_FALLBACK_ENV_KEYS = (
+    "RISK_FALLBACK_API_KEY",
+    "RISK_FALLBACK_MODEL_NAME",
+    "RISK_FALLBACK_MODEL_BASE_URL",
+)
 HISTORY_OWNER_HEADER = "X-Client-ID"
 HISTORY_OWNER_COOKIE = "video_insights_client_id"
 HISTORY_OWNER_COOKIE_MAX_AGE = 60 * 60 * 24 * 365 * 2
@@ -81,6 +96,7 @@ HISTORY_OWNER_PATTERN = re.compile(r"[^A-Za-z0-9._-]")
 QUARANTINE_ROOT = (UPLOAD_ROOT / ".quarantine").resolve()
 UPLOAD_STAGING_ROOT = (UPLOAD_ROOT / ".staging").resolve()
 RISK_KEYWORD_LEXICON_PATH = (PROJECT_ROOT / "risk_keyword_lexicon.json").resolve()
+RISK_BLOCKLIST_PATH = (UPLOAD_ROOT / ".risk_blocklist.json").resolve()
 
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -113,6 +129,59 @@ upload_memory_reserved_total_bytes = 0
 risk_keyword_lexicon_lock = RLock()
 risk_keyword_lexicon_cache_mtime_ns: int | None = None
 risk_keyword_lexicon_cache_data: Dict[str, Dict[str, Any]] | None = None
+risk_blocklist_lock = RLock()
+
+
+def _ensure_risk_fallback_env_file() -> None:
+    info_lines = [
+        RISK_FALLBACK_ENV_BLOCK_MARKER,
+        "# 系统自动创建，请勿向普通用户暴露。",
+        "# 该兜底模型必须是视觉模型（支持图片输入）。",
+        "# 仅在主视觉风控模型不可用时启用。",
+    ]
+    expected_lines = [*info_lines, *(f"{key}=" for key in RISK_FALLBACK_ENV_KEYS)]
+    env_path = ENV_FILE_PATH
+    try:
+        if not env_path.exists():
+            env_path.write_text("\n".join(expected_lines) + "\n", encoding="utf-8")
+            return
+
+        raw_text = env_path.read_text(encoding="utf-8")
+        missing_keys = [
+            key
+            for key in RISK_FALLBACK_ENV_KEYS
+            if re.search(rf"^\s*{re.escape(key)}\s*=", raw_text, re.MULTILINE) is None
+        ]
+        missing_marker = (
+            RISK_FALLBACK_ENV_BLOCK_MARKER not in raw_text
+            and RISK_FALLBACK_ENV_BLOCK_MARKER_LEGACY not in raw_text
+        )
+        if not missing_keys and not missing_marker:
+            return
+
+        append_lines: List[str] = []
+        if missing_marker:
+            append_lines.extend(info_lines)
+        append_lines.extend(f"{key}=" for key in missing_keys)
+        if not append_lines:
+            return
+
+        with open(env_path, "a", encoding="utf-8") as f:
+            if raw_text and not raw_text.endswith(("\n", "\r")):
+                f.write("\n")
+            f.write("\n".join(append_lines) + "\n")
+    except (OSError, UnicodeDecodeError) as exc:
+        logger.warning("无法自动维护 .env 风控兜底模板: %s", exc)
+
+
+def _read_risk_fallback_env_model_options() -> Tuple[str, str, str]:
+    api_key = str(os.getenv("RISK_FALLBACK_API_KEY", "")).strip()
+    model_name = str(os.getenv("RISK_FALLBACK_MODEL_NAME", "")).strip()
+    model_base_url = str(os.getenv("RISK_FALLBACK_MODEL_BASE_URL", "")).strip()
+    return api_key, model_name, model_base_url
+
+
+_ensure_risk_fallback_env_file()
 
 
 class ContentPolicyBlockedError(RuntimeError):
@@ -164,6 +233,185 @@ def _safe_float(
     if max_value is not None:
         number = min(max_value, number)
     return number
+
+
+def _normalize_sha256_fingerprint(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^0-9a-f]", "", text)
+    return text if len(text) == 64 else ""
+
+
+def _compute_file_sha256(file_path: Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with open(file_path, "rb") as f:
+        while True:
+            chunk = f.read(max(4096, int(chunk_size)))
+            if not chunk:
+                break
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _normalize_risk_blocklist_entry(raw_entry: Any) -> Dict[str, Any] | None:
+    if not isinstance(raw_entry, dict):
+        return None
+    sha256 = _normalize_sha256_fingerprint(raw_entry.get("sha256", ""))
+    if not sha256:
+        return None
+
+    reason_code = str(raw_entry.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip().upper()
+    reason = str(raw_entry.get("reason", "")).strip()
+    if len(reason) > 320:
+        reason = reason[:320]
+
+    return {
+        "sha256": sha256,
+        "decision": str(raw_entry.get("decision", "block")).strip().lower() or "block",
+        "risk_level": str(raw_entry.get("risk_level", "high")).strip().lower() or "high",
+        "reason_code": reason_code or "CONTENT_POLICY_VIOLATION",
+        "reason": reason,
+        "first_blocked_at": str(raw_entry.get("first_blocked_at", "")).strip(),
+        "last_blocked_at": str(raw_entry.get("last_blocked_at", "")).strip(),
+        "last_blocked_source": str(raw_entry.get("last_blocked_source", "")).strip(),
+        "block_count": _safe_int(raw_entry.get("block_count", 0), 0, 0),
+        "last_match_at": str(raw_entry.get("last_match_at", "")).strip(),
+        "last_match_source": str(raw_entry.get("last_match_source", "")).strip(),
+        "match_count": _safe_int(raw_entry.get("match_count", 0), 0, 0),
+    }
+
+
+def _load_risk_blocklist_unlocked() -> Dict[str, Dict[str, Any]]:
+    path = RISK_BLOCKLIST_PATH
+    if not path.exists():
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError) as exc:
+        logger.warning("读取风控黑名单失败，已忽略该文件: %s", exc)
+        return {}
+
+    raw_entries: List[Any] = []
+    if isinstance(payload, dict) and isinstance(payload.get("entries"), list):
+        raw_entries = payload.get("entries", [])
+    elif isinstance(payload, list):
+        raw_entries = payload
+    else:
+        return {}
+
+    entries: Dict[str, Dict[str, Any]] = {}
+    for item in raw_entries:
+        normalized = _normalize_risk_blocklist_entry(item)
+        if normalized is None:
+            continue
+        entries[normalized["sha256"]] = normalized
+    return entries
+
+
+def _write_risk_blocklist_unlocked(entries: Dict[str, Dict[str, Any]]) -> None:
+    ordered_entries = sorted(
+        entries.values(),
+        key=lambda item: str(item.get("last_blocked_at", "")).strip(),
+        reverse=True,
+    )
+    payload = {
+        "version": 1,
+        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "entries": ordered_entries,
+    }
+    tmp_path = RISK_BLOCKLIST_PATH.with_suffix(".tmp")
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+    tmp_path.replace(RISK_BLOCKLIST_PATH)
+
+
+def _build_blacklist_match_risk(fingerprint: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+    reason_code = str(entry.get("reason_code", "BLACKLIST_EXACT_HASH_MATCH")).strip().upper()
+    reason = (
+        "命中违规视频黑名单指纹（SHA-256 完全一致），已直接拒绝。"
+        f" 指纹：{fingerprint}"
+    )
+    return {
+        "decision": "block",
+        "risk_level": "high",
+        "reason_code": "BLACKLIST_EXACT_HASH_MATCH",
+        "reason": reason,
+        "confidence": 1.0,
+        "scores": {"nudity": 1.0, "violence": 1.0, "gore": 1.0},
+        "dimensions": {},
+        "frame_count": 0,
+        "hash_sha256": fingerprint,
+        "blacklist_reason_code": reason_code,
+        "blacklist_block_count": _safe_int(entry.get("block_count", 0), 0, 0),
+        "blacklist_match_count": _safe_int(entry.get("match_count", 0), 0, 0),
+    }
+
+
+def _match_blacklisted_video_fingerprint(video_path: Path, source: str) -> Dict[str, Any] | None:
+    try:
+        fingerprint = _compute_file_sha256(video_path)
+    except OSError as exc:
+        logger.warning("计算视频指纹失败，跳过黑名单比对: %s", exc)
+        return None
+
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    with risk_blocklist_lock:
+        entries = _load_risk_blocklist_unlocked()
+        existing = entries.get(fingerprint)
+        if existing is None:
+            return None
+
+        existing["last_match_at"] = now_text
+        existing["last_match_source"] = str(source or "").strip()
+        existing["match_count"] = _safe_int(existing.get("match_count", 0), 0, 0) + 1
+        entries[fingerprint] = existing
+        try:
+            _write_risk_blocklist_unlocked(entries)
+        except OSError as exc:
+            logger.warning("更新风控黑名单命中计数失败: %s", exc)
+
+    return _build_blacklist_match_risk(fingerprint, existing)
+
+
+def _register_blocked_video_fingerprint(video_path: Path, risk: Dict[str, Any], source: str) -> str:
+    try:
+        fingerprint = _compute_file_sha256(video_path)
+    except OSError as exc:
+        logger.warning("计算违规视频指纹失败，无法写入黑名单: %s", exc)
+        return ""
+
+    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    reason_code = str(risk.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip().upper()
+    reason = str(risk.get("reason", "")).strip()
+    if len(reason) > 320:
+        reason = reason[:320]
+    decision = str(risk.get("decision", "block")).strip().lower() or "block"
+    risk_level = str(risk.get("risk_level", "high")).strip().lower() or "high"
+
+    with risk_blocklist_lock:
+        entries = _load_risk_blocklist_unlocked()
+        existing = entries.get(fingerprint, {})
+        entry = {
+            "sha256": fingerprint,
+            "decision": decision,
+            "risk_level": risk_level,
+            "reason_code": reason_code or "CONTENT_POLICY_VIOLATION",
+            "reason": reason,
+            "first_blocked_at": str(existing.get("first_blocked_at", "")).strip() or now_text,
+            "last_blocked_at": now_text,
+            "last_blocked_source": str(source or "").strip(),
+            "block_count": _safe_int(existing.get("block_count", 0), 0, 0) + 1,
+            "last_match_at": str(existing.get("last_match_at", "")).strip(),
+            "last_match_source": str(existing.get("last_match_source", "")).strip(),
+            "match_count": _safe_int(existing.get("match_count", 0), 0, 0),
+        }
+        entries[fingerprint] = entry
+        try:
+            _write_risk_blocklist_unlocked(entries)
+        except OSError as exc:
+            logger.warning("写入风控黑名单失败: %s", exc)
+
+    return fingerprint
 
 
 def _as_bool(value: Any) -> bool:
@@ -573,10 +821,154 @@ def _risk_decision_from_rank(rank: int) -> str:
     return "restrict"
 
 
-def _build_risk_timestamps(max_frames: int) -> List[int]:
-    base = [0, 2, 5, 10, 15, 25, 35, 50, 70, 95]
-    frame_count = _safe_int(max_frames, RISK_MAX_FRAMES, 3, len(base))
-    return base[:frame_count]
+def _risk_level_from_decision(decision: str) -> str:
+    normalized = str(decision or "").strip().lower()
+    if normalized == "block":
+        return "high"
+    if normalized == "restrict":
+        return "medium"
+    return "low"
+
+
+def _resolve_risk_frame_count(max_frames: int, video_duration_seconds: float | None) -> int:
+    base_count = _safe_int(max_frames, RISK_MAX_FRAMES, RISK_MIN_FRAMES, RISK_DYNAMIC_MAX_FRAMES)
+    if video_duration_seconds is None or video_duration_seconds <= 0:
+        return base_count
+
+    growth_source = max(0.0, float(video_duration_seconds) - RISK_FRAME_GROWTH_START_SECONDS)
+    bonus_frames = int(growth_source // RISK_FRAME_GROWTH_EVERY_SECONDS)
+    return _safe_int(
+        base_count + bonus_frames,
+        base_count,
+        RISK_MIN_FRAMES,
+        RISK_DYNAMIC_MAX_FRAMES,
+    )
+
+
+def _stable_risk_sampling_seed(
+    video_path: Path | None, video_duration_seconds: float | None, frame_count: int
+) -> int:
+    path_text = str(video_path or "")
+    size = 0
+    mtime_ns = 0
+    if video_path is not None:
+        try:
+            stat_info = video_path.stat()
+            size = int(getattr(stat_info, "st_size", 0))
+            mtime_ns = int(getattr(stat_info, "st_mtime_ns", int(stat_info.st_mtime * 1e9)))
+        except OSError:
+            pass
+    duration_text = "none" if video_duration_seconds is None else f"{float(video_duration_seconds):.3f}"
+    seed_text = f"{path_text}|{size}|{mtime_ns}|{duration_text}|{frame_count}"
+    digest = hashlib.sha256(seed_text.encode("utf-8", errors="ignore")).hexdigest()
+    return int(digest[:16], 16)
+
+
+def _probe_video_duration_seconds(video_path: Path, ffmpeg_cmd: str = "ffmpeg") -> float | None:
+    ffprobe_candidates: List[str] = ["ffprobe"]
+    ffmpeg_text = str(ffmpeg_cmd or "").strip()
+    if ffmpeg_text:
+        ffmpeg_path = Path(ffmpeg_text)
+        if ffmpeg_path.is_absolute():
+            suffix = ffmpeg_path.suffix.lower()
+            ffprobe_name = "ffprobe.exe" if suffix == ".exe" else "ffprobe"
+            ffprobe_candidates.insert(0, str(ffmpeg_path.with_name(ffprobe_name)))
+
+    seen: set[str] = set()
+    for ffprobe_cmd in ffprobe_candidates:
+        cmd_text = str(ffprobe_cmd or "").strip()
+        if not cmd_text or cmd_text in seen:
+            continue
+        seen.add(cmd_text)
+        try:
+            result = subprocess.run(
+                [
+                    cmd_text,
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(video_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=18,
+            )
+        except Exception:
+            continue
+
+        raw_output = (result.stdout or "").strip()
+        if not raw_output:
+            continue
+        try:
+            duration = float(raw_output)
+        except (TypeError, ValueError):
+            continue
+        if duration > 0:
+            return duration
+
+    try:
+        fallback = subprocess.run(
+            [ffmpeg_text or "ffmpeg", "-i", str(video_path)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=18,
+        )
+        probe_text = f"{fallback.stdout or ''}\n{fallback.stderr or ''}"
+        match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", probe_text)
+        if not match:
+            return None
+        hours = int(match.group(1))
+        minutes = int(match.group(2))
+        seconds = float(match.group(3))
+        duration = hours * 3600 + minutes * 60 + seconds
+        return duration if duration > 0 else None
+    except Exception:
+        return None
+
+
+def _build_risk_timestamps(
+    max_frames: int,
+    *,
+    video_duration_seconds: float | None = None,
+    video_path: Path | None = None,
+) -> List[int]:
+    frame_count = _resolve_risk_frame_count(max_frames, video_duration_seconds)
+    if video_duration_seconds is None or video_duration_seconds <= 0:
+        base = [0, 2, 5, 10, 15, 25, 35, 50, 70, 95, 125, 160, 200, 245, 295]
+        return base[:frame_count]
+
+    max_second = max(1, int(video_duration_seconds) - 1)
+    seed = _stable_risk_sampling_seed(video_path, video_duration_seconds, frame_count)
+    rng = random.Random(seed)
+
+    timestamps: List[int] = []
+    for idx in range(frame_count):
+        segment_start = int((idx * max_second) / frame_count)
+        segment_end = int(((idx + 1) * max_second) / frame_count)
+        if idx == frame_count - 1:
+            segment_end = max_second
+        if segment_end < segment_start:
+            segment_end = segment_start
+        if segment_end == segment_start:
+            sample = segment_start
+        else:
+            sample = rng.randint(segment_start, segment_end)
+        timestamps.append(sample)
+
+    unique_sorted = sorted(set(max(0, min(max_second, int(ts))) for ts in timestamps))
+    while len(unique_sorted) < frame_count:
+        candidate = rng.randint(0, max_second)
+        if candidate in unique_sorted:
+            continue
+        unique_sorted.append(candidate)
+        unique_sorted.sort()
+
+    return unique_sorted[:frame_count]
 
 
 def _is_image_input_not_supported_error(error: Any) -> bool:
@@ -822,7 +1214,12 @@ def _build_text_fallback_risk_result(
 
 
 def _run_text_fallback_risk_gate(
-    agent: VideoAnalyzerAgent, video_path: Path, output_dir: Path
+    agent: VideoAnalyzerAgent,
+    video_path: Path,
+    output_dir: Path,
+    *,
+    strict_on_insufficient_signal: bool = True,
+    fallback_mode: str = "subtitle_keyword_risk_gate",
 ) -> Dict[str, Any]:
     subtitle_dir = output_dir / ".risk_subtitles"
     subtitle_dir.mkdir(parents=True, exist_ok=True)
@@ -842,19 +1239,37 @@ def _run_text_fallback_risk_gate(
 
     combined_text = " ".join(part for part in [subtitle_text, filename_text] if part).strip()
     if not combined_text:
+        if strict_on_insufficient_signal:
+            return {
+                "decision": "block",
+                "risk_level": "high",
+                "reason_code": "TEXT_RISK_SIGNAL_INSUFFICIENT",
+                "reason": "视觉模型不支持图片输入，且字幕关键词信号不足，已按高风险默认拒绝上传。",
+                "confidence": 0.62,
+                "scores": {"nudity": 0.0, "violence": 0.0, "gore": 0.0},
+                "dimensions": {},
+                "frame_count": 0,
+                "fallback_mode": fallback_mode,
+                "fallback_evidence": {"subtitle_used": False, "filename_used": bool(filename_text)},
+            }
         return {
-            "decision": "block",
-            "risk_level": "high",
+            "decision": "allow",
+            "risk_level": "low",
             "reason_code": "TEXT_RISK_SIGNAL_INSUFFICIENT",
-            "reason": "视觉模型不支持图片输入，且字幕关键词信号不足，已按高风险默认拒绝上传。",
-            "confidence": 0.62,
+            "reason": "字幕关键词信号不足，文本兜底链路不单独触发拦截。",
+            "confidence": 0.35,
             "scores": {"nudity": 0.0, "violence": 0.0, "gore": 0.0},
             "dimensions": {},
             "frame_count": 0,
-            "fallback_mode": "subtitle_keyword_risk_gate",
+            "fallback_mode": fallback_mode,
             "fallback_evidence": {"subtitle_used": False, "filename_used": bool(filename_text)},
+            "fallback_non_strict": True,
         }
-    return _build_text_fallback_risk_result(combined_text, subtitle_text, filename_text)
+    result = _build_text_fallback_risk_result(combined_text, subtitle_text, filename_text)
+    result["fallback_mode"] = fallback_mode
+    if not strict_on_insufficient_signal:
+        result["fallback_non_strict"] = True
+    return result
 
 
 def _sample_risk_frames(
@@ -863,11 +1278,158 @@ def _sample_risk_frames(
     frame_dir = output_dir / ".risk_frames"
     frame_dir.mkdir(parents=True, exist_ok=True)
     frame_paths: List[Path] = []
-    for idx, second in enumerate(_build_risk_timestamps(max_frames), start=1):
+    video_duration_seconds = _probe_video_duration_seconds(
+        video_path,
+        str(getattr(agent, "ffmpeg_cmd", "")).strip() or "ffmpeg",
+    )
+    timestamps = _build_risk_timestamps(
+        max_frames,
+        video_duration_seconds=video_duration_seconds,
+        video_path=video_path,
+    )
+    logger.info(
+        "Risk gate sampling: duration=%.2fs, frames=%s, timestamps=%s",
+        float(video_duration_seconds or 0.0),
+        len(timestamps),
+        timestamps,
+    )
+    for idx, second in enumerate(timestamps, start=1):
         frame_path = agent.generate_screenshot(video_path, frame_dir, second, step_num=idx)
         if frame_path is not None and frame_path.exists():
             frame_paths.append(frame_path)
     return frame_paths, frame_dir
+
+
+def _build_env_visual_fallback_agent(primary_agent: VideoAnalyzerAgent) -> VideoAnalyzerAgent | None:
+    api_key, model_name, model_base_url = _read_risk_fallback_env_model_options()
+    if not api_key or not model_name:
+        return None
+
+    primary_api_key = str(getattr(primary_agent, "api_key", "")).strip()
+    primary_model_name = str(getattr(primary_agent, "model", "")).strip()
+    primary_base_url = str(getattr(primary_agent, "base_url", "")).strip()
+    normalized_base_url = model_base_url or DEFAULT_MODEL_BASE_URL
+
+    # Skip meaningless self-fallback to the exact same visual model config.
+    if (
+        api_key == primary_api_key
+        and model_name == primary_model_name
+        and normalized_base_url == primary_base_url
+    ):
+        return None
+
+    try:
+        return VideoAnalyzerAgent(
+            api_key=api_key,
+            whisper_model="base",
+            model_name=model_name,
+            model_base_url=normalized_base_url,
+        )
+    except Exception as exc:
+        logger.warning("系统级视觉风控兜底模型初始化失败: %s", exc)
+        return None
+
+
+def _try_env_visual_risk_fallback(
+    primary_agent: VideoAnalyzerAgent, frame_paths: List[Path]
+) -> Tuple[Dict[str, Any] | None, str]:
+    env_agent = _build_env_visual_fallback_agent(primary_agent)
+    if env_agent is None:
+        return None, "ENV_VISUAL_FALLBACK_NOT_READY"
+
+    try:
+        raw = _run_async(_request_risk_decision(env_agent, frame_paths))
+        normalized = _normalize_risk_result(
+            raw if isinstance(raw, dict) else {}, frame_count=len(frame_paths)
+        )
+        normalized["fallback_mode"] = "env_visual_model_risk_gate"
+        normalized["fallback_visual_model"] = str(getattr(env_agent, "model", "")).strip()
+        normalized["fallback_visual_base_url"] = str(getattr(env_agent, "base_url", "")).strip()
+        return normalized, ""
+    except Exception as exc:
+        error_message, status_code, _ = _normalize_provider_error(exc, default_status=500)
+        return None, f"{error_message} (status={status_code})"
+
+
+def _run_text_fallback_after_visual_unavailable(
+    agent: VideoAnalyzerAgent,
+    video_path: Path,
+    output_dir: Path,
+    reason_code: str,
+    reason_suffix: str,
+    provider_status: int | None = None,
+    provider_error: str = "",
+    env_visual_error: str = "",
+) -> Dict[str, Any]:
+    fallback = _run_text_fallback_risk_gate(agent, video_path, output_dir)
+    fallback["reason_code"] = str(fallback.get("reason_code", "")).strip() or reason_code
+    base_reason = str(fallback.get("reason", "")).strip()
+    if base_reason:
+        fallback["reason"] = f"{base_reason}（{reason_suffix}）"
+    else:
+        fallback["reason"] = reason_suffix
+    fallback["visual_fallback_attempted"] = True
+    if provider_status is not None:
+        fallback["provider_status"] = provider_status
+    if provider_error:
+        fallback["provider_error"] = provider_error
+    if env_visual_error:
+        fallback["fallback_visual_error"] = env_visual_error
+    return fallback
+
+
+def _apply_text_secondary_risk_gate_when_visual_available(
+    primary_risk: Dict[str, Any],
+    agent: VideoAnalyzerAgent,
+    video_path: Path,
+    output_dir: Path,
+) -> Dict[str, Any]:
+    merged = dict(primary_risk)
+    text_risk = _run_text_fallback_risk_gate(
+        agent=agent,
+        video_path=video_path,
+        output_dir=output_dir,
+        strict_on_insufficient_signal=False,
+        fallback_mode="subtitle_keyword_secondary_gate",
+    )
+
+    primary_decision = str(merged.get("decision", "allow")).strip().lower()
+    text_decision = str(text_risk.get("decision", "allow")).strip().lower()
+    merged["text_fallback_applied"] = True
+    merged["text_fallback_mode"] = "subtitle_keyword_secondary_gate"
+    merged["text_fallback_risk"] = {
+        "decision": text_decision,
+        "risk_level": str(text_risk.get("risk_level", _risk_level_from_decision(text_decision))),
+        "reason_code": str(text_risk.get("reason_code", "")),
+        "reason": str(text_risk.get("reason", "")),
+        "confidence": text_risk.get("confidence", 0.0),
+    }
+
+    if _risk_decision_rank(text_decision) <= _risk_decision_rank(primary_decision):
+        merged["text_fallback_override"] = False
+        return merged
+
+    text_reason = str(text_risk.get("reason", "")).strip()
+    merged["decision"] = text_decision
+    merged["risk_level"] = str(text_risk.get("risk_level", "")).strip().lower() or _risk_level_from_decision(
+        text_decision
+    )
+    merged["reason_code"] = str(text_risk.get("reason_code", "")).strip() or "TEXT_RISK_SECONDARY_GATE"
+    merged["reason"] = (
+        f"{text_reason}（视觉模型可用，字幕关键词兜底链路触发更严格策略）"
+        if text_reason
+        else "视觉模型可用，字幕关键词兜底链路触发更严格策略。"
+    )
+    merged["confidence"] = _normalize_risk_score(
+        text_risk.get("confidence", merged.get("confidence", 0.6)),
+        _normalize_risk_score(merged.get("confidence", 0.6), 0.6),
+    )
+    if isinstance(text_risk.get("scores"), dict):
+        merged["scores"] = text_risk.get("scores", {})
+    if isinstance(text_risk.get("dimensions"), dict):
+        merged["dimensions"] = text_risk.get("dimensions", {})
+    merged["text_fallback_override"] = True
+    return merged
 
 
 def _normalize_risk_result(raw_result: Dict[str, Any], frame_count: int) -> Dict[str, Any]:
@@ -1055,66 +1617,87 @@ def _run_video_risk_gate(
         normalized = _normalize_risk_result(
             raw if isinstance(raw, dict) else {}, frame_count=len(frame_paths)
         )
+        normalized = _apply_text_secondary_risk_gate_when_visual_available(
+            primary_risk=normalized,
+            agent=agent,
+            video_path=video_path,
+            output_dir=output_dir,
+        )
         return normalized, frame_dir
     except Exception as exc:
+        provider_status: int | None = None
+        provider_error = ""
+        reason_code = "TEXT_RISK_MODEL_FALLBACK"
+        reason_suffix = (
+            "视觉风控服务暂不可用，已优先尝试系统级视觉兜底模型，"
+            "兜底模型不可用后自动启用字幕关键词风控兜底。"
+        )
+
         if _is_image_input_not_supported_error(exc):
             logger.warning(
-                "Risk gate model does not support image input, fallback to subtitle keyword gate: %s",
+                "Risk gate model does not support image input, trying system env visual fallback first: %s",
                 exc,
             )
-            fallback = _run_text_fallback_risk_gate(agent, video_path, output_dir)
-            fallback["reason_code"] = str(fallback.get("reason_code", "")).strip() or "TEXT_RISK_FALLBACK"
-            fallback["reason"] = (
-                f"{str(fallback.get('reason', '')).strip()}（已自动启用字幕关键词风控兜底）"
+            provider_error = str(exc or "").strip() or "visual_input_not_supported"
+            reason_code = "TEXT_RISK_FALLBACK"
+            reason_suffix = (
+                "主视觉风控模型不支持图片输入，已优先尝试系统级视觉兜底模型，"
+                "兜底模型不可用后自动启用字幕关键词风控兜底。"
             )
-            return fallback, frame_dir
-
-        error_message, status_code, normalized = _normalize_provider_error(
-            exc, default_status=500
-        )
-        if status_code not in {400, 401, 403}:
+        else:
+            error_message, status_code, _ = _normalize_provider_error(
+                exc, default_status=500
+            )
+            provider_status = status_code
+            provider_error = error_message
             logger.warning(
-                "Risk gate unavailable, fallback to subtitle keyword gate: status=%s error=%s",
+                "Risk gate visual check unavailable, trying system env visual fallback first: status=%s error=%s",
                 status_code,
                 error_message,
             )
-            fallback = _run_text_fallback_risk_gate(agent, video_path, output_dir)
-            fallback["reason_code"] = (
-                str(fallback.get("reason_code", "")).strip() or "TEXT_RISK_MODEL_FALLBACK"
-            )
-            fallback["reason"] = (
-                f"{str(fallback.get('reason', '')).strip()}（视觉风控服务暂不可用，已自动启用字幕关键词风控兜底）"
-            )
-            fallback["provider_status"] = status_code
-            fallback["provider_error"] = error_message
-            return fallback, frame_dir
+            if status_code in {400, 401, 403}:
+                reason_code = "TEXT_RISK_VISUAL_MODEL_UNAVAILABLE"
+                reason_suffix = (
+                    "主视觉风控模型当前不可用（鉴权/配置受限），已优先尝试系统级视觉兜底模型，"
+                    "兜底模型不可用后自动启用字幕关键词风控兜底。"
+                )
 
-        reason_code = "RISK_MODEL_UNAVAILABLE"
-        if status_code == 401:
-            reason_code = "RISK_MODEL_AUTH_FAILED"
-        elif status_code in {400, 403}:
-            reason_code = "RISK_MODEL_CONFIG_INVALID"
-        logger.warning("Risk gate request failed, blocking by default: %s", error_message)
-        return (
-            {
-                "decision": "block",
-                "risk_level": "high",
-                "reason_code": reason_code,
-                "reason": (
-                    error_message
-                    if normalized
-                    else "Risk gate model is unavailable, request is blocked by default."
-                ),
-                "confidence": 1.0,
-                "scores": {"nudity": 1.0, "violence": 1.0, "gore": 1.0},
-                "dimensions": {},
-                "frame_count": len(frame_paths),
-                "error": str(exc),
-                "provider_status": status_code,
-                "provider_error": error_message,
-            },
-            frame_dir,
+        env_visual_result, env_visual_error = _try_env_visual_risk_fallback(agent, frame_paths)
+        if env_visual_result is not None:
+            base_reason = str(env_visual_result.get("reason", "")).strip()
+            env_visual_result["reason"] = (
+                f"{base_reason}（主视觉风控不可用，已自动切换到系统级视觉兜底模型）"
+                if base_reason
+                else "主视觉风控不可用，已自动切换到系统级视觉兜底模型。"
+            )
+            env_visual_result["visual_fallback_attempted"] = True
+            if provider_status is not None:
+                env_visual_result["provider_status"] = provider_status
+            if provider_error:
+                env_visual_result["provider_error"] = provider_error
+            env_visual_result = _apply_text_secondary_risk_gate_when_visual_available(
+                primary_risk=env_visual_result,
+                agent=agent,
+                video_path=video_path,
+                output_dir=output_dir,
+            )
+            return env_visual_result, frame_dir
+
+        logger.warning(
+            "System env visual fallback unavailable, switch to subtitle keyword risk fallback: %s",
+            env_visual_error,
         )
+        fallback = _run_text_fallback_after_visual_unavailable(
+            agent=agent,
+            video_path=video_path,
+            output_dir=output_dir,
+            reason_code=reason_code,
+            reason_suffix=reason_suffix,
+            provider_status=provider_status,
+            provider_error=provider_error,
+            env_visual_error=env_visual_error,
+        )
+        return fallback, frame_dir
 
 
 def _reason_code_slug(reason_code: str) -> str:
@@ -1376,6 +1959,18 @@ def process_video(
         model_name=model_name,
         model_base_url=model_base_url,
     )
+    report("moderation", "正在执行黑名单指纹比对...")
+    blacklist_risk = _match_blacklisted_video_fingerprint(video_path, source="analyze")
+    if blacklist_risk is not None:
+        quarantine_path = _quarantine_upload_file(video_path, str(blacklist_risk.get("reason_code", "")))
+        if quarantine_path is not None:
+            blacklist_risk["quarantine_path"] = str(quarantine_path)
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise ContentPolicyBlockedError(
+            "视频命中黑名单指纹（SHA-256 完全一致），已拒绝处理。",
+            blacklist_risk,
+        )
+
     report("moderation", "正在执行内容风控检测...")
     risk, risk_frame_dir = _run_video_risk_gate(agent, video_path, output_dir)
     if _is_risk_infra_failure(risk):
@@ -1386,6 +1981,11 @@ def process_video(
             str(risk.get("provider_error") or risk.get("reason") or "风控服务不可用")
         )
     if _should_block_by_risk(str(risk.get("decision", ""))):
+        blocked_hash = _register_blocked_video_fingerprint(
+            video_path, risk, source="analyze_risk_block"
+        )
+        if blocked_hash:
+            risk["hash_sha256"] = blocked_hash
         quarantine_path = _quarantine_upload_file(video_path, str(risk.get("reason_code", "")))
         if quarantine_path is not None:
             risk["quarantine_path"] = str(quarantine_path)
@@ -1516,6 +2116,11 @@ def upload_file():
     staged_path = _build_upload_staging_path(file.filename)
     try:
         file.save(str(staged_path))
+        blacklist_risk = _match_blacklisted_video_fingerprint(staged_path, source="upload_single")
+        if blacklist_risk is not None:
+            _safe_remove_file(staged_path)
+            return jsonify(_risk_reject_payload(blacklist_risk)), 403
+
         risk_agent = _build_risk_agent_for_upload(
             upload_api_key, upload_model_name, upload_model_base_url
         )
@@ -1526,6 +2131,11 @@ def upload_file():
             payload, status_code = _build_upload_risk_failure_response(risk)
             return jsonify(payload), status_code
         if _should_block_by_risk(str(risk.get("decision", ""))):
+            blocked_hash = _register_blocked_video_fingerprint(
+                staged_path, risk, source="upload_single_risk_block"
+            )
+            if blocked_hash:
+                risk["hash_sha256"] = blocked_hash
             _safe_remove_file(staged_path)
             return jsonify(_risk_reject_payload(risk)), 403
 
@@ -1837,6 +2447,13 @@ def upload_chunk_finalize():
         return jsonify({"error": "上传文件状态异常"}), 500
 
     try:
+        blacklist_risk = _match_blacklisted_video_fingerprint(
+            staging_path, source="upload_chunk_finalize"
+        )
+        if blacklist_risk is not None:
+            _safe_remove_file(staging_path)
+            return jsonify(_risk_reject_payload(blacklist_risk)), 403
+
         risk_agent = _build_risk_agent_for_upload(
             risk_api_key, risk_model_name, risk_model_base_url
         )
@@ -1847,6 +2464,11 @@ def upload_chunk_finalize():
             payload, status_code = _build_upload_risk_failure_response(risk)
             return jsonify(payload), status_code
         if _should_block_by_risk(str(risk.get("decision", ""))):
+            blocked_hash = _register_blocked_video_fingerprint(
+                staging_path, risk, source="upload_chunk_finalize_risk_block"
+            )
+            if blocked_hash:
+                risk["hash_sha256"] = blocked_hash
             _safe_remove_file(staging_path)
             return jsonify(_risk_reject_payload(risk)), 403
 
@@ -2231,6 +2853,14 @@ def upload_batch_files():
         staged_path = _build_upload_staging_path(file.filename)
         try:
             file.save(str(staged_path))
+            blacklist_risk = _match_blacklisted_video_fingerprint(
+                staged_path, source="upload_batch"
+            )
+            if blacklist_risk is not None:
+                _safe_remove_file(staged_path)
+                errors.append(f"{file.filename}: 命中黑名单指纹拦截（完全一致视频）")
+                continue
+
             risk = _moderate_staged_upload(staged_path, risk_agent)
             if _is_risk_infra_failure(risk):
                 _safe_remove_file(staged_path)
@@ -2238,6 +2868,11 @@ def upload_batch_files():
                 errors.append(f"{file.filename}: {str(payload.get('error', '上传风控服务不可用'))}")
                 continue
             if _should_block_by_risk(str(risk.get("decision", ""))):
+                blocked_hash = _register_blocked_video_fingerprint(
+                    staged_path, risk, source="upload_batch_risk_block"
+                )
+                if blocked_hash:
+                    risk["hash_sha256"] = blocked_hash
                 _safe_remove_file(staged_path)
                 errors.append(f"{file.filename}: {CONTENT_POLICY_BLOCK_MESSAGE}")
                 continue
