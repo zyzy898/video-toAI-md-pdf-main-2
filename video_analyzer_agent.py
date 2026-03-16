@@ -321,7 +321,16 @@ class VideoAnalyzerAgent:
 
     # ========== Whisper 字幕生成 ==========
 
-    def _build_subtitle_cache_key(self, video_path: Path) -> str:
+    def _build_subtitle_cache_key(
+        self,
+        video_path: Path,
+        cache_identity: Optional[str] = None,
+    ) -> str:
+        normalized_identity = str(cache_identity or "").strip()
+        if normalized_identity:
+            raw_key = f"cache_identity:{normalized_identity}|{self.whisper_model}|zh"
+            return hashlib.sha256(raw_key.encode("utf-8", errors="ignore")).hexdigest()
+
         stat_info = video_path.stat()
         mtime_ns = int(getattr(stat_info, "st_mtime_ns", int(stat_info.st_mtime * 1e9)))
         raw_key = (
@@ -330,9 +339,14 @@ class VideoAnalyzerAgent:
         )
         return hashlib.sha256(raw_key.encode("utf-8", errors="ignore")).hexdigest()
 
-    def _try_restore_subtitle_from_cache(self, video_path: Path, target_srt_path: Path) -> bool:
+    def _try_restore_subtitle_from_cache(
+        self,
+        video_path: Path,
+        target_srt_path: Path,
+        cache_identity: Optional[str] = None,
+    ) -> bool:
         try:
-            cache_key = self._build_subtitle_cache_key(video_path)
+            cache_key = self._build_subtitle_cache_key(video_path, cache_identity=cache_identity)
         except OSError:
             return False
 
@@ -347,9 +361,14 @@ class VideoAnalyzerAgent:
             except OSError:
                 return False
 
-    def _save_subtitle_to_cache(self, video_path: Path, srt_path: Path) -> None:
+    def _save_subtitle_to_cache(
+        self,
+        video_path: Path,
+        srt_path: Path,
+        cache_identity: Optional[str] = None,
+    ) -> None:
         try:
-            cache_key = self._build_subtitle_cache_key(video_path)
+            cache_key = self._build_subtitle_cache_key(video_path, cache_identity=cache_identity)
         except OSError:
             return
 
@@ -362,11 +381,17 @@ class VideoAnalyzerAgent:
             except OSError:
                 return
 
-    def generate_subtitles(self, video_path: str, output_dir: str = ".") -> str:
+    def generate_subtitles(
+        self,
+        video_path: str,
+        output_dir: str = ".",
+        cache_identity: Optional[str] = None,
+    ) -> str:
         """
         调用本地 whisper 命令行从视频生成 SRT 字幕文件
         :param video_path: 视频文件路径
         :param output_dir: 字幕输出目录
+        :param cache_identity: 跨目录复用字幕缓存的身份标识（如视频 SHA-256）
         :return: 生成的 SRT 文件路径
         """
         video_file = Path(video_path)
@@ -377,7 +402,11 @@ class VideoAnalyzerAgent:
 
         if srt_path.exists() and srt_path.stat().st_size > 0:
             return str(srt_path)
-        if self._try_restore_subtitle_from_cache(video_file, srt_path):
+        if self._try_restore_subtitle_from_cache(
+            video_file,
+            srt_path,
+            cache_identity=cache_identity,
+        ):
             print(f"字幕缓存命中: {srt_path}")
             return str(srt_path)
 
@@ -414,7 +443,7 @@ class VideoAnalyzerAgent:
         if not srt_path.exists():
             raise FileNotFoundError(f"Whisper 未生成字幕文件: {srt_path}")
 
-        self._save_subtitle_to_cache(video_file, srt_path)
+        self._save_subtitle_to_cache(video_file, srt_path, cache_identity=cache_identity)
         print(f"字幕已生成: {srt_path}")
         return str(srt_path)
     # ========== 字幕分析：识别操作步骤（默认模式，纯文本，便宜） ==========

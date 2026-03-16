@@ -1739,6 +1739,7 @@ def _run_text_fallback_risk_gate(
     *,
     strict_on_insufficient_signal: bool = True,
     fallback_mode: str = "subtitle_keyword_risk_gate",
+    subtitle_cache_identity: str = "",
 ) -> Dict[str, Any]:
     subtitle_dir = output_dir / ".risk_subtitles"
     subtitle_dir.mkdir(parents=True, exist_ok=True)
@@ -1746,7 +1747,11 @@ def _run_text_fallback_risk_gate(
     subtitle_text = ""
     filename_text = _normalize_risk_keyword_text(video_path.name)
     try:
-        srt_path = agent.generate_subtitles(str(video_path), str(subtitle_dir))
+        srt_path = agent.generate_subtitles(
+            str(video_path),
+            str(subtitle_dir),
+            cache_identity=subtitle_cache_identity or None,
+        )
         subtitles = agent.parse_srt(srt_path)
         subtitle_text = _normalize_risk_keyword_text(
             "\n".join(str(item.get("text", "")).strip() for item in subtitles if item.get("text"))
@@ -1880,6 +1885,7 @@ def _run_text_fallback_after_visual_unavailable(
     provider_error: str = "",
     env_visual_error: str = "",
     prefetched_text_risk: Dict[str, Any] | None = None,
+    subtitle_cache_identity: str = "",
 ) -> Dict[str, Any]:
     fallback: Dict[str, Any]
     if isinstance(prefetched_text_risk, dict):
@@ -1917,7 +1923,12 @@ def _run_text_fallback_after_visual_unavailable(
                 }
             )
     else:
-        fallback = _run_text_fallback_risk_gate(agent, video_path, output_dir)
+        fallback = _run_text_fallback_risk_gate(
+            agent,
+            video_path,
+            output_dir,
+            subtitle_cache_identity=subtitle_cache_identity,
+        )
 
     fallback["reason_code"] = str(fallback.get("reason_code", "")).strip() or reason_code
     base_reason = str(fallback.get("reason", "")).strip()
@@ -1941,6 +1952,7 @@ def _apply_text_secondary_risk_gate_when_visual_available(
     video_path: Path,
     output_dir: Path,
     text_risk: Dict[str, Any] | None = None,
+    subtitle_cache_identity: str = "",
 ) -> Dict[str, Any]:
     merged = dict(primary_risk)
     if not isinstance(text_risk, dict):
@@ -1950,6 +1962,7 @@ def _apply_text_secondary_risk_gate_when_visual_available(
             output_dir=output_dir,
             strict_on_insufficient_signal=False,
             fallback_mode="subtitle_keyword_secondary_gate",
+            subtitle_cache_identity=subtitle_cache_identity,
         )
 
     primary_decision = str(merged.get("decision", "allow")).strip().lower()
@@ -2148,7 +2161,10 @@ async def _request_risk_decision(
 
 
 def _run_video_risk_gate(
-    agent: VideoAnalyzerAgent, video_path: Path, output_dir: Path
+    agent: VideoAnalyzerAgent,
+    video_path: Path,
+    output_dir: Path,
+    subtitle_cache_identity: str = "",
 ) -> Tuple[Dict[str, Any], Path]:
     frame_paths, frame_dir = _sample_risk_frames(
         agent=agent,
@@ -2161,7 +2177,12 @@ def _run_video_risk_gate(
             "Risk gate frame extraction failed, fallback to subtitle keyword gate: %s",
             video_path,
         )
-        fallback = _run_text_fallback_risk_gate(agent, video_path, output_dir)
+        fallback = _run_text_fallback_risk_gate(
+            agent,
+            video_path,
+            output_dir,
+            subtitle_cache_identity=subtitle_cache_identity,
+        )
         fallback["reason_code"] = (
             str(fallback.get("reason_code", "")).strip() or "TEXT_RISK_FRAME_FALLBACK"
         )
@@ -2201,6 +2222,7 @@ def _run_video_risk_gate(
             output_dir,
             strict_on_insufficient_signal=False,
             fallback_mode="subtitle_keyword_secondary_gate",
+            subtitle_cache_identity=subtitle_cache_identity,
         )
 
         try:
@@ -2214,6 +2236,7 @@ def _run_video_risk_gate(
                 video_path=video_path,
                 output_dir=output_dir,
                 text_risk=_get_prefetched_secondary_text_risk(),
+                subtitle_cache_identity=subtitle_cache_identity,
             )
             return normalized, frame_dir
         except Exception as exc:
@@ -2273,6 +2296,7 @@ def _run_video_risk_gate(
                     video_path=video_path,
                     output_dir=output_dir,
                     text_risk=_get_prefetched_secondary_text_risk(),
+                    subtitle_cache_identity=subtitle_cache_identity,
                 )
                 return env_visual_result, frame_dir
 
@@ -2290,6 +2314,7 @@ def _run_video_risk_gate(
                 provider_error=provider_error,
                 env_visual_error=env_visual_error,
                 prefetched_text_risk=_get_prefetched_secondary_text_risk(),
+                subtitle_cache_identity=subtitle_cache_identity,
             )
             return fallback, frame_dir
     finally:
@@ -2400,11 +2425,19 @@ class UploadRiskService:
         )
 
     def moderate_staged_upload(
-        self, staged_video_path: Path, risk_agent: VideoAnalyzerAgent
+        self,
+        staged_video_path: Path,
+        risk_agent: VideoAnalyzerAgent,
+        file_fingerprint: str = "",
     ) -> Dict[str, Any]:
         output_dir = _create_unique_output_dir(staged_video_path)
         try:
-            risk, _ = _run_video_risk_gate(risk_agent, staged_video_path, output_dir)
+            risk, _ = _run_video_risk_gate(
+                risk_agent,
+                staged_video_path,
+                output_dir,
+                subtitle_cache_identity=file_fingerprint,
+            )
             return risk
         finally:
             shutil.rmtree(output_dir, ignore_errors=True)
@@ -2496,9 +2529,15 @@ def _build_risk_agent_for_upload(
 
 
 def _moderate_staged_upload(
-    staged_video_path: Path, risk_agent: VideoAnalyzerAgent
+    staged_video_path: Path,
+    risk_agent: VideoAnalyzerAgent,
+    file_fingerprint: str = "",
 ) -> Dict[str, Any]:
-    return upload_risk_service.moderate_staged_upload(staged_video_path, risk_agent)
+    return upload_risk_service.moderate_staged_upload(
+        staged_video_path,
+        risk_agent,
+        file_fingerprint=file_fingerprint,
+    )
 
 
 def _risk_reject_payload(risk: Dict[str, Any]) -> Dict[str, Any]:
@@ -2572,7 +2611,11 @@ def _run_upload_pre_risk_check(
                 cached_risk["hash_sha256"] = fingerprint
             return cached_risk, fingerprint, "cache"
 
-    risk = _moderate_staged_upload(staged_video_path, risk_agent)
+    risk = _moderate_staged_upload(
+        staged_video_path,
+        risk_agent,
+        file_fingerprint=fingerprint,
+    )
     if fingerprint and not str(risk.get("hash_sha256", "")).strip():
         risk["hash_sha256"] = fingerprint
     if (
@@ -2706,7 +2749,12 @@ class VideoProcessingService:
                 cached_risk["hash_sha256"] = video_fingerprint
             risk = cached_risk
         else:
-            risk, risk_frame_dir = _run_video_risk_gate(agent, video_path, output_dir)
+            risk, risk_frame_dir = _run_video_risk_gate(
+                agent,
+                video_path,
+                output_dir,
+                subtitle_cache_identity=video_fingerprint,
+            )
             if video_fingerprint and not str(risk.get("hash_sha256", "")).strip():
                 risk["hash_sha256"] = video_fingerprint
             if (
@@ -2756,13 +2804,21 @@ class VideoProcessingService:
 
         if not use_video:
             report("subtitle", "\u6b63\u5728\u751f\u6210\u5b57\u5e55...")
-            srt_path = agent.generate_subtitles(str(video_path), str(output_dir))
+            srt_path = agent.generate_subtitles(
+                str(video_path),
+                str(output_dir),
+                cache_identity=video_fingerprint or None,
+            )
             report("analysis", "\u6b63\u5728\u5206\u6790\u5b57\u5e55\u5185\u5bb9...")
             steps = _run_async(agent.analyze_subtitles(srt_path))
         else:
             report("subtitle", "\u6b63\u5728\u5c1d\u8bd5\u751f\u6210\u5b57\u5e55...")
             try:
-                srt_path = agent.generate_subtitles(str(video_path), str(output_dir))
+                srt_path = agent.generate_subtitles(
+                    str(video_path),
+                    str(output_dir),
+                    cache_identity=video_fingerprint or None,
+                )
             except Exception as exc:
                 logger.warning("Whisper 字幕生成失败，继续视频分析模式: %s", exc)
                 srt_path = None
