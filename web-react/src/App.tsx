@@ -33,6 +33,8 @@ const DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_RESUME_KEY_PREFIX = "video-upload-resume-v1";
 const HISTORY_CLIENT_ID_KEY = "video-insights-client-id-v1";
 const HISTORY_CLIENT_ID_HEADER = "X-Client-ID";
+const ERROR_TOAST_DURATION_MS = 9000;
+const ERROR_GUIDE_DURATION_MS = 5200;
 
 const createHistoryClientId = () => {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -981,7 +983,7 @@ export default function App() {
     setErrorMessage(formatErrorMessage(rawMessage));
     setShowErrorToast(true);
     if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-    errorTimerRef.current = setTimeout(() => setShowErrorToast(false), 5000);
+    errorTimerRef.current = setTimeout(() => setShowErrorToast(false), ERROR_TOAST_DURATION_MS);
 
     const isUploadRiskUnavailable =
       rawMessage.includes("上传风控服务不可用") || rawMessage.includes("code=risk_service_unavailable");
@@ -1005,13 +1007,19 @@ export default function App() {
         setApiKeyGuideActive(true);
 
         if (apiKeyGuideTimerRef.current) clearTimeout(apiKeyGuideTimerRef.current);
-        apiKeyGuideTimerRef.current = setTimeout(() => setApiKeyGuideActive(false), 2800);
+        apiKeyGuideTimerRef.current = setTimeout(
+          () => setApiKeyGuideActive(false),
+          ERROR_GUIDE_DURATION_MS,
+        );
       }
 
       if (needModelGuide) {
         setModelConfigGuideActive(true);
         if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
-        modelConfigGuideTimerRef.current = setTimeout(() => setModelConfigGuideActive(false), 3200);
+        modelConfigGuideTimerRef.current = setTimeout(
+          () => setModelConfigGuideActive(false),
+          ERROR_GUIDE_DURATION_MS,
+        );
       }
 
       if (needApiGuide) {
@@ -1053,7 +1061,10 @@ export default function App() {
     setModelConfigGuideActive(true);
 
     if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
-    modelConfigGuideTimerRef.current = setTimeout(() => setModelConfigGuideActive(false), 2800);
+    modelConfigGuideTimerRef.current = setTimeout(
+      () => setModelConfigGuideActive(false),
+      ERROR_GUIDE_DURATION_MS,
+    );
 
     if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
     modelConfigGuideFocusTimerRef.current = setTimeout(() => {
@@ -1075,7 +1086,10 @@ export default function App() {
     setModelTestGuideActive(true);
 
     if (modelTestGuideTimerRef.current) clearTimeout(modelTestGuideTimerRef.current);
-    modelTestGuideTimerRef.current = setTimeout(() => setModelTestGuideActive(false), 3200);
+    modelTestGuideTimerRef.current = setTimeout(
+      () => setModelTestGuideActive(false),
+      ERROR_GUIDE_DURATION_MS,
+    );
 
     if (modelTestGuideFocusTimerRef.current) clearTimeout(modelTestGuideFocusTimerRef.current);
     modelTestGuideFocusTimerRef.current = setTimeout(() => {
