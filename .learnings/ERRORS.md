@@ -31,6 +31,73 @@ Run commands separately, or use `;` in PowerShell.
 
 ---
 
+## [ERR-20260316-001] python-ast-bom-parse
+
+**Logged**: 2026-03-16T15:44:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: backend
+
+### Summary
+AST parsing failed on `app.py` due to UTF-8 BOM when reading source as plain `utf-8`.
+
+### Error
+```text
+SyntaxError: invalid non-printable character U+FEFF
+```
+
+### Context
+- Operation attempted: parse current and `HEAD` source with `ast.parse` for function/route parity checks.
+- `app.py` contains BOM, and direct parse without stripping BOM failed.
+
+### Suggested Fix
+Read with `utf-8-sig` or strip `\ufeff` before AST parsing/compilation checks.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app.py
+
+### Resolution
+- **Resolved**: 2026-03-16T15:45:00+08:00
+- **Commit/PR**: N/A
+- **Notes**: Added BOM stripping helper in verification script and checks passed.
+
+---
+
+## [ERR-20260316-002] smoke-test-unmocked-timeout
+
+**Logged**: 2026-03-16T15:46:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+A debug smoke test accidentally hit real risk-processing path, causing ffmpeg/subprocess side effects and command timeout.
+
+### Error
+```text
+command timed out after 10237 milliseconds
+```
+
+### Context
+- Operation attempted: inspect chunk-upload error details.
+- Script did not mock risk-moderation path, which triggered screenshot extraction on non-video bytes and spawned noisy subprocess logs.
+
+### Suggested Fix
+For endpoint smoke tests, always monkeypatch external/model-heavy paths and keep request payloads deterministic.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app.py, video_analyzer_agent.py
+- See Also: LRN-20260316-001
+
+### Resolution
+- **Resolved**: 2026-03-16T15:47:00+08:00
+- **Commit/PR**: N/A
+- **Notes**: Restored full mocks and reran smoke tests with all checkpoints passing.
+
+---
+
 ## [ERR-20260315-001] model-api-authentication
 
 **Logged**: 2026-03-15T15:10:00+08:00

@@ -13,6 +13,7 @@ import zipfile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 from threading import Lock, RLock
 from typing import Any, Callable, Dict, List, Tuple
 from uuid import uuid4
@@ -132,53 +133,119 @@ risk_keyword_lexicon_cache_data: Dict[str, Dict[str, Any]] | None = None
 risk_blocklist_lock = RLock()
 
 
-def _ensure_risk_fallback_env_file() -> None:
-    info_lines = [
-        RISK_FALLBACK_ENV_BLOCK_MARKER,
-        "# 系统自动创建，请勿向普通用户暴露。",
-        "# 该兜底模型必须是视觉模型（支持图片输入）。",
-        "# 仅在主视觉风控模型不可用时启用。",
-    ]
-    expected_lines = [*info_lines, *(f"{key}=" for key in RISK_FALLBACK_ENV_KEYS)]
-    env_path = ENV_FILE_PATH
-    try:
-        if not env_path.exists():
-            env_path.write_text("\n".join(expected_lines) + "\n", encoding="utf-8")
-            return
+class RiskFallbackEnvService:
+    def __init__(
+        self,
+        env_path: Path,
+        block_marker: str,
+        legacy_marker: str,
+        env_keys: Tuple[str, str, str],
+        logger_obj: logging.Logger,
+    ):
+        self.env_path = env_path
+        self.block_marker = block_marker
+        self.legacy_marker = legacy_marker
+        self.env_keys = env_keys
+        self.logger = logger_obj
 
-        raw_text = env_path.read_text(encoding="utf-8")
-        missing_keys = [
-            key
-            for key in RISK_FALLBACK_ENV_KEYS
-            if re.search(rf"^\s*{re.escape(key)}\s*=", raw_text, re.MULTILINE) is None
+    def ensure_env_file(self) -> None:
+        info_lines = [
+            self.block_marker,
+            "# 系统自动创建，请勿向普通用户暴露。",
+            "# 该兜底模型必须是视觉模型（支持图片输入）。",
+            "# 仅在主视觉风控模型不可用时启用。",
         ]
-        missing_marker = (
-            RISK_FALLBACK_ENV_BLOCK_MARKER not in raw_text
-            and RISK_FALLBACK_ENV_BLOCK_MARKER_LEGACY not in raw_text
-        )
-        if not missing_keys and not missing_marker:
-            return
+        expected_lines = [*info_lines, *(f"{key}=" for key in self.env_keys)]
+        try:
+            if not self.env_path.exists():
+                self.env_path.write_text("\n".join(expected_lines) + "\n", encoding="utf-8")
+                return
 
-        append_lines: List[str] = []
-        if missing_marker:
-            append_lines.extend(info_lines)
-        append_lines.extend(f"{key}=" for key in missing_keys)
-        if not append_lines:
-            return
+            raw_text = self.env_path.read_text(encoding="utf-8")
+            missing_keys = [
+                key
+                for key in self.env_keys
+                if re.search(rf"^\s*{re.escape(key)}\s*=", raw_text, re.MULTILINE) is None
+            ]
+            missing_marker = (
+                self.block_marker not in raw_text
+                and self.legacy_marker not in raw_text
+            )
+            if not missing_keys and not missing_marker:
+                return
 
-        with open(env_path, "a", encoding="utf-8") as f:
-            if raw_text and not raw_text.endswith(("\n", "\r")):
-                f.write("\n")
-            f.write("\n".join(append_lines) + "\n")
-    except (OSError, UnicodeDecodeError) as exc:
-        logger.warning("无法自动维护 .env 风控兜底模板: %s", exc)
+            append_lines: List[str] = []
+            if missing_marker:
+                append_lines.extend(info_lines)
+            append_lines.extend(f"{key}=" for key in missing_keys)
+            if not append_lines:
+                return
+
+            with open(self.env_path, "a", encoding="utf-8") as f:
+                if raw_text and not raw_text.endswith(("\n", "\r")):
+                    f.write("\n")
+                f.write("\n".join(append_lines) + "\n")
+        except (OSError, UnicodeDecodeError) as exc:
+            self.logger.warning("无法自动维护 .env 风控兜底模板: %s", exc)
+
+    def read_model_options(self) -> Tuple[str, str, str]:
+        api_key = str(os.getenv("RISK_FALLBACK_API_KEY", "")).strip()
+        model_name = str(os.getenv("RISK_FALLBACK_MODEL_NAME", "")).strip()
+        model_base_url = str(os.getenv("RISK_FALLBACK_MODEL_BASE_URL", "")).strip()
+        return api_key, model_name, model_base_url
+
+
+class ProgressStateService:
+    def __init__(
+        self,
+        batch_state: Dict[str, Any],
+        batch_lock_obj: Lock,
+        single_state: Dict[str, Any],
+        single_lock_obj: Lock,
+    ):
+        self.batch_state = batch_state
+        self.batch_lock = batch_lock_obj
+        self.single_state = single_state
+        self.single_lock = single_lock_obj
+
+    def update_batch(self, **kwargs: Any) -> None:
+        with self.batch_lock:
+            self.batch_state.update(kwargs)
+
+    def update_single(self, **kwargs: Any) -> None:
+        with self.single_lock:
+            self.single_state.update(kwargs)
+
+    def get_batch_snapshot(self) -> Dict[str, Any]:
+        with self.batch_lock:
+            return dict(self.batch_state)
+
+    def get_single_snapshot(self) -> Dict[str, Any]:
+        with self.single_lock:
+            return dict(self.single_state)
+
+
+risk_fallback_env_service = RiskFallbackEnvService(
+    env_path=ENV_FILE_PATH,
+    block_marker=RISK_FALLBACK_ENV_BLOCK_MARKER,
+    legacy_marker=RISK_FALLBACK_ENV_BLOCK_MARKER_LEGACY,
+    env_keys=RISK_FALLBACK_ENV_KEYS,
+    logger_obj=logger,
+)
+progress_state_service = ProgressStateService(
+    batch_state=batch_progress,
+    batch_lock_obj=batch_progress_lock,
+    single_state=single_progress,
+    single_lock_obj=single_progress_lock,
+)
+
+
+def _ensure_risk_fallback_env_file() -> None:
+    risk_fallback_env_service.ensure_env_file()
 
 
 def _read_risk_fallback_env_model_options() -> Tuple[str, str, str]:
-    api_key = str(os.getenv("RISK_FALLBACK_API_KEY", "")).strip()
-    model_name = str(os.getenv("RISK_FALLBACK_MODEL_NAME", "")).strip()
-    model_base_url = str(os.getenv("RISK_FALLBACK_MODEL_BASE_URL", "")).strip()
-    return api_key, model_name, model_base_url
+    return risk_fallback_env_service.read_model_options()
 
 
 _ensure_risk_fallback_env_file()
@@ -191,13 +258,11 @@ class ContentPolicyBlockedError(RuntimeError):
 
 
 def _update_batch_progress(**kwargs: Any) -> None:
-    with batch_progress_lock:
-        batch_progress.update(kwargs)
+    progress_state_service.update_batch(**kwargs)
 
 
 def _update_single_progress(**kwargs: Any) -> None:
-    with single_progress_lock:
-        single_progress.update(kwargs)
+    progress_state_service.update_single(**kwargs)
 
 
 def allowed_file(filename: str) -> bool:
@@ -235,183 +300,224 @@ def _safe_float(
     return number
 
 
+class RiskBlocklistService:
+    def __init__(self, blocklist_path: Path, lock_obj: RLock, logger_obj: logging.Logger):
+        self.blocklist_path = blocklist_path
+        self.lock = lock_obj
+        self.logger = logger_obj
+
+    def normalize_sha256_fingerprint(self, value: Any) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"[^0-9a-f]", "", text)
+        return text if len(text) == 64 else ""
+
+    def compute_file_sha256(self, file_path: Path, chunk_size: int = 1024 * 1024) -> str:
+        digest = hashlib.sha256()
+        with open(file_path, "rb") as f:
+            while True:
+                chunk = f.read(max(4096, int(chunk_size)))
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def normalize_entry(self, raw_entry: Any) -> Dict[str, Any] | None:
+        if not isinstance(raw_entry, dict):
+            return None
+        sha256 = self.normalize_sha256_fingerprint(raw_entry.get("sha256", ""))
+        if not sha256:
+            return None
+
+        reason_code = str(raw_entry.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip().upper()
+        reason = str(raw_entry.get("reason", "")).strip()
+        if len(reason) > 320:
+            reason = reason[:320]
+
+        return {
+            "sha256": sha256,
+            "decision": str(raw_entry.get("decision", "block")).strip().lower() or "block",
+            "risk_level": str(raw_entry.get("risk_level", "high")).strip().lower() or "high",
+            "reason_code": reason_code or "CONTENT_POLICY_VIOLATION",
+            "reason": reason,
+            "first_blocked_at": str(raw_entry.get("first_blocked_at", "")).strip(),
+            "last_blocked_at": str(raw_entry.get("last_blocked_at", "")).strip(),
+            "last_blocked_source": str(raw_entry.get("last_blocked_source", "")).strip(),
+            "block_count": _safe_int(raw_entry.get("block_count", 0), 0, 0),
+            "last_match_at": str(raw_entry.get("last_match_at", "")).strip(),
+            "last_match_source": str(raw_entry.get("last_match_source", "")).strip(),
+            "match_count": _safe_int(raw_entry.get("match_count", 0), 0, 0),
+        }
+
+    def load_unlocked(self) -> Dict[str, Dict[str, Any]]:
+        if not self.blocklist_path.exists():
+            return {}
+        try:
+            with open(self.blocklist_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            self.logger.warning("读取风控黑名单失败，已忽略该文件: %s", exc)
+            return {}
+
+        raw_entries: List[Any] = []
+        if isinstance(payload, dict) and isinstance(payload.get("entries"), list):
+            raw_entries = payload.get("entries", [])
+        elif isinstance(payload, list):
+            raw_entries = payload
+        else:
+            return {}
+
+        entries: Dict[str, Dict[str, Any]] = {}
+        for item in raw_entries:
+            normalized = self.normalize_entry(item)
+            if normalized is None:
+                continue
+            entries[normalized["sha256"]] = normalized
+        return entries
+
+    def write_unlocked(self, entries: Dict[str, Dict[str, Any]]) -> None:
+        ordered_entries = sorted(
+            entries.values(),
+            key=lambda item: str(item.get("last_blocked_at", "")).strip(),
+            reverse=True,
+        )
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "entries": ordered_entries,
+        }
+        tmp_path = self.blocklist_path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        tmp_path.replace(self.blocklist_path)
+
+    def build_match_risk(self, fingerprint: str, entry: Dict[str, Any]) -> Dict[str, Any]:
+        reason_code = str(entry.get("reason_code", "BLACKLIST_EXACT_HASH_MATCH")).strip().upper()
+        reason = (
+            "命中违规视频黑名单指纹（SHA-256 完全一致），已直接拒绝。"
+            f" 指纹：{fingerprint}"
+        )
+        return {
+            "decision": "block",
+            "risk_level": "high",
+            "reason_code": "BLACKLIST_EXACT_HASH_MATCH",
+            "reason": reason,
+            "confidence": 1.0,
+            "scores": {"nudity": 1.0, "violence": 1.0, "gore": 1.0},
+            "dimensions": {},
+            "frame_count": 0,
+            "hash_sha256": fingerprint,
+            "blacklist_reason_code": reason_code,
+            "blacklist_block_count": _safe_int(entry.get("block_count", 0), 0, 0),
+            "blacklist_match_count": _safe_int(entry.get("match_count", 0), 0, 0),
+        }
+
+    def match_video_fingerprint(self, video_path: Path, source: str) -> Dict[str, Any] | None:
+        try:
+            fingerprint = self.compute_file_sha256(video_path)
+        except OSError as exc:
+            self.logger.warning("计算视频指纹失败，跳过黑名单比对: %s", exc)
+            return None
+
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        with self.lock:
+            entries = self.load_unlocked()
+            existing = entries.get(fingerprint)
+            if existing is None:
+                return None
+
+            existing["last_match_at"] = now_text
+            existing["last_match_source"] = str(source or "").strip()
+            existing["match_count"] = _safe_int(existing.get("match_count", 0), 0, 0) + 1
+            entries[fingerprint] = existing
+            try:
+                self.write_unlocked(entries)
+            except OSError as exc:
+                self.logger.warning("更新风控黑名单命中计数失败: %s", exc)
+
+        return self.build_match_risk(fingerprint, existing)
+
+    def register_blocked_video_fingerprint(
+        self, video_path: Path, risk: Dict[str, Any], source: str
+    ) -> str:
+        try:
+            fingerprint = self.compute_file_sha256(video_path)
+        except OSError as exc:
+            self.logger.warning("计算违规视频指纹失败，无法写入黑名单: %s", exc)
+            return ""
+
+        now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        reason_code = str(risk.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip().upper()
+        reason = str(risk.get("reason", "")).strip()
+        if len(reason) > 320:
+            reason = reason[:320]
+        decision = str(risk.get("decision", "block")).strip().lower() or "block"
+        risk_level = str(risk.get("risk_level", "high")).strip().lower() or "high"
+
+        with self.lock:
+            entries = self.load_unlocked()
+            existing = entries.get(fingerprint, {})
+            entry = {
+                "sha256": fingerprint,
+                "decision": decision,
+                "risk_level": risk_level,
+                "reason_code": reason_code or "CONTENT_POLICY_VIOLATION",
+                "reason": reason,
+                "first_blocked_at": str(existing.get("first_blocked_at", "")).strip() or now_text,
+                "last_blocked_at": now_text,
+                "last_blocked_source": str(source or "").strip(),
+                "block_count": _safe_int(existing.get("block_count", 0), 0, 0) + 1,
+                "last_match_at": str(existing.get("last_match_at", "")).strip(),
+                "last_match_source": str(existing.get("last_match_source", "")).strip(),
+                "match_count": _safe_int(existing.get("match_count", 0), 0, 0),
+            }
+            entries[fingerprint] = entry
+            try:
+                self.write_unlocked(entries)
+            except OSError as exc:
+                self.logger.warning("写入风控黑名单失败: %s", exc)
+
+        return fingerprint
+
+
+risk_blocklist_service = RiskBlocklistService(
+    blocklist_path=RISK_BLOCKLIST_PATH,
+    lock_obj=risk_blocklist_lock,
+    logger_obj=logger,
+)
+
+
 def _normalize_sha256_fingerprint(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    text = re.sub(r"[^0-9a-f]", "", text)
-    return text if len(text) == 64 else ""
+    return risk_blocklist_service.normalize_sha256_fingerprint(value)
 
 
 def _compute_file_sha256(file_path: Path, chunk_size: int = 1024 * 1024) -> str:
-    digest = hashlib.sha256()
-    with open(file_path, "rb") as f:
-        while True:
-            chunk = f.read(max(4096, int(chunk_size)))
-            if not chunk:
-                break
-            digest.update(chunk)
-    return digest.hexdigest()
+    return risk_blocklist_service.compute_file_sha256(file_path, chunk_size=chunk_size)
 
 
 def _normalize_risk_blocklist_entry(raw_entry: Any) -> Dict[str, Any] | None:
-    if not isinstance(raw_entry, dict):
-        return None
-    sha256 = _normalize_sha256_fingerprint(raw_entry.get("sha256", ""))
-    if not sha256:
-        return None
-
-    reason_code = str(raw_entry.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip().upper()
-    reason = str(raw_entry.get("reason", "")).strip()
-    if len(reason) > 320:
-        reason = reason[:320]
-
-    return {
-        "sha256": sha256,
-        "decision": str(raw_entry.get("decision", "block")).strip().lower() or "block",
-        "risk_level": str(raw_entry.get("risk_level", "high")).strip().lower() or "high",
-        "reason_code": reason_code or "CONTENT_POLICY_VIOLATION",
-        "reason": reason,
-        "first_blocked_at": str(raw_entry.get("first_blocked_at", "")).strip(),
-        "last_blocked_at": str(raw_entry.get("last_blocked_at", "")).strip(),
-        "last_blocked_source": str(raw_entry.get("last_blocked_source", "")).strip(),
-        "block_count": _safe_int(raw_entry.get("block_count", 0), 0, 0),
-        "last_match_at": str(raw_entry.get("last_match_at", "")).strip(),
-        "last_match_source": str(raw_entry.get("last_match_source", "")).strip(),
-        "match_count": _safe_int(raw_entry.get("match_count", 0), 0, 0),
-    }
+    return risk_blocklist_service.normalize_entry(raw_entry)
 
 
 def _load_risk_blocklist_unlocked() -> Dict[str, Dict[str, Any]]:
-    path = RISK_BLOCKLIST_PATH
-    if not path.exists():
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            payload = json.load(f)
-    except (OSError, json.JSONDecodeError) as exc:
-        logger.warning("读取风控黑名单失败，已忽略该文件: %s", exc)
-        return {}
-
-    raw_entries: List[Any] = []
-    if isinstance(payload, dict) and isinstance(payload.get("entries"), list):
-        raw_entries = payload.get("entries", [])
-    elif isinstance(payload, list):
-        raw_entries = payload
-    else:
-        return {}
-
-    entries: Dict[str, Dict[str, Any]] = {}
-    for item in raw_entries:
-        normalized = _normalize_risk_blocklist_entry(item)
-        if normalized is None:
-            continue
-        entries[normalized["sha256"]] = normalized
-    return entries
+    return risk_blocklist_service.load_unlocked()
 
 
 def _write_risk_blocklist_unlocked(entries: Dict[str, Dict[str, Any]]) -> None:
-    ordered_entries = sorted(
-        entries.values(),
-        key=lambda item: str(item.get("last_blocked_at", "")).strip(),
-        reverse=True,
-    )
-    payload = {
-        "version": 1,
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "entries": ordered_entries,
-    }
-    tmp_path = RISK_BLOCKLIST_PATH.with_suffix(".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-    tmp_path.replace(RISK_BLOCKLIST_PATH)
+    risk_blocklist_service.write_unlocked(entries)
 
 
 def _build_blacklist_match_risk(fingerprint: str, entry: Dict[str, Any]) -> Dict[str, Any]:
-    reason_code = str(entry.get("reason_code", "BLACKLIST_EXACT_HASH_MATCH")).strip().upper()
-    reason = (
-        "命中违规视频黑名单指纹（SHA-256 完全一致），已直接拒绝。"
-        f" 指纹：{fingerprint}"
-    )
-    return {
-        "decision": "block",
-        "risk_level": "high",
-        "reason_code": "BLACKLIST_EXACT_HASH_MATCH",
-        "reason": reason,
-        "confidence": 1.0,
-        "scores": {"nudity": 1.0, "violence": 1.0, "gore": 1.0},
-        "dimensions": {},
-        "frame_count": 0,
-        "hash_sha256": fingerprint,
-        "blacklist_reason_code": reason_code,
-        "blacklist_block_count": _safe_int(entry.get("block_count", 0), 0, 0),
-        "blacklist_match_count": _safe_int(entry.get("match_count", 0), 0, 0),
-    }
+    return risk_blocklist_service.build_match_risk(fingerprint, entry)
 
 
 def _match_blacklisted_video_fingerprint(video_path: Path, source: str) -> Dict[str, Any] | None:
-    try:
-        fingerprint = _compute_file_sha256(video_path)
-    except OSError as exc:
-        logger.warning("计算视频指纹失败，跳过黑名单比对: %s", exc)
-        return None
-
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with risk_blocklist_lock:
-        entries = _load_risk_blocklist_unlocked()
-        existing = entries.get(fingerprint)
-        if existing is None:
-            return None
-
-        existing["last_match_at"] = now_text
-        existing["last_match_source"] = str(source or "").strip()
-        existing["match_count"] = _safe_int(existing.get("match_count", 0), 0, 0) + 1
-        entries[fingerprint] = existing
-        try:
-            _write_risk_blocklist_unlocked(entries)
-        except OSError as exc:
-            logger.warning("更新风控黑名单命中计数失败: %s", exc)
-
-    return _build_blacklist_match_risk(fingerprint, existing)
+    return risk_blocklist_service.match_video_fingerprint(video_path, source)
 
 
-def _register_blocked_video_fingerprint(video_path: Path, risk: Dict[str, Any], source: str) -> str:
-    try:
-        fingerprint = _compute_file_sha256(video_path)
-    except OSError as exc:
-        logger.warning("计算违规视频指纹失败，无法写入黑名单: %s", exc)
-        return ""
-
-    now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    reason_code = str(risk.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip().upper()
-    reason = str(risk.get("reason", "")).strip()
-    if len(reason) > 320:
-        reason = reason[:320]
-    decision = str(risk.get("decision", "block")).strip().lower() or "block"
-    risk_level = str(risk.get("risk_level", "high")).strip().lower() or "high"
-
-    with risk_blocklist_lock:
-        entries = _load_risk_blocklist_unlocked()
-        existing = entries.get(fingerprint, {})
-        entry = {
-            "sha256": fingerprint,
-            "decision": decision,
-            "risk_level": risk_level,
-            "reason_code": reason_code or "CONTENT_POLICY_VIOLATION",
-            "reason": reason,
-            "first_blocked_at": str(existing.get("first_blocked_at", "")).strip() or now_text,
-            "last_blocked_at": now_text,
-            "last_blocked_source": str(source or "").strip(),
-            "block_count": _safe_int(existing.get("block_count", 0), 0, 0) + 1,
-            "last_match_at": str(existing.get("last_match_at", "")).strip(),
-            "last_match_source": str(existing.get("last_match_source", "")).strip(),
-            "match_count": _safe_int(existing.get("match_count", 0), 0, 0),
-        }
-        entries[fingerprint] = entry
-        try:
-            _write_risk_blocklist_unlocked(entries)
-        except OSError as exc:
-            logger.warning("写入风控黑名单失败: %s", exc)
-
-    return fingerprint
+def _register_blocked_video_fingerprint(
+    video_path: Path, risk: Dict[str, Any], source: str
+) -> str:
+    return risk_blocklist_service.register_blocked_video_fingerprint(video_path, risk, source)
 
 
 def _as_bool(value: Any) -> bool:
@@ -545,128 +651,198 @@ def _resolve_output_dir(raw_output_dir: Any, must_exist: bool = True) -> Path:
     return output_dir
 
 
+class HistoryService:
+    def __init__(
+        self,
+        history_path: Path,
+        lock_obj: RLock,
+        max_history: int,
+        owner_pattern: re.Pattern[str],
+        owner_max_len: int,
+        owner_header: str,
+        owner_cookie: str,
+        owner_cookie_max_age: int,
+    ):
+        self.history_path = history_path
+        self.lock = lock_obj
+        self.max_history = max_history
+        self.owner_pattern = owner_pattern
+        self.owner_max_len = owner_max_len
+        self.owner_header = owner_header
+        self.owner_cookie = owner_cookie
+        self.owner_cookie_max_age = owner_cookie_max_age
+
+    def read_unlocked(self) -> List[Dict[str, Any]]:
+        if not self.history_path.exists():
+            return []
+        try:
+            with open(self.history_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, list) else []
+        except (json.JSONDecodeError, OSError):
+            return []
+
+    def write_unlocked(self, history: List[Dict[str, Any]]) -> None:
+        tmp_path = self.history_path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(history, f, ensure_ascii=False, indent=2)
+        tmp_path.replace(self.history_path)
+
+    def normalize_owner(self, raw_owner: Any) -> str:
+        owner = str(raw_owner or "").strip()
+        if not owner:
+            return ""
+        owner = self.owner_pattern.sub("", owner)
+        if len(owner) > self.owner_max_len:
+            owner = owner[: self.owner_max_len]
+        return owner
+
+    def extract_owner(self) -> str:
+        from_header = self.normalize_owner(request.headers.get(self.owner_header))
+        if from_header:
+            return from_header
+        from_cookie = self.normalize_owner(request.cookies.get(self.owner_cookie))
+        if from_cookie:
+            return from_cookie
+        return ""
+
+    def ensure_owner(self) -> str:
+        owner = self.extract_owner()
+        if owner:
+            return owner
+        owner = uuid4().hex
+        g.history_owner_cookie = owner
+        return owner
+
+    def record_owner(self, record: Dict[str, Any]) -> str:
+        return self.normalize_owner(record.get("owner_id"))
+
+    def trim_history_per_owner(self, history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        owner_counts: Dict[str, int] = {}
+        trimmed: List[Dict[str, Any]] = []
+        for record in history:
+            owner = self.record_owner(record)
+            if not owner:
+                # Keep legacy records (no owner_id) to avoid accidental data loss.
+                trimmed.append(record)
+                continue
+            count = owner_counts.get(owner, 0)
+            if count >= self.max_history:
+                continue
+            owner_counts[owner] = count + 1
+            trimmed.append(record)
+        return trimmed
+
+    def strip_owner_field(self, record: Dict[str, Any]) -> Dict[str, Any]:
+        payload = dict(record)
+        payload.pop("owner_id", None)
+        return payload
+
+    def load(self, owner_id: str) -> List[Dict[str, Any]]:
+        owner = self.normalize_owner(owner_id)
+        if not owner:
+            return []
+        with self.lock:
+            history = self.read_unlocked()
+            user_history = [item for item in history if self.record_owner(item) == owner]
+            return user_history[: self.max_history]
+
+    def save(self, record: Dict[str, Any], owner_id: str) -> None:
+        owner = self.normalize_owner(owner_id)
+        if not owner:
+            return
+        record_to_save = dict(record)
+        record_to_save["owner_id"] = owner
+        with self.lock:
+            history = self.read_unlocked()
+            history.insert(0, record_to_save)
+            self.write_unlocked(self.trim_history_per_owner(history))
+
+    def delete(self, record_id: str, owner_id: str) -> None:
+        owner = self.normalize_owner(owner_id)
+        if not owner:
+            return
+        with self.lock:
+            history = self.read_unlocked()
+            history = [
+                r
+                for r in history
+                if not (str(r.get("id")) == str(record_id) and self.record_owner(r) == owner)
+            ]
+            self.write_unlocked(history)
+
+    def attach_owner_cookie(self, response):
+        pending_owner = self.normalize_owner(getattr(g, "history_owner_cookie", ""))
+        if pending_owner:
+            response.set_cookie(
+                self.owner_cookie,
+                pending_owner,
+                max_age=self.owner_cookie_max_age,
+                samesite="Lax",
+                httponly=False,
+            )
+        return response
+
+
+history_service = HistoryService(
+    history_path=HISTORY_PATH,
+    lock_obj=history_lock,
+    max_history=MAX_HISTORY,
+    owner_pattern=HISTORY_OWNER_PATTERN,
+    owner_max_len=HISTORY_OWNER_MAX_LEN,
+    owner_header=HISTORY_OWNER_HEADER,
+    owner_cookie=HISTORY_OWNER_COOKIE,
+    owner_cookie_max_age=HISTORY_OWNER_COOKIE_MAX_AGE,
+)
+
+
 def _read_history_unlocked() -> List[Dict[str, Any]]:
-    if not HISTORY_PATH.exists():
-        return []
-    try:
-        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, list) else []
-    except (json.JSONDecodeError, OSError):
-        return []
+    return history_service.read_unlocked()
 
 
 def _write_history_unlocked(history: List[Dict[str, Any]]) -> None:
-    tmp_path = HISTORY_PATH.with_suffix(".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(history, f, ensure_ascii=False, indent=2)
-    tmp_path.replace(HISTORY_PATH)
+    history_service.write_unlocked(history)
 
 
 def _normalize_history_owner(raw_owner: Any) -> str:
-    owner = str(raw_owner or "").strip()
-    if not owner:
-        return ""
-    owner = HISTORY_OWNER_PATTERN.sub("", owner)
-    if len(owner) > HISTORY_OWNER_MAX_LEN:
-        owner = owner[:HISTORY_OWNER_MAX_LEN]
-    return owner
+    return history_service.normalize_owner(raw_owner)
 
 
 def _extract_history_owner() -> str:
-    from_header = _normalize_history_owner(request.headers.get(HISTORY_OWNER_HEADER))
-    if from_header:
-        return from_header
-    from_cookie = _normalize_history_owner(request.cookies.get(HISTORY_OWNER_COOKIE))
-    if from_cookie:
-        return from_cookie
-    return ""
+    return history_service.extract_owner()
 
 
 def _ensure_history_owner() -> str:
-    owner = _extract_history_owner()
-    if owner:
-        return owner
-    owner = uuid4().hex
-    g.history_owner_cookie = owner
-    return owner
+    return history_service.ensure_owner()
 
 
 def _record_owner(record: Dict[str, Any]) -> str:
-    return _normalize_history_owner(record.get("owner_id"))
+    return history_service.record_owner(record)
 
 
 def _trim_history_per_owner(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    owner_counts: Dict[str, int] = {}
-    trimmed: List[Dict[str, Any]] = []
-    for record in history:
-        owner = _record_owner(record)
-        if not owner:
-            # Keep legacy records (no owner_id) to avoid accidental data loss.
-            trimmed.append(record)
-            continue
-        count = owner_counts.get(owner, 0)
-        if count >= MAX_HISTORY:
-            continue
-        owner_counts[owner] = count + 1
-        trimmed.append(record)
-    return trimmed
+    return history_service.trim_history_per_owner(history)
 
 
 def _strip_owner_field(record: Dict[str, Any]) -> Dict[str, Any]:
-    payload = dict(record)
-    payload.pop("owner_id", None)
-    return payload
+    return history_service.strip_owner_field(record)
 
 
 def load_history(owner_id: str) -> List[Dict[str, Any]]:
-    owner = _normalize_history_owner(owner_id)
-    if not owner:
-        return []
-    with history_lock:
-        history = _read_history_unlocked()
-        user_history = [item for item in history if _record_owner(item) == owner]
-        return user_history[:MAX_HISTORY]
+    return history_service.load(owner_id)
 
 
 def save_history(record: Dict[str, Any], owner_id: str) -> None:
-    owner = _normalize_history_owner(owner_id)
-    if not owner:
-        return
-    record_to_save = dict(record)
-    record_to_save["owner_id"] = owner
-    with history_lock:
-        history = _read_history_unlocked()
-        history.insert(0, record_to_save)
-        _write_history_unlocked(_trim_history_per_owner(history))
+    history_service.save(record, owner_id)
 
 
 def delete_history_record(record_id: str, owner_id: str) -> None:
-    owner = _normalize_history_owner(owner_id)
-    if not owner:
-        return
-    with history_lock:
-        history = _read_history_unlocked()
-        history = [
-            r
-            for r in history
-            if not (str(r.get("id")) == str(record_id) and _record_owner(r) == owner)
-        ]
-        _write_history_unlocked(history)
+    history_service.delete(record_id, owner_id)
 
 
 @app.after_request
 def attach_history_owner_cookie(response):
-    pending_owner = _normalize_history_owner(getattr(g, "history_owner_cookie", ""))
-    if pending_owner:
-        response.set_cookie(
-            HISTORY_OWNER_COOKIE,
-            pending_owner,
-            max_age=HISTORY_OWNER_COOKIE_MAX_AGE,
-            samesite="Lax",
-            httponly=False,
-        )
-    return response
+    return history_service.attach_owner_cookie(response)
 
 
 def _run_async(coro):
@@ -694,96 +870,161 @@ def _build_unique_upload_path(filename: str) -> Path:
     return candidate
 
 
+class UploadSessionService:
+    def __init__(
+        self,
+        session_root: Path,
+        memory_buffers: Dict[str, Dict[int, bytes]],
+        memory_reserved_bytes: Dict[str, int],
+        max_memory_total_bytes: int,
+        logger_obj: logging.Logger,
+    ):
+        self.session_root = session_root
+        self.memory_buffers = memory_buffers
+        self.memory_reserved_bytes = memory_reserved_bytes
+        self.max_memory_total_bytes = max_memory_total_bytes
+        self.logger = logger_obj
+        self._reserved_total_bytes = 0
+
+    @property
+    def reserved_total_bytes(self) -> int:
+        return self._reserved_total_bytes
+
+    def normalize_upload_id(self, raw_upload_id: Any) -> str:
+        upload_id = secure_filename(str(raw_upload_id or "")).strip()
+        if not upload_id:
+            return ""
+        if len(upload_id) > 120:
+            raise ValueError("upload_id 无效")
+        return upload_id
+
+    def session_json_path(self, upload_id: str) -> Path:
+        session_path = (self.session_root / f"{upload_id}.json").resolve(strict=False)
+        _assert_within(session_path, self.session_root, "upload_id")
+        return session_path
+
+    def session_temp_path(self, upload_id: str) -> Path:
+        temp_path = (self.session_root / f"{upload_id}.part").resolve(strict=False)
+        _assert_within(temp_path, self.session_root, "upload_id")
+        return temp_path
+
+    def normalize_received_chunks(self, raw_chunks: Any, total_chunks: int) -> List[int]:
+        if total_chunks <= 0 or not isinstance(raw_chunks, list):
+            return []
+        received: set[int] = set()
+        for item in raw_chunks:
+            idx = _safe_int(item, -1)
+            if 0 <= idx < total_chunks:
+                received.add(idx)
+        return sorted(received)
+
+    def load(self, upload_id: str) -> Dict[str, Any] | None:
+        session_path = self.session_json_path(upload_id)
+        if not session_path.exists():
+            return None
+        try:
+            with open(session_path, "r", encoding="utf-8") as f:
+                session = json.load(f)
+            return session if isinstance(session, dict) else None
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def save(self, upload_id: str, session: Dict[str, Any]) -> None:
+        session_path = self.session_json_path(upload_id)
+        tmp_path = session_path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(session, f, ensure_ascii=False, indent=2)
+        tmp_path.replace(session_path)
+
+    def delete(self, upload_id: str) -> None:
+        self.release_memory(upload_id)
+        for path in (self.session_json_path(upload_id), self.session_temp_path(upload_id)):
+            if not path.exists():
+                continue
+            try:
+                path.unlink()
+            except OSError:
+                self.logger.warning("删除上传会话文件失败: %s", path)
+
+    def reserve_memory(self, upload_id: str, total_size: int) -> bool:
+        size = _safe_int(total_size, 0, 0)
+        if size <= 0:
+            return False
+        if upload_id in self.memory_reserved_bytes:
+            self.memory_buffers.setdefault(upload_id, {})
+            return True
+        if self._reserved_total_bytes + size > self.max_memory_total_bytes:
+            return False
+        self.memory_reserved_bytes[upload_id] = size
+        self._reserved_total_bytes += size
+        self.memory_buffers.setdefault(upload_id, {})
+        return True
+
+    def release_memory(self, upload_id: str) -> None:
+        reserved = self.memory_reserved_bytes.pop(upload_id, 0)
+        if reserved > 0:
+            self._reserved_total_bytes = max(0, self._reserved_total_bytes - reserved)
+        self.memory_buffers.pop(upload_id, None)
+
+    def get_chunk_storage_mode(self, session: Dict[str, Any]) -> str:
+        mode = str(session.get("storage_mode", "disk")).strip().lower()
+        return "memory" if mode == "memory" else "disk"
+
+
+upload_session_service = UploadSessionService(
+    session_root=UPLOAD_SESSION_ROOT,
+    memory_buffers=upload_memory_buffers,
+    memory_reserved_bytes=upload_memory_reserved_bytes,
+    max_memory_total_bytes=UPLOAD_IN_MEMORY_MAX_TOTAL_BYTES,
+    logger_obj=logger,
+)
+
+
 def _normalize_upload_id(raw_upload_id: Any) -> str:
-    upload_id = secure_filename(str(raw_upload_id or "")).strip()
-    if not upload_id:
-        return ""
-    if len(upload_id) > 120:
-        raise ValueError("upload_id 无效")
-    return upload_id
+    return upload_session_service.normalize_upload_id(raw_upload_id)
 
 
 def _upload_session_json_path(upload_id: str) -> Path:
-    session_path = (UPLOAD_SESSION_ROOT / f"{upload_id}.json").resolve(strict=False)
-    _assert_within(session_path, UPLOAD_SESSION_ROOT, "upload_id")
-    return session_path
+    return upload_session_service.session_json_path(upload_id)
 
 
 def _upload_session_temp_path(upload_id: str) -> Path:
-    temp_path = (UPLOAD_SESSION_ROOT / f"{upload_id}.part").resolve(strict=False)
-    _assert_within(temp_path, UPLOAD_SESSION_ROOT, "upload_id")
-    return temp_path
+    return upload_session_service.session_temp_path(upload_id)
 
 
 def _normalize_received_chunks(raw_chunks: Any, total_chunks: int) -> List[int]:
-    if total_chunks <= 0 or not isinstance(raw_chunks, list):
-        return []
-    received: set[int] = set()
-    for item in raw_chunks:
-        idx = _safe_int(item, -1)
-        if 0 <= idx < total_chunks:
-            received.add(idx)
-    return sorted(received)
+    return upload_session_service.normalize_received_chunks(raw_chunks, total_chunks)
 
 
 def _load_upload_session(upload_id: str) -> Dict[str, Any] | None:
-    session_path = _upload_session_json_path(upload_id)
-    if not session_path.exists():
-        return None
-    try:
-        with open(session_path, "r", encoding="utf-8") as f:
-            session = json.load(f)
-        return session if isinstance(session, dict) else None
-    except (OSError, json.JSONDecodeError):
-        return None
+    return upload_session_service.load(upload_id)
 
 
 def _save_upload_session(upload_id: str, session: Dict[str, Any]) -> None:
-    session_path = _upload_session_json_path(upload_id)
-    tmp_path = session_path.with_suffix(".tmp")
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(session, f, ensure_ascii=False, indent=2)
-    tmp_path.replace(session_path)
+    upload_session_service.save(upload_id, session)
 
 
 def _delete_upload_session(upload_id: str) -> None:
-    _release_upload_memory(upload_id)
-    for path in (_upload_session_json_path(upload_id), _upload_session_temp_path(upload_id)):
-        if not path.exists():
-            continue
-        try:
-            path.unlink()
-        except OSError:
-            logger.warning("删除上传会话文件失败: %s", path)
+    global upload_memory_reserved_total_bytes
+    upload_session_service.delete(upload_id)
+    upload_memory_reserved_total_bytes = upload_session_service.reserved_total_bytes
 
 
 def _reserve_upload_memory(upload_id: str, total_size: int) -> bool:
     global upload_memory_reserved_total_bytes
-    size = _safe_int(total_size, 0, 0)
-    if size <= 0:
-        return False
-    if upload_id in upload_memory_reserved_bytes:
-        upload_memory_buffers.setdefault(upload_id, {})
-        return True
-    if upload_memory_reserved_total_bytes + size > UPLOAD_IN_MEMORY_MAX_TOTAL_BYTES:
-        return False
-    upload_memory_reserved_bytes[upload_id] = size
-    upload_memory_reserved_total_bytes += size
-    upload_memory_buffers.setdefault(upload_id, {})
-    return True
+    reserved = upload_session_service.reserve_memory(upload_id, total_size)
+    upload_memory_reserved_total_bytes = upload_session_service.reserved_total_bytes
+    return reserved
 
 
 def _release_upload_memory(upload_id: str) -> None:
     global upload_memory_reserved_total_bytes
-    reserved = upload_memory_reserved_bytes.pop(upload_id, 0)
-    if reserved > 0:
-        upload_memory_reserved_total_bytes = max(0, upload_memory_reserved_total_bytes - reserved)
-    upload_memory_buffers.pop(upload_id, None)
+    upload_session_service.release_memory(upload_id)
+    upload_memory_reserved_total_bytes = upload_session_service.reserved_total_bytes
 
 
 def _get_chunk_storage_mode(session: Dict[str, Any]) -> str:
-    mode = str(session.get("storage_mode", "disk")).strip().lower()
-    return "memory" if mode == "memory" else "disk"
+    return upload_session_service.get_chunk_storage_mode(session)
 
 
 def _create_unique_output_dir(video_path: Path) -> Path:
@@ -1360,8 +1601,46 @@ def _run_text_fallback_after_visual_unavailable(
     provider_status: int | None = None,
     provider_error: str = "",
     env_visual_error: str = "",
+    prefetched_text_risk: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
-    fallback = _run_text_fallback_risk_gate(agent, video_path, output_dir)
+    fallback: Dict[str, Any]
+    if isinstance(prefetched_text_risk, dict):
+        fallback = dict(prefetched_text_risk)
+        fallback.pop("fallback_non_strict", None)
+        fallback["fallback_mode"] = "subtitle_keyword_risk_gate"
+
+        prefetched_reason_code = str(fallback.get("reason_code", "")).strip().upper()
+        prefetched_decision = str(fallback.get("decision", "")).strip().lower()
+        if (
+            prefetched_decision == "allow"
+            and prefetched_reason_code == "TEXT_RISK_SIGNAL_INSUFFICIENT"
+        ):
+            existing_evidence = fallback.get("fallback_evidence", {})
+            filename_used = (
+                bool(existing_evidence.get("filename_used", False))
+                if isinstance(existing_evidence, dict)
+                else False
+            )
+            fallback.update(
+                {
+                    "decision": "block",
+                    "risk_level": "high",
+                    "reason_code": "TEXT_RISK_SIGNAL_INSUFFICIENT",
+                    "reason": "视觉模型不支持图片输入，且字幕关键词信号不足，已按高风险默认拒绝上传。",
+                    "confidence": 0.62,
+                    "scores": {"nudity": 0.0, "violence": 0.0, "gore": 0.0},
+                    "dimensions": {},
+                    "frame_count": 0,
+                    "fallback_mode": "subtitle_keyword_risk_gate",
+                    "fallback_evidence": {
+                        "subtitle_used": False,
+                        "filename_used": filename_used,
+                    },
+                }
+            )
+    else:
+        fallback = _run_text_fallback_risk_gate(agent, video_path, output_dir)
+
     fallback["reason_code"] = str(fallback.get("reason_code", "")).strip() or reason_code
     base_reason = str(fallback.get("reason", "")).strip()
     if base_reason:
@@ -1383,15 +1662,17 @@ def _apply_text_secondary_risk_gate_when_visual_available(
     agent: VideoAnalyzerAgent,
     video_path: Path,
     output_dir: Path,
+    text_risk: Dict[str, Any] | None = None,
 ) -> Dict[str, Any]:
     merged = dict(primary_risk)
-    text_risk = _run_text_fallback_risk_gate(
-        agent=agent,
-        video_path=video_path,
-        output_dir=output_dir,
-        strict_on_insufficient_signal=False,
-        fallback_mode="subtitle_keyword_secondary_gate",
-    )
+    if not isinstance(text_risk, dict):
+        text_risk = _run_text_fallback_risk_gate(
+            agent=agent,
+            video_path=video_path,
+            output_dir=output_dir,
+            strict_on_insufficient_signal=False,
+            fallback_mode="subtitle_keyword_secondary_gate",
+        )
 
     primary_decision = str(merged.get("decision", "allow")).strip().lower()
     text_decision = str(text_risk.get("decision", "allow")).strip().lower()
@@ -1612,92 +1893,130 @@ def _run_video_risk_gate(
         fallback["frame_count"] = 0
         return fallback, frame_dir
 
+    secondary_text_executor: ThreadPoolExecutor | None = None
+    secondary_text_future = None
+    prefetched_secondary_text_risk: Dict[str, Any] | None = None
+    prefetched_secondary_loaded = False
+
+    def _get_prefetched_secondary_text_risk() -> Dict[str, Any] | None:
+        nonlocal prefetched_secondary_loaded, prefetched_secondary_text_risk
+        if prefetched_secondary_loaded:
+            return prefetched_secondary_text_risk
+        prefetched_secondary_loaded = True
+        if secondary_text_future is None:
+            return None
+        try:
+            candidate = secondary_text_future.result()
+            if isinstance(candidate, dict):
+                prefetched_secondary_text_risk = dict(candidate)
+        except Exception as exc:
+            logger.warning("Secondary text fallback precompute failed, fallback to sync mode: %s", exc)
+            prefetched_secondary_text_risk = None
+        return prefetched_secondary_text_risk
+
     try:
-        raw = _run_async(_request_risk_decision(agent, frame_paths))
-        normalized = _normalize_risk_result(
-            raw if isinstance(raw, dict) else {}, frame_count=len(frame_paths)
-        )
-        normalized = _apply_text_secondary_risk_gate_when_visual_available(
-            primary_risk=normalized,
-            agent=agent,
-            video_path=video_path,
-            output_dir=output_dir,
-        )
-        return normalized, frame_dir
-    except Exception as exc:
-        provider_status: int | None = None
-        provider_error = ""
-        reason_code = "TEXT_RISK_MODEL_FALLBACK"
-        reason_suffix = (
-            "视觉风控服务暂不可用，已优先尝试系统级视觉兜底模型，"
-            "兜底模型不可用后自动启用字幕关键词风控兜底。"
+        secondary_text_executor = ThreadPoolExecutor(max_workers=1)
+        secondary_text_future = secondary_text_executor.submit(
+            _run_text_fallback_risk_gate,
+            agent,
+            video_path,
+            output_dir,
+            strict_on_insufficient_signal=False,
+            fallback_mode="subtitle_keyword_secondary_gate",
         )
 
-        if _is_image_input_not_supported_error(exc):
-            logger.warning(
-                "Risk gate model does not support image input, trying system env visual fallback first: %s",
-                exc,
+        try:
+            raw = _run_async(_request_risk_decision(agent, frame_paths))
+            normalized = _normalize_risk_result(
+                raw if isinstance(raw, dict) else {}, frame_count=len(frame_paths)
             )
-            provider_error = str(exc or "").strip() or "visual_input_not_supported"
-            reason_code = "TEXT_RISK_FALLBACK"
-            reason_suffix = (
-                "主视觉风控模型不支持图片输入，已优先尝试系统级视觉兜底模型，"
-                "兜底模型不可用后自动启用字幕关键词风控兜底。"
-            )
-        else:
-            error_message, status_code, _ = _normalize_provider_error(
-                exc, default_status=500
-            )
-            provider_status = status_code
-            provider_error = error_message
-            logger.warning(
-                "Risk gate visual check unavailable, trying system env visual fallback first: status=%s error=%s",
-                status_code,
-                error_message,
-            )
-            if status_code in {400, 401, 403}:
-                reason_code = "TEXT_RISK_VISUAL_MODEL_UNAVAILABLE"
-                reason_suffix = (
-                    "主视觉风控模型当前不可用（鉴权/配置受限），已优先尝试系统级视觉兜底模型，"
-                    "兜底模型不可用后自动启用字幕关键词风控兜底。"
-                )
-
-        env_visual_result, env_visual_error = _try_env_visual_risk_fallback(agent, frame_paths)
-        if env_visual_result is not None:
-            base_reason = str(env_visual_result.get("reason", "")).strip()
-            env_visual_result["reason"] = (
-                f"{base_reason}（主视觉风控不可用，已自动切换到系统级视觉兜底模型）"
-                if base_reason
-                else "主视觉风控不可用，已自动切换到系统级视觉兜底模型。"
-            )
-            env_visual_result["visual_fallback_attempted"] = True
-            if provider_status is not None:
-                env_visual_result["provider_status"] = provider_status
-            if provider_error:
-                env_visual_result["provider_error"] = provider_error
-            env_visual_result = _apply_text_secondary_risk_gate_when_visual_available(
-                primary_risk=env_visual_result,
+            normalized = _apply_text_secondary_risk_gate_when_visual_available(
+                primary_risk=normalized,
                 agent=agent,
                 video_path=video_path,
                 output_dir=output_dir,
+                text_risk=_get_prefetched_secondary_text_risk(),
             )
-            return env_visual_result, frame_dir
+            return normalized, frame_dir
+        except Exception as exc:
+            provider_status: int | None = None
+            provider_error = ""
+            reason_code = "TEXT_RISK_MODEL_FALLBACK"
+            reason_suffix = (
+                "视觉风控服务暂不可用，已优先尝试系统级视觉兜底模型，"
+                "兜底模型不可用后自动启用字幕关键词风控兜底。"
+            )
 
-        logger.warning(
-            "System env visual fallback unavailable, switch to subtitle keyword risk fallback: %s",
-            env_visual_error,
-        )
-        fallback = _run_text_fallback_after_visual_unavailable(
-            agent=agent,
-            video_path=video_path,
-            output_dir=output_dir,
-            reason_code=reason_code,
-            reason_suffix=reason_suffix,
-            provider_status=provider_status,
-            provider_error=provider_error,
-            env_visual_error=env_visual_error,
-        )
-        return fallback, frame_dir
+            if _is_image_input_not_supported_error(exc):
+                logger.warning(
+                    "Risk gate model does not support image input, trying system env visual fallback first: %s",
+                    exc,
+                )
+                provider_error = str(exc or "").strip() or "visual_input_not_supported"
+                reason_code = "TEXT_RISK_FALLBACK"
+                reason_suffix = (
+                    "主视觉风控模型不支持图片输入，已优先尝试系统级视觉兜底模型，"
+                    "兜底模型不可用后自动启用字幕关键词风控兜底。"
+                )
+            else:
+                error_message, status_code, _ = _normalize_provider_error(
+                    exc, default_status=500
+                )
+                provider_status = status_code
+                provider_error = error_message
+                logger.warning(
+                    "Risk gate visual check unavailable, trying system env visual fallback first: status=%s error=%s",
+                    status_code,
+                    error_message,
+                )
+                if status_code in {400, 401, 403}:
+                    reason_code = "TEXT_RISK_VISUAL_MODEL_UNAVAILABLE"
+                    reason_suffix = (
+                        "主视觉风控模型当前不可用（鉴权/配置受限），已优先尝试系统级视觉兜底模型，"
+                        "兜底模型不可用后自动启用字幕关键词风控兜底。"
+                    )
+
+            env_visual_result, env_visual_error = _try_env_visual_risk_fallback(agent, frame_paths)
+            if env_visual_result is not None:
+                base_reason = str(env_visual_result.get("reason", "")).strip()
+                env_visual_result["reason"] = (
+                    f"{base_reason}（主视觉风控不可用，已自动切换到系统级视觉兜底模型）"
+                    if base_reason
+                    else "主视觉风控不可用，已自动切换到系统级视觉兜底模型。"
+                )
+                env_visual_result["visual_fallback_attempted"] = True
+                if provider_status is not None:
+                    env_visual_result["provider_status"] = provider_status
+                if provider_error:
+                    env_visual_result["provider_error"] = provider_error
+                env_visual_result = _apply_text_secondary_risk_gate_when_visual_available(
+                    primary_risk=env_visual_result,
+                    agent=agent,
+                    video_path=video_path,
+                    output_dir=output_dir,
+                    text_risk=_get_prefetched_secondary_text_risk(),
+                )
+                return env_visual_result, frame_dir
+
+            logger.warning(
+                "System env visual fallback unavailable, switch to subtitle keyword risk fallback: %s",
+                env_visual_error,
+            )
+            fallback = _run_text_fallback_after_visual_unavailable(
+                agent=agent,
+                video_path=video_path,
+                output_dir=output_dir,
+                reason_code=reason_code,
+                reason_suffix=reason_suffix,
+                provider_status=provider_status,
+                provider_error=provider_error,
+                env_visual_error=env_visual_error,
+                prefetched_text_risk=_get_prefetched_secondary_text_risk(),
+            )
+            return fallback, frame_dir
+    finally:
+        if secondary_text_executor is not None:
+            secondary_text_executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _reason_code_slug(reason_code: str) -> str:
@@ -1757,126 +2076,163 @@ def _safe_remove_file(path: Path) -> None:
         logger.warning("删除文件失败: %s", path)
 
 
+class UploadRiskService:
+    def resolve_upload_risk_api_key(self) -> str:
+        # Fallback chain when no upload-time key is provided by the caller.
+        for key_name in ("RISK_API_KEY", "MODEL_API_KEY", "ARK_API_KEY", "OPENAI_API_KEY"):
+            value = str(os.getenv(key_name, "")).strip()
+            if value:
+                return value
+        return ""
+
+    def upload_risk_unavailable_message(self) -> str:
+        return (
+            "上传风控服务不可用，已拒绝上传。"
+            "请前往设置检查 API Key、模型名称与模型接口配置后重试上传。"
+        )
+
+    def upload_risk_unavailable_payload(self) -> Dict[str, Any]:
+        return {
+            "error": self.upload_risk_unavailable_message(),
+            "code": "risk_service_unavailable",
+        }
+
+    def build_risk_agent_for_upload(
+        self, api_key: str = "", model_name: str = "", model_base_url: str = ""
+    ) -> VideoAnalyzerAgent:
+        risk_api_key = str(api_key or "").strip() or self.resolve_upload_risk_api_key()
+        if not risk_api_key:
+            raise ValueError("上传风控模型 API Key 未配置")
+
+        risk_model_name = (
+            str(model_name or "").strip()
+            or str(os.getenv("RISK_MODEL_NAME", "")).strip()
+            or DEFAULT_MODEL_NAME
+        )
+        risk_model_base_url = (
+            str(model_base_url or "").strip()
+            or str(os.getenv("RISK_MODEL_BASE_URL", "")).strip()
+            or DEFAULT_MODEL_BASE_URL
+        )
+        return VideoAnalyzerAgent(
+            api_key=risk_api_key,
+            whisper_model="base",
+            model_name=risk_model_name,
+            model_base_url=risk_model_base_url,
+        )
+
+    def moderate_staged_upload(
+        self, staged_video_path: Path, risk_agent: VideoAnalyzerAgent
+    ) -> Dict[str, Any]:
+        output_dir = _create_unique_output_dir(staged_video_path)
+        try:
+            risk, _ = _run_video_risk_gate(risk_agent, staged_video_path, output_dir)
+            return risk
+        finally:
+            shutil.rmtree(output_dir, ignore_errors=True)
+
+    def risk_reject_payload(self, risk: Dict[str, Any]) -> Dict[str, Any]:
+        reason_code = str(risk.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip()
+        return {
+            "error": CONTENT_POLICY_BLOCK_MESSAGE,
+            "code": "content_policy_violation",
+            "risk": {**risk, "reason_code": reason_code},
+        }
+
+    def is_risk_infra_failure(self, risk: Dict[str, Any]) -> bool:
+        reason_code = str(risk.get("reason_code", "")).strip().upper()
+        return reason_code in {
+            "RISK_MODEL_AUTH_FAILED",
+            "RISK_MODEL_CONFIG_INVALID",
+            "RISK_MODEL_UNAVAILABLE",
+            "RISK_FRAME_EXTRACTION_FAILED",
+            "RISK_GATE_INTERNAL_ERROR",
+        }
+
+    def build_upload_risk_failure_response(self, risk: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
+        reason_code = str(risk.get("reason_code", "")).strip().upper()
+        provider_error = str(risk.get("provider_error", "")).strip()
+        request_id = _extract_request_id(provider_error)
+        request_id_text = f"（请求 ID：{request_id}）" if request_id else ""
+        if reason_code == "RISK_MODEL_AUTH_FAILED":
+            auth_error = provider_error
+            if not auth_error or "HTTP 401" in auth_error.upper():
+                auth_error = (
+                    "模型鉴权失败：API Key 无效、已过期，或与当前平台/Base URL 不匹配。"
+                    f"{request_id_text}"
+                )
+            return (
+                {
+                    "error": auth_error,
+                    "code": "risk_model_auth_failed",
+                },
+                401,
+            )
+        if reason_code == "RISK_MODEL_CONFIG_INVALID":
+            config_error = provider_error
+            has_specific_hint = (
+                "模型连接失败：" in config_error
+                or "模型鉴权失败：" in config_error
+                or "模型服务请求超时" in config_error
+                or "请求过于频繁" in config_error
+            )
+            if not has_specific_hint:
+                config_error = (
+                    "上传前模型配置校验失败：请检查模型接口 Base URL 与模型名称是否匹配当前平台，"
+                    "并确认模型支持图片理解（风控检测依赖图片输入）。"
+                    f"{request_id_text}"
+                )
+            return (
+                {
+                    "error": config_error,
+                    "code": "risk_model_config_invalid",
+                },
+                400,
+            )
+        return self.upload_risk_unavailable_payload(), 503
+
+
+upload_risk_service = UploadRiskService()
+
+
 def _resolve_upload_risk_api_key() -> str:
-    # Fallback chain when no upload-time key is provided by the caller.
-    for key_name in ("RISK_API_KEY", "MODEL_API_KEY", "ARK_API_KEY", "OPENAI_API_KEY"):
-        value = str(os.getenv(key_name, "")).strip()
-        if value:
-            return value
-    return ""
+    return upload_risk_service.resolve_upload_risk_api_key()
 
 
 def _upload_risk_unavailable_message() -> str:
-    return (
-        "上传风控服务不可用，已拒绝上传。"
-        "请前往设置检查 API Key、模型名称与模型接口配置后重试上传。"
-    )
+    return upload_risk_service.upload_risk_unavailable_message()
 
 
 def _upload_risk_unavailable_payload() -> Dict[str, Any]:
-    return {
-        "error": _upload_risk_unavailable_message(),
-        "code": "risk_service_unavailable",
-    }
+    return upload_risk_service.upload_risk_unavailable_payload()
 
 
 def _build_risk_agent_for_upload(
     api_key: str = "", model_name: str = "", model_base_url: str = ""
 ) -> VideoAnalyzerAgent:
-    risk_api_key = str(api_key or "").strip() or _resolve_upload_risk_api_key()
-    if not risk_api_key:
-        raise ValueError("上传风控模型 API Key 未配置")
-
-    risk_model_name = (
-        str(model_name or "").strip()
-        or str(os.getenv("RISK_MODEL_NAME", "")).strip()
-        or DEFAULT_MODEL_NAME
-    )
-    risk_model_base_url = (
-        str(model_base_url or "").strip()
-        or str(os.getenv("RISK_MODEL_BASE_URL", "")).strip()
-        or DEFAULT_MODEL_BASE_URL
-    )
-    return VideoAnalyzerAgent(
-        api_key=risk_api_key,
-        whisper_model="base",
-        model_name=risk_model_name,
-        model_base_url=risk_model_base_url,
+    return upload_risk_service.build_risk_agent_for_upload(
+        api_key=api_key,
+        model_name=model_name,
+        model_base_url=model_base_url,
     )
 
 
 def _moderate_staged_upload(
     staged_video_path: Path, risk_agent: VideoAnalyzerAgent
 ) -> Dict[str, Any]:
-    output_dir = _create_unique_output_dir(staged_video_path)
-    try:
-        risk, _ = _run_video_risk_gate(risk_agent, staged_video_path, output_dir)
-        return risk
-    finally:
-        shutil.rmtree(output_dir, ignore_errors=True)
+    return upload_risk_service.moderate_staged_upload(staged_video_path, risk_agent)
 
 
 def _risk_reject_payload(risk: Dict[str, Any]) -> Dict[str, Any]:
-    reason_code = str(risk.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip()
-    return {
-        "error": CONTENT_POLICY_BLOCK_MESSAGE,
-        "code": "content_policy_violation",
-        "risk": {**risk, "reason_code": reason_code},
-    }
+    return upload_risk_service.risk_reject_payload(risk)
 
 
 def _is_risk_infra_failure(risk: Dict[str, Any]) -> bool:
-    reason_code = str(risk.get("reason_code", "")).strip().upper()
-    return reason_code in {
-        "RISK_MODEL_AUTH_FAILED",
-        "RISK_MODEL_CONFIG_INVALID",
-        "RISK_MODEL_UNAVAILABLE",
-        "RISK_FRAME_EXTRACTION_FAILED",
-        "RISK_GATE_INTERNAL_ERROR",
-    }
+    return upload_risk_service.is_risk_infra_failure(risk)
 
 
 def _build_upload_risk_failure_response(risk: Dict[str, Any]) -> Tuple[Dict[str, Any], int]:
-    reason_code = str(risk.get("reason_code", "")).strip().upper()
-    provider_error = str(risk.get("provider_error", "")).strip()
-    request_id = _extract_request_id(provider_error)
-    request_id_text = f"（请求 ID：{request_id}）" if request_id else ""
-    if reason_code == "RISK_MODEL_AUTH_FAILED":
-        auth_error = provider_error
-        if not auth_error or "HTTP 401" in auth_error.upper():
-            auth_error = (
-                "模型鉴权失败：API Key 无效、已过期，或与当前平台/Base URL 不匹配。"
-                f"{request_id_text}"
-            )
-        return (
-            {
-                "error": auth_error,
-                "code": "risk_model_auth_failed",
-            },
-            401,
-        )
-    if reason_code == "RISK_MODEL_CONFIG_INVALID":
-        config_error = provider_error
-        has_specific_hint = (
-            "模型连接失败：" in config_error
-            or "模型鉴权失败：" in config_error
-            or "模型服务请求超时" in config_error
-            or "请求过于频繁" in config_error
-        )
-        if not has_specific_hint:
-            config_error = (
-                "上传前模型配置校验失败：请检查模型接口 Base URL 与模型名称是否匹配当前平台，"
-                "并确认模型支持图片理解（风控检测依赖图片输入）。"
-                f"{request_id_text}"
-            )
-        return (
-            {
-                "error": config_error,
-                "code": "risk_model_config_invalid",
-            },
-            400,
-        )
-    return _upload_risk_unavailable_payload(), 503
+    return upload_risk_service.build_upload_risk_failure_response(risk)
 
 
 def _normalize_processing_options(data: Dict[str, Any]) -> Tuple[str, bool, bool, int, float]:
@@ -1933,6 +2289,174 @@ def _normalize_upload_model_options(
     return api_key, model_name, model_base_url
 
 
+class VideoProcessingService:
+    def process_video(
+        self,
+        video_path: Path,
+        api_key: str,
+        whisper_model: str,
+        model_name: str,
+        model_base_url: str,
+        use_video: bool,
+        web_search: bool,
+        max_vision: int,
+        fps: float = 1.0,
+        history_owner_id: str = "",
+        progress_callback: Callable[[str, str], None] | None = None,
+    ) -> Tuple[List[Dict[str, Any]], str, str, str, bool]:
+        def report(stage: str, message: str) -> None:
+            if progress_callback:
+                progress_callback(stage, message)
+
+        report("prepare", "\u6b63\u5728\u51c6\u5907\u5206\u6790\u4efb\u52a1...")
+        output_dir = _create_unique_output_dir(video_path)
+
+        agent = VideoAnalyzerAgent(
+            api_key if api_key else None,
+            whisper_model,
+            model_name=model_name,
+            model_base_url=model_base_url,
+        )
+        report("moderation", "正在执行黑名单指纹比对...")
+        blacklist_risk = _match_blacklisted_video_fingerprint(video_path, source="analyze")
+        if blacklist_risk is not None:
+            quarantine_path = _quarantine_upload_file(video_path, str(blacklist_risk.get("reason_code", "")))
+            if quarantine_path is not None:
+                blacklist_risk["quarantine_path"] = str(quarantine_path)
+            shutil.rmtree(output_dir, ignore_errors=True)
+            raise ContentPolicyBlockedError(
+                "视频命中黑名单指纹（SHA-256 完全一致），已拒绝处理。",
+                blacklist_risk,
+            )
+
+        report("moderation", "正在执行内容风控检测...")
+        risk, risk_frame_dir = _run_video_risk_gate(agent, video_path, output_dir)
+        if _is_risk_infra_failure(risk):
+            if risk_frame_dir.exists():
+                shutil.rmtree(risk_frame_dir, ignore_errors=True)
+            shutil.rmtree(output_dir, ignore_errors=True)
+            raise RuntimeError(
+                str(risk.get("provider_error") or risk.get("reason") or "风控服务不可用")
+            )
+        if _should_block_by_risk(str(risk.get("decision", ""))):
+            blocked_hash = _register_blocked_video_fingerprint(
+                video_path, risk, source="analyze_risk_block"
+            )
+            if blocked_hash:
+                risk["hash_sha256"] = blocked_hash
+            quarantine_path = _quarantine_upload_file(video_path, str(risk.get("reason_code", "")))
+            if quarantine_path is not None:
+                risk["quarantine_path"] = str(quarantine_path)
+            shutil.rmtree(output_dir, ignore_errors=True)
+            raise ContentPolicyBlockedError(
+                f"视频触发风控策略（{risk.get('reason_code', 'CONTENT_POLICY_VIOLATION')}）：{risk.get('reason', '内容敏感')}",
+                risk,
+            )
+
+        if risk_frame_dir.exists():
+            shutil.rmtree(risk_frame_dir, ignore_errors=True)
+
+        video_dest = output_dir / video_path.name
+        if not video_dest.exists():
+            shutil.copy2(video_path, video_dest)
+
+        srt_path = None
+
+        if not use_video:
+            report("subtitle", "\u6b63\u5728\u751f\u6210\u5b57\u5e55...")
+            srt_path = agent.generate_subtitles(str(video_path), str(output_dir))
+            report("analysis", "\u6b63\u5728\u5206\u6790\u5b57\u5e55\u5185\u5bb9...")
+            steps = _run_async(agent.analyze_subtitles(srt_path))
+        else:
+            report("subtitle", "\u6b63\u5728\u5c1d\u8bd5\u751f\u6210\u5b57\u5e55...")
+            try:
+                srt_path = agent.generate_subtitles(str(video_path), str(output_dir))
+            except Exception as exc:
+                logger.warning("Whisper 字幕生成失败，继续视频分析模式: %s", exc)
+                srt_path = None
+            report("analysis", "\u6b63\u5728\u5206\u6790\u89c6\u9891\u753b\u9762...")
+            steps = _run_async(agent.analyze_video(str(video_path), fps))
+
+        if not steps:
+            report("analysis", "\u672a\u8bc6\u522b\u5230\u6709\u6548\u6b65\u9aa4")
+            return [], "", str(output_dir), str(output_dir / "operation_guide.pdf"), False
+
+        image_dir = output_dir / "images"
+        image_dir.mkdir(exist_ok=True)
+        report("screenshots", "\u6b63\u5728\u751f\u6210\u5173\u952e\u622a\u56fe...")
+        agent.generate_screenshots_from_steps(str(video_path), steps, str(image_dir))
+
+        if max_vision > 0 and not use_video and srt_path:
+            report("vision", "\u6b63\u5728\u8fdb\u884c\u89c6\u89c9\u589e\u5f3a...")
+            steps = _run_async(
+                agent.enhance_steps_with_vision(
+                    steps, str(image_dir), srt_path=srt_path, max_calls=max_vision
+                )
+            )
+
+        output_md = output_dir / "operation_guide.md"
+        report("document", "\u6b63\u5728\u751f\u6210\u603b\u7ed3\u6587\u6863...")
+        _run_async(
+            agent.generate_step_document(
+                steps=steps,
+                output_path=str(output_md),
+                srt_path=srt_path if srt_path else None,
+                image_dir="images",
+                web_search=web_search,
+            )
+        )
+
+        output_pdf = output_dir / "operation_guide.pdf"
+        report("pdf", "\u6b63\u5728\u751f\u6210 PDF...")
+        agent.generate_pdf(str(output_md), str(output_pdf))
+        agent.save_results(steps, str(output_dir / "steps.json"))
+        report("done", "\u5f53\u524d\u89c6\u9891\u5206\u6790\u5b8c\u6210")
+
+        has_steps = len(steps) > 0
+        if has_steps:
+            record = {
+                "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "video_name": video_path.name,
+                "output_dir": str(output_dir),
+                "steps_count": len(steps),
+                "mode": "video" if use_video else "subtitle",
+                "whisper_model": whisper_model,
+                "model_name": model_name,
+                "model_base_url": model_base_url,
+                "use_video": use_video,
+                "web_search": web_search,
+                "max_vision": max_vision,
+                "pdf_path": str(output_pdf),
+                "risk_decision": str(risk.get("decision", "allow")),
+                "risk_level": str(risk.get("risk_level", "low")),
+                "risk_reason_code": str(risk.get("reason_code", "SAFE_CONTENT")),
+            }
+            save_history(record, history_owner_id)
+
+        with open(output_md, "r", encoding="utf-8") as f:
+            md_content = f.read()
+
+        return steps, md_content, str(output_dir), str(output_pdf), has_steps
+
+
+video_processing_service = VideoProcessingService()
+
+
+class BackendServiceContainer:
+    def __init__(self):
+        self.risk_fallback_env = risk_fallback_env_service
+        self.progress = progress_state_service
+        self.risk_blocklist = risk_blocklist_service
+        self.history = history_service
+        self.upload_session = upload_session_service
+        self.upload_risk = upload_risk_service
+        self.video_processing = video_processing_service
+
+
+backend_services = BackendServiceContainer()
+
+
 def process_video(
     video_path: Path,
     api_key: str,
@@ -1946,140 +2470,19 @@ def process_video(
     history_owner_id: str = "",
     progress_callback: Callable[[str, str], None] | None = None,
 ) -> Tuple[List[Dict[str, Any]], str, str, str, bool]:
-    def report(stage: str, message: str) -> None:
-        if progress_callback:
-            progress_callback(stage, message)
-
-    report("prepare", "\u6b63\u5728\u51c6\u5907\u5206\u6790\u4efb\u52a1...")
-    output_dir = _create_unique_output_dir(video_path)
-
-    agent = VideoAnalyzerAgent(
-        api_key if api_key else None,
-        whisper_model,
+    return video_processing_service.process_video(
+        video_path=video_path,
+        api_key=api_key,
+        whisper_model=whisper_model,
         model_name=model_name,
         model_base_url=model_base_url,
+        use_video=use_video,
+        web_search=web_search,
+        max_vision=max_vision,
+        fps=fps,
+        history_owner_id=history_owner_id,
+        progress_callback=progress_callback,
     )
-    report("moderation", "正在执行黑名单指纹比对...")
-    blacklist_risk = _match_blacklisted_video_fingerprint(video_path, source="analyze")
-    if blacklist_risk is not None:
-        quarantine_path = _quarantine_upload_file(video_path, str(blacklist_risk.get("reason_code", "")))
-        if quarantine_path is not None:
-            blacklist_risk["quarantine_path"] = str(quarantine_path)
-        shutil.rmtree(output_dir, ignore_errors=True)
-        raise ContentPolicyBlockedError(
-            "视频命中黑名单指纹（SHA-256 完全一致），已拒绝处理。",
-            blacklist_risk,
-        )
-
-    report("moderation", "正在执行内容风控检测...")
-    risk, risk_frame_dir = _run_video_risk_gate(agent, video_path, output_dir)
-    if _is_risk_infra_failure(risk):
-        if risk_frame_dir.exists():
-            shutil.rmtree(risk_frame_dir, ignore_errors=True)
-        shutil.rmtree(output_dir, ignore_errors=True)
-        raise RuntimeError(
-            str(risk.get("provider_error") or risk.get("reason") or "风控服务不可用")
-        )
-    if _should_block_by_risk(str(risk.get("decision", ""))):
-        blocked_hash = _register_blocked_video_fingerprint(
-            video_path, risk, source="analyze_risk_block"
-        )
-        if blocked_hash:
-            risk["hash_sha256"] = blocked_hash
-        quarantine_path = _quarantine_upload_file(video_path, str(risk.get("reason_code", "")))
-        if quarantine_path is not None:
-            risk["quarantine_path"] = str(quarantine_path)
-        shutil.rmtree(output_dir, ignore_errors=True)
-        raise ContentPolicyBlockedError(
-            f"视频触发风控策略（{risk.get('reason_code', 'CONTENT_POLICY_VIOLATION')}）：{risk.get('reason', '内容敏感')}",
-            risk,
-        )
-
-    if risk_frame_dir.exists():
-        shutil.rmtree(risk_frame_dir, ignore_errors=True)
-
-    video_dest = output_dir / video_path.name
-    if not video_dest.exists():
-        shutil.copy2(video_path, video_dest)
-
-    srt_path = None
-
-    if not use_video:
-        report("subtitle", "\u6b63\u5728\u751f\u6210\u5b57\u5e55...")
-        srt_path = agent.generate_subtitles(str(video_path), str(output_dir))
-        report("analysis", "\u6b63\u5728\u5206\u6790\u5b57\u5e55\u5185\u5bb9...")
-        steps = _run_async(agent.analyze_subtitles(srt_path))
-    else:
-        report("subtitle", "\u6b63\u5728\u5c1d\u8bd5\u751f\u6210\u5b57\u5e55...")
-        try:
-            srt_path = agent.generate_subtitles(str(video_path), str(output_dir))
-        except Exception as exc:
-            logger.warning("Whisper 字幕生成失败，继续视频分析模式: %s", exc)
-            srt_path = None
-        report("analysis", "\u6b63\u5728\u5206\u6790\u89c6\u9891\u753b\u9762...")
-        steps = _run_async(agent.analyze_video(str(video_path), fps))
-
-    if not steps:
-        report("analysis", "\u672a\u8bc6\u522b\u5230\u6709\u6548\u6b65\u9aa4")
-        return [], "", str(output_dir), str(output_dir / "operation_guide.pdf"), False
-
-    image_dir = output_dir / "images"
-    image_dir.mkdir(exist_ok=True)
-    report("screenshots", "\u6b63\u5728\u751f\u6210\u5173\u952e\u622a\u56fe...")
-    agent.generate_screenshots_from_steps(str(video_path), steps, str(image_dir))
-
-    if max_vision > 0 and not use_video and srt_path:
-        report("vision", "\u6b63\u5728\u8fdb\u884c\u89c6\u89c9\u589e\u5f3a...")
-        steps = _run_async(
-            agent.enhance_steps_with_vision(
-                steps, str(image_dir), srt_path=srt_path, max_calls=max_vision
-            )
-        )
-
-    output_md = output_dir / "operation_guide.md"
-    report("document", "\u6b63\u5728\u751f\u6210\u603b\u7ed3\u6587\u6863...")
-    _run_async(
-        agent.generate_step_document(
-            steps=steps,
-            output_path=str(output_md),
-            srt_path=srt_path if srt_path else None,
-            image_dir="images",
-            web_search=web_search,
-        )
-    )
-
-    output_pdf = output_dir / "operation_guide.pdf"
-    report("pdf", "\u6b63\u5728\u751f\u6210 PDF...")
-    agent.generate_pdf(str(output_md), str(output_pdf))
-    agent.save_results(steps, str(output_dir / "steps.json"))
-    report("done", "\u5f53\u524d\u89c6\u9891\u5206\u6790\u5b8c\u6210")
-
-    has_steps = len(steps) > 0
-    if has_steps:
-        record = {
-            "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
-            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "video_name": video_path.name,
-            "output_dir": str(output_dir),
-            "steps_count": len(steps),
-            "mode": "video" if use_video else "subtitle",
-            "whisper_model": whisper_model,
-            "model_name": model_name,
-            "model_base_url": model_base_url,
-            "use_video": use_video,
-            "web_search": web_search,
-            "max_vision": max_vision,
-            "pdf_path": str(output_pdf),
-            "risk_decision": str(risk.get("decision", "allow")),
-            "risk_level": str(risk.get("risk_level", "low")),
-            "risk_reason_code": str(risk.get("reason_code", "SAFE_CONTENT")),
-        }
-        save_history(record, history_owner_id)
-
-    with open(output_md, "r", encoding="utf-8") as f:
-        md_content = f.read()
-
-    return steps, md_content, str(output_dir), str(output_pdf), has_steps
 
 
 @app.route("/")
@@ -2889,14 +3292,12 @@ def upload_batch_files():
 
 @app.route("/batch_progress", methods=["GET"])
 def get_batch_progress():
-    with batch_progress_lock:
-        return jsonify(dict(batch_progress))
+    return jsonify(progress_state_service.get_batch_snapshot())
 
 
 @app.route("/single_progress", methods=["GET"])
 def get_single_progress():
-    with single_progress_lock:
-        return jsonify(dict(single_progress))
+    return jsonify(progress_state_service.get_single_snapshot())
 
 
 @app.route("/analyze_batch", methods=["POST"])

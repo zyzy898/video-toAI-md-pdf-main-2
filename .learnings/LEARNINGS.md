@@ -21,6 +21,72 @@ Before broad UI refactors, confirm the required scope and default to minimal-dif
 - Tags: scope_control, migration
 
 ---
+## [LRN-20260316-001] best_practice
+
+**Logged**: 2026-03-16T15:40:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+When testing chunk-upload flow, test data must respect server-side minimum chunk size constraints to avoid false regression signals.
+
+### Details
+In smoke tests, using `chunk_size=3` triggered an unexpected `400` on the second chunk. This was not a backend regression: `/upload_chunk_init` normalizes chunk size with a lower bound of `256 * 1024`, so `total_size=6` results in only one chunk. Sending `chunk_index=1` is therefore invalid by design.
+
+### Suggested Action
+For chunk-upload tests:
+1. Read/align with backend bounds (`DEFAULT_UPLOAD_CHUNK_SIZE`, min `256KB`, max limit).
+2. Use `total_size` and `chunk_size` values that actually produce the intended `total_chunks`.
+3. Treat out-of-range chunk index failures as expected behavior unless bounds are met.
+
+### Metadata
+- Source: conversation
+- Related Files: app.py
+- Tags: chunk-upload, smoke-test, false-negative, backend
+
+### Resolution
+- **Resolved**: 2026-03-16T15:41:00+08:00
+- **Commit/PR**: local_workspace_change
+- **Notes**: Updated smoke test payload to use realistic chunk sizes and verified full chunk flow passed.
+
+---
+
+## [LRN-20260316-002] best_practice
+
+**Logged**: 2026-03-16T15:42:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+For large OOP refactors, preserve compatibility by keeping old function interfaces and proving parity with automated structural checks.
+
+### Details
+The backend was refactored into service classes (`RiskBlocklistService`, `UploadSessionService`, `VideoProcessingService`, etc.) while keeping all existing route handlers and helper function names. Risk was controlled by:
+- maintaining wrapper functions with original names/signatures,
+- comparing old/new route sets and top-level function sets,
+- comparing old/new function signatures via AST.
+This reduced behavioral risk while improving maintainability.
+
+### Suggested Action
+During future architecture refactors:
+1. Introduce class-based services behind compatibility wrappers.
+2. Run route/function/signature parity checks against `HEAD`.
+3. Add smoke tests for critical paths before and after refactor.
+
+### Metadata
+- Source: conversation
+- Related Files: app.py
+- Tags: refactor, oop, backward-compatibility, regression-prevention
+- See Also: LRN-20260316-001
+
+### Resolution
+- **Resolved**: 2026-03-16T15:43:00+08:00
+- **Commit/PR**: local_workspace_change
+- **Notes**: Confirmed no route/function/signature loss and all key smoke endpoints passed.
+
+---
 
 ## [LRN-20260315-001] best_practice
 
