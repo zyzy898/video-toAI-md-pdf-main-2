@@ -8,13 +8,14 @@ import random
 import re
 import shutil
 import subprocess
+import time
 import traceback
 import zipfile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from threading import Lock, RLock
+from threading import Lock, RLock, Thread
 from typing import Any, Callable, Dict, List, Tuple
 from uuid import uuid4
 
@@ -81,6 +82,40 @@ CONTENT_POLICY_BLOCK_MESSAGE = (
 )
 TEXT_RISK_BLOCK_THRESHOLD = 0.78
 TEXT_RISK_RESTRICT_THRESHOLD = 0.5
+FALLBACK_CANDIDATE_MAX_STEPS = 5
+FALLBACK_MIN_STEPS = 3
+QUALITY_MODE_PRIOR: Dict[str, float] = {
+    "steps": 0.78,
+    "candidate_steps": 0.5,
+    "timeline_summary": 0.34,
+    "blocked_notice": 0.0,
+}
+QUALITY_MODE_CAP: Dict[str, float] = {
+    "steps": 0.98,
+    "candidate_steps": 0.72,
+    "timeline_summary": 0.56,
+    "blocked_notice": 0.0,
+}
+QUALITY_REASON_PENALTY_MAP: Dict[str, float] = {
+    "standard_steps_not_detected_subtitle_candidates_generated": 0.09,
+    "subtitle_signal_insufficient_timeline_summary_generated": 0.14,
+    "user_requested_summary_only": 0.03,
+    "content_generation_failed_emergency_summary_generated": 0.18,
+    "content_generation_failed": 0.22,
+    "content_policy_blocked": 1.0,
+}
+QUALITY_SOURCE_WEIGHT_MAP: Dict[str, float] = {
+    "manual": 0.95,
+    "manual_edit": 0.95,
+    "vision": 0.9,
+    "vision_enhanced": 0.9,
+    "video": 0.84,
+    "subtitle": 0.8,
+    "model": 0.8,
+    "subtitle_candidate": 0.52,
+    "timeline_summary": 0.35,
+    "fallback_padding": 0.22,
+}
 ENV_FILE_PATH = (PROJECT_ROOT / ".env").resolve()
 RISK_FALLBACK_ENV_BLOCK_MARKER = "# ===== 风控视觉兜底（仅系统管理员） ====="
 RISK_FALLBACK_ENV_BLOCK_MARKER_LEGACY = "# ===== RISK VISUAL FALLBACK (SYSTEM ADMIN ONLY) ====="
@@ -101,6 +136,10 @@ RISK_BLOCKLIST_PATH = (UPLOAD_ROOT / ".risk_blocklist.json").resolve()
 RISK_RESULT_CACHE_PATH = (UPLOAD_ROOT / ".risk_result_cache.json").resolve()
 RISK_RESULT_CACHE_TTL_SECONDS = 60 * 60 * 24
 RISK_RESULT_CACHE_MAX_ENTRIES = 500
+HISTORY_RETENTION_TTL_SECONDS = 72 * 60 * 60
+HISTORY_RETENTION_SCAN_INTERVAL_SECONDS = 60 * 30
+UPLOAD_VIDEO_AUTO_DELETE_TTL_SECONDS = 60 * 60 * 24
+UPLOAD_VIDEO_AUTO_DELETE_SCAN_INTERVAL_SECONDS = 60 * 30
 
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1123,6 +1162,188 @@ def attach_history_owner_cookie(response):
     return history_service.attach_owner_cookie(response)
 
 
+class HistoryRetentionCleanupService:
+    def __init__(
+        self,
+        history_service_obj: HistoryService,
+        output_root: Path,
+        ttl_seconds: int,
+        scan_interval_seconds: int,
+        logger_obj: logging.Logger,
+    ):
+        self.history_service = history_service_obj
+        self.output_root = output_root
+        self.ttl_seconds = max(60, int(ttl_seconds))
+        self.scan_interval_seconds = max(60, int(scan_interval_seconds))
+        self.logger = logger_obj
+        self._start_lock = Lock()
+        self._started = False
+        self._thread: Thread | None = None
+
+    def _resolve_record_output_dir(self, record: Dict[str, Any]) -> Path | None:
+        raw_output_dir = record.get("output_dir")
+        if not raw_output_dir:
+            return None
+        try:
+            output_dir = _resolve_output_dir(raw_output_dir, must_exist=False)
+            _assert_within(output_dir, self.output_root, "output_dir")
+            return output_dir
+        except (ValueError, OSError):
+            return None
+
+    def _read_document_ts(self, output_dir: Path) -> float | None:
+        try:
+            resolved = output_dir.resolve(strict=False)
+            _assert_within(resolved, self.output_root, "output_dir")
+            md_path = resolved / "operation_guide.md"
+            if not md_path.exists() or not md_path.is_file():
+                return None
+            return float(md_path.stat().st_mtime)
+        except (ValueError, FileNotFoundError, OSError):
+            return None
+
+    def _parse_record_ts(self, record: Dict[str, Any]) -> float | None:
+        timestamp_text = str(record.get("timestamp", "")).strip()
+        if timestamp_text:
+            for fmt in (
+                "%Y-%m-%d %H:%M:%S",
+                "%Y/%m/%d %H:%M:%S",
+                "%Y-%m-%dT%H:%M:%S",
+            ):
+                try:
+                    return datetime.strptime(timestamp_text, fmt).timestamp()
+                except ValueError:
+                    continue
+            try:
+                return datetime.fromisoformat(timestamp_text).timestamp()
+            except ValueError:
+                pass
+
+        record_id = re.sub(r"\D+", "", str(record.get("id", "")).strip())
+        if len(record_id) >= 14:
+            try:
+                return datetime.strptime(record_id[:14], "%Y%m%d%H%M%S").timestamp()
+            except ValueError:
+                return None
+        return None
+
+    def _record_reference_ts(self, record: Dict[str, Any], output_dir: Path | None) -> float | None:
+        if output_dir is not None:
+            doc_ts = self._read_document_ts(output_dir)
+            if doc_ts is not None:
+                return doc_ts
+        return self._parse_record_ts(record)
+
+    def _iter_output_dirs(self):
+        if not self.output_root.exists():
+            return
+        for entry in self.output_root.iterdir():
+            try:
+                if entry.is_dir():
+                    yield entry.resolve(strict=False)
+            except OSError:
+                continue
+
+    def _delete_output_dir(self, output_dir: Path) -> bool:
+        try:
+            resolved = output_dir.resolve(strict=False)
+            _assert_within(resolved, self.output_root, "output_dir")
+            if not resolved.exists() or not resolved.is_dir():
+                return False
+            shutil.rmtree(resolved, ignore_errors=False)
+            return True
+        except (ValueError, FileNotFoundError, OSError):
+            return False
+
+    def cleanup_once(self) -> Tuple[int, int]:
+        expire_before_ts = time.time() - float(self.ttl_seconds)
+        removed_records = 0
+        removed_output_dirs = 0
+
+        retained_output_dirs: set[Path] = set()
+        with self.history_service.lock:
+            history = self.history_service.read_unlocked()
+            retained_history: List[Dict[str, Any]] = []
+            for record in history:
+                output_dir = self._resolve_record_output_dir(record)
+                reference_ts = self._record_reference_ts(record, output_dir)
+                is_expired = reference_ts is not None and reference_ts <= expire_before_ts
+                if is_expired:
+                    removed_records += 1
+                    continue
+                retained_history.append(record)
+                if output_dir is not None:
+                    retained_output_dirs.add(output_dir.resolve(strict=False))
+
+            if removed_records > 0:
+                self.history_service.write_unlocked(retained_history)
+
+        removable_dirs: set[Path] = set()
+        for output_dir in self._iter_output_dirs():
+            if output_dir in retained_output_dirs:
+                continue
+            doc_ts = self._read_document_ts(output_dir)
+            if doc_ts is None or doc_ts > expire_before_ts:
+                continue
+            removable_dirs.add(output_dir)
+
+        for output_dir in removable_dirs:
+            if self._delete_output_dir(output_dir):
+                removed_output_dirs += 1
+
+        if removed_records > 0 or removed_output_dirs > 0:
+            self.logger.info(
+                "历史72h自动清理完成: history_removed=%s, output_dirs_removed=%s",
+                removed_records,
+                removed_output_dirs,
+            )
+        return removed_records, removed_output_dirs
+
+    def _worker(self) -> None:
+        while True:
+            try:
+                self.cleanup_once()
+            except Exception as exc:
+                self.logger.warning("历史72h自动清理任务异常: %s", exc)
+            time.sleep(self.scan_interval_seconds)
+
+    def start(self) -> None:
+        with self._start_lock:
+            if self._started:
+                return
+            self._started = True
+            try:
+                self.cleanup_once()
+            except Exception as exc:
+                self.logger.warning("历史72h自动清理首轮执行失败: %s", exc)
+            thread = Thread(
+                target=self._worker,
+                name="history-retention-cleanup",
+                daemon=True,
+            )
+            thread.start()
+            self._thread = thread
+
+
+history_retention_cleanup_service = HistoryRetentionCleanupService(
+    history_service_obj=history_service,
+    output_root=OUTPUT_ROOT,
+    ttl_seconds=HISTORY_RETENTION_TTL_SECONDS,
+    scan_interval_seconds=HISTORY_RETENTION_SCAN_INTERVAL_SECONDS,
+    logger_obj=logger,
+)
+
+
+def _start_history_retention_cleanup() -> None:
+    history_retention_cleanup_service.start()
+
+
+@app.before_request
+def ensure_upload_video_auto_cleanup():
+    _start_upload_video_auto_cleanup()
+    _start_history_retention_cleanup()
+
+
 def _run_async(coro):
     loop = asyncio.new_event_loop()
     try:
@@ -1303,6 +1524,131 @@ def _release_upload_memory(upload_id: str) -> None:
 
 def _get_chunk_storage_mode(session: Dict[str, Any]) -> str:
     return upload_session_service.get_chunk_storage_mode(session)
+
+
+class UploadVideoAutoCleanupService:
+    def __init__(
+        self,
+        upload_root: Path,
+        allowed_extensions: set[str],
+        ttl_seconds: int,
+        scan_interval_seconds: int,
+        logger_obj: logging.Logger,
+    ):
+        self.upload_root = upload_root
+        self.allowed_extensions = {str(ext).strip().lower() for ext in allowed_extensions if str(ext).strip()}
+        self.ttl_seconds = max(60, int(ttl_seconds))
+        self.scan_interval_seconds = max(60, int(scan_interval_seconds))
+        self.logger = logger_obj
+        self._start_lock = Lock()
+        self._started = False
+        self._thread: Thread | None = None
+
+    def _is_video_file(self, path: Path) -> bool:
+        if path.is_symlink() or (not path.is_file()):
+            return False
+        suffix = path.suffix.lower().lstrip(".")
+        return bool(suffix and suffix in self.allowed_extensions)
+
+    def _resolve_safe_upload_video_path(self, path: Path) -> Path | None:
+        try:
+            resolved = path.resolve(strict=False)
+            _assert_within(resolved, self.upload_root, "upload_video_path")
+            if resolved.is_symlink() or (not resolved.is_file()):
+                return None
+            suffix = resolved.suffix.lower().lstrip(".")
+            if not suffix or suffix not in self.allowed_extensions:
+                return None
+            return resolved
+        except (ValueError, OSError):
+            return None
+
+    def _iter_upload_video_files(self):
+        if not self.upload_root.exists():
+            return
+        seen: set[Path] = set()
+        for path in self.upload_root.rglob("*"):
+            safe_path = self._resolve_safe_upload_video_path(path)
+            if safe_path is None or safe_path in seen:
+                continue
+            seen.add(safe_path)
+            yield safe_path
+
+    def mark_loaded_now(self, video_path: Path) -> None:
+        try:
+            resolved = video_path.resolve(strict=False)
+            _assert_within(resolved, self.upload_root, "upload_video_path")
+            if not self._is_video_file(resolved):
+                return
+            os.utime(resolved, None)
+        except (ValueError, OSError):
+            # Silent by design: auto-cleanup timestamp refresh should not affect upload flow.
+            return
+
+    def cleanup_once(self) -> int:
+        expire_before_ts = time.time() - float(self.ttl_seconds)
+        deleted_count = 0
+        for video_file in self._iter_upload_video_files():
+            # Secondary boundary validation right before deletion.
+            safe_delete_target = self._resolve_safe_upload_video_path(video_file)
+            if safe_delete_target is None:
+                continue
+            try:
+                loaded_ts = float(safe_delete_target.stat().st_mtime)
+            except (FileNotFoundError, OSError):
+                continue
+            if loaded_ts > expire_before_ts:
+                continue
+            try:
+                safe_delete_target.unlink()
+                deleted_count += 1
+            except (FileNotFoundError, OSError):
+                continue
+        if deleted_count > 0:
+            self.logger.info("上传目录 24h 自动清理完成，删除视频文件: %s", deleted_count)
+        return deleted_count
+
+    def _worker(self) -> None:
+        while True:
+            try:
+                self.cleanup_once()
+            except Exception as exc:
+                self.logger.warning("上传目录自动清理任务异常: %s", exc)
+            time.sleep(self.scan_interval_seconds)
+
+    def start(self) -> None:
+        with self._start_lock:
+            if self._started:
+                return
+            self._started = True
+            try:
+                self.cleanup_once()
+            except Exception as exc:
+                self.logger.warning("启动上传目录自动清理时执行首轮清理失败: %s", exc)
+            thread = Thread(
+                target=self._worker,
+                name="upload-video-auto-cleanup",
+                daemon=True,
+            )
+            thread.start()
+            self._thread = thread
+
+
+upload_video_auto_cleanup_service = UploadVideoAutoCleanupService(
+    upload_root=UPLOAD_ROOT,
+    allowed_extensions=ALLOWED_EXTENSIONS,
+    ttl_seconds=UPLOAD_VIDEO_AUTO_DELETE_TTL_SECONDS,
+    scan_interval_seconds=UPLOAD_VIDEO_AUTO_DELETE_SCAN_INTERVAL_SECONDS,
+    logger_obj=logger,
+)
+
+
+def _start_upload_video_auto_cleanup() -> None:
+    upload_video_auto_cleanup_service.start()
+
+
+def _mark_uploaded_video_loaded_now(video_path: Path) -> None:
+    upload_video_auto_cleanup_service.mark_loaded_now(video_path)
 
 
 def _create_unique_output_dir(video_path: Path) -> Path:
@@ -2687,6 +3033,662 @@ def _normalize_upload_model_options(
     return api_key, model_name, model_base_url
 
 
+def _format_seconds_to_mmss(value: Any) -> str:
+    seconds = int(max(0.0, _safe_float(value, 0.0, 0.0)))
+    return f"{seconds // 60:02d}:{seconds % 60:02d}"
+
+
+def _compact_text(value: Any, limit: int = 120) -> str:
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if len(text) <= max(1, int(limit)):
+        return text
+    return text[: max(1, int(limit) - 1)].rstrip() + "…"
+
+
+def _extract_action_phrase_from_subtitle(text: Any) -> Tuple[str, str]:
+    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not normalized:
+        return "", ""
+
+    verbs = [
+        "打开",
+        "点击",
+        "选择",
+        "输入",
+        "搜索",
+        "切换",
+        "进入",
+        "创建",
+        "新增",
+        "删除",
+        "修改",
+        "编辑",
+        "保存",
+        "提交",
+        "上传",
+        "下载",
+        "导出",
+        "复制",
+        "粘贴",
+        "拖动",
+        "调整",
+        "设置",
+        "勾选",
+        "取消",
+        "确认",
+        "启动",
+        "运行",
+    ]
+    for verb in verbs:
+        idx = normalized.find(verb)
+        if idx < 0:
+            continue
+        tail = normalized[idx + len(verb) :].strip()
+        tail = re.split(r"[，。！？；,.!?;：:\n]", tail, maxsplit=1)[0].strip()
+        tail = re.sub(r"^(了|一下|一下子|并|然后|再|再去|将|把|对|给|到|为|向|于|在|通过|进行|完成)\s*", "", tail)
+        return verb, _compact_text(tail, 16)
+    return "", ""
+
+
+def _pick_timeline_points_from_subtitles(
+    subtitles: List[Dict[str, Any]],
+    minimum: int = 3,
+) -> List[Dict[str, Any]]:
+    valid_items = [
+        item
+        for item in subtitles
+        if isinstance(item, dict) and str(item.get("text", "")).strip()
+    ]
+    total = len(valid_items)
+    if total <= 0:
+        return []
+
+    target = max(minimum, min(FALLBACK_CANDIDATE_MAX_STEPS, 5))
+    target = min(target, total) if total >= minimum else total
+    if target <= 0:
+        return []
+
+    segment = float(total) / float(max(1, target))
+    selected_indices: List[int] = []
+    for idx in range(target):
+        center = int(idx * segment + segment / 2.0)
+        selected_indices.append(max(0, min(total - 1, center)))
+    selected_indices = sorted(set(selected_indices))
+
+    timeline: List[Dict[str, Any]] = []
+    for sub_idx in selected_indices:
+        item = valid_items[sub_idx]
+        start_seconds = _safe_float(item.get("start_seconds"), 0.0, 0.0)
+        timeline.append(
+            {
+                "time": _format_seconds_to_mmss(start_seconds),
+                "text": _compact_text(item.get("text", ""), 72),
+                "start_seconds": start_seconds,
+                "raw": item,
+            }
+        )
+    return timeline
+
+
+def _ensure_minimum_step_count(
+    steps: List[Dict[str, Any]],
+    *,
+    min_steps: int = FALLBACK_MIN_STEPS,
+    reason: str = "",
+) -> List[Dict[str, Any]]:
+    normalized_steps = list(steps)
+    if len(normalized_steps) >= min_steps:
+        return normalized_steps
+
+    defaults = [
+        ("00:00", "内容概览", "已自动补齐基础概览，帮助快速理解视频整体主题。"),
+        ("00:20", "关键信息提炼", "已自动补齐关键要点，建议结合原视频进行确认。"),
+        ("00:40", "下一步建议", "可切换更强模型或补充字幕后再次分析，以提升步骤准确率。"),
+    ]
+    reason_hint = _compact_text(reason, 54)
+    while len(normalized_steps) < min_steps:
+        idx = len(normalized_steps)
+        default_time, default_title, default_desc = defaults[min(idx, len(defaults) - 1)]
+        normalized_steps.append(
+            {
+                "step": idx + 1,
+                "time": default_time,
+                "title": default_title,
+                "description": (
+                    f"{default_desc}（{reason_hint}）" if reason_hint and idx == 1 else default_desc
+                ),
+                "confidence": round(max(0.2, 0.3 - idx * 0.03), 2),
+                "source": "fallback_padding",
+            }
+        )
+    return normalized_steps
+
+
+def _build_subtitle_candidate_steps(
+    subtitles: List[Dict[str, Any]],
+    max_steps: int = FALLBACK_CANDIDATE_MAX_STEPS,
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    timeline = _pick_timeline_points_from_subtitles(subtitles, minimum=FALLBACK_MIN_STEPS)
+    if not timeline:
+        return [], []
+
+    if len(timeline) > max_steps:
+        timeline = timeline[:max_steps]
+
+    steps: List[Dict[str, Any]] = []
+    for idx, point in enumerate(timeline, start=1):
+        text = str(point.get("text", "")).strip()
+        verb, obj = _extract_action_phrase_from_subtitle(text)
+        if verb:
+            action_title = f"{verb}{obj}" if obj else f"{verb}相关操作"
+        else:
+            action_title = _compact_text(text, 16) or f"候选步骤 {idx}"
+        confidence = round(max(0.3, 0.52 - (idx - 1) * 0.06), 2)
+        steps.append(
+            {
+                "step": idx,
+                "time": str(point.get("time", "00:00")) or "00:00",
+                "title": action_title,
+                "description": (
+                    f"{_compact_text(text, 120)}（自动从字幕提取“动作+对象+时间”，当前为低置信度候选）"
+                ),
+                "confidence": confidence,
+                "source": "subtitle_candidate",
+            }
+        )
+    return _ensure_minimum_step_count(steps), timeline
+
+
+def _build_timeline_summary_steps(
+    video_path: Path,
+    subtitles: List[Dict[str, Any]],
+    reason: str = "",
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], str, List[str]]:
+    duration_seconds = _probe_video_duration_seconds(video_path)
+    timeline_points: List[float]
+    if duration_seconds is not None and duration_seconds > 3:
+        timeline_points = [0.0, duration_seconds * 0.35, duration_seconds * 0.7, duration_seconds * 0.92]
+    else:
+        timeline_points = [0.0, 20.0, 40.0, 60.0]
+
+    subtitle_timeline = _pick_timeline_points_from_subtitles(subtitles, minimum=FALLBACK_MIN_STEPS)
+    timeline = subtitle_timeline
+    if len(timeline) < FALLBACK_MIN_STEPS:
+        timeline = [
+            {
+                "time": _format_seconds_to_mmss(point),
+                "text": "",
+                "start_seconds": point,
+            }
+            for point in timeline_points[:FALLBACK_MIN_STEPS]
+        ]
+    while len(timeline) < FALLBACK_MIN_STEPS:
+        point = timeline_points[len(timeline)] if len(timeline) < len(timeline_points) else timeline_points[-1]
+        timeline.append(
+            {"time": _format_seconds_to_mmss(point), "text": "", "start_seconds": point}
+        )
+
+    title_seed = _compact_text(video_path.stem.replace("_", " ").replace("-", " "), 24) or "当前视频"
+    reason_text = _compact_text(reason, 72)
+    timeline_text = " / ".join(item.get("time", "00:00") for item in timeline[:FALLBACK_MIN_STEPS])
+    key_points: List[str] = []
+    for item in timeline[:5]:
+        point_text = _compact_text(item.get("text", ""), 50)
+        if point_text:
+            key_points.append(f"{item.get('time', '00:00')}：{point_text}")
+    while len(key_points) < 3:
+        key_points.append(f"{timeline[min(len(key_points), len(timeline) - 1)].get('time', '00:00')}：待人工复核的关键片段")
+    key_points = key_points[:5]
+
+    summary_title = f"{title_seed} 视频时间线摘要"
+    confidence_note = (
+        "当前结果为摘要降级版：步骤结构置信度较低，系统优先保证可读内容输出。"
+    )
+    degrade_note = (
+        f"未提炼出标准步骤，已切换为时间线摘要模式。{f' 原因：{reason_text}' if reason_text else ''}"
+    )
+
+    steps = [
+        {
+            "step": 1,
+            "time": _format_seconds_to_mmss(timeline_points[0]),
+            "title": "视频主题",
+            "description": f"{summary_title}。系统已自动提炼可交付内容供快速查看。",
+            "confidence": 0.32,
+            "source": "timeline_summary",
+        },
+        {
+            "step": 2,
+            "time": _format_seconds_to_mmss(timeline_points[1]),
+            "title": "关键时间点",
+            "description": f"关键时间片段：{timeline_text}。建议优先查看这些位置。",
+            "confidence": 0.3,
+            "source": "timeline_summary",
+        },
+        {
+            "step": 3,
+            "time": _format_seconds_to_mmss(timeline_points[2]),
+            "title": "主要内容摘要",
+            "description": "；".join(key_points),
+            "confidence": 0.28,
+            "source": "timeline_summary",
+        },
+        {
+            "step": 4,
+            "time": _format_seconds_to_mmss(timeline_points[3]),
+            "title": "下一步建议",
+            "description": f"{confidence_note} {degrade_note}",
+            "confidence": 0.26,
+            "source": "timeline_summary",
+        },
+    ]
+    return steps, timeline, summary_title, key_points
+
+
+def _build_fallback_steps_when_empty(
+    agent: VideoAnalyzerAgent,
+    video_path: Path,
+    output_dir: Path,
+    srt_path: str | None,
+    *,
+    subtitle_cache_identity: str = "",
+    reason: str = "",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str | None]:
+    normalized_srt_path = str(srt_path or "").strip() or None
+    subtitles: List[Dict[str, Any]] = []
+
+    if normalized_srt_path and Path(normalized_srt_path).exists():
+        try:
+            subtitles = agent.parse_srt(normalized_srt_path)
+        except Exception as exc:
+            logger.warning("解析现有字幕失败，准备尝试重新生成字幕: %s", exc)
+            subtitles = []
+
+    if not subtitles:
+        try:
+            generated_srt = agent.generate_subtitles(
+                str(video_path),
+                str(output_dir),
+                cache_identity=subtitle_cache_identity or None,
+            )
+            normalized_srt_path = generated_srt if generated_srt else normalized_srt_path
+            if normalized_srt_path and Path(normalized_srt_path).exists():
+                subtitles = agent.parse_srt(normalized_srt_path)
+        except Exception as exc:
+            logger.warning("降级步骤生成时重新转写字幕失败: %s", exc)
+            subtitles = []
+
+    subtitle_steps, subtitle_timeline = _build_subtitle_candidate_steps(subtitles)
+    if subtitle_steps:
+        summary_title = (
+            _compact_text(video_path.stem.replace("_", " ").replace("-", " "), 24) or "当前视频"
+        ) + " 候选步骤"
+        key_points = [f"{item.get('time', '00:00')}：{_compact_text(item.get('title', ''), 24)}" for item in subtitle_steps[:5]]
+        while len(key_points) < 3:
+            key_points.append("00:00：待人工复核候选步骤")
+        result_meta = {
+            "result_mode": "candidate_steps",
+            "analysis_note": "未识别到标准步骤，已自动生成候选步骤（低置信度）。",
+            "degrade_reason": "standard_steps_not_detected_subtitle_candidates_generated",
+            "content_title": summary_title,
+            "key_points": key_points[:5],
+            "timeline_points": subtitle_timeline[:5],
+            "confidence_note": "候选步骤来自字幕启发式抽取，建议结合原视频确认。",
+            "fallback_used": True,
+        }
+        return subtitle_steps, result_meta, normalized_srt_path
+
+    summary_steps, timeline, summary_title, key_points = _build_timeline_summary_steps(
+        video_path,
+        subtitles,
+        reason=reason,
+    )
+    result_meta = {
+        "result_mode": "timeline_summary",
+        "analysis_note": "未识别到标准步骤，已自动生成时间线摘要。",
+        "degrade_reason": "subtitle_signal_insufficient_timeline_summary_generated",
+        "content_title": summary_title,
+        "key_points": key_points[:5],
+        "timeline_points": timeline[:5],
+        "confidence_note": "摘要模式用于保底输出，步骤细粒度较低。",
+        "fallback_used": True,
+    }
+    return summary_steps, result_meta, normalized_srt_path
+
+
+def _extract_timeline_from_steps(steps: List[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
+    timeline: List[Dict[str, Any]] = []
+    for item in steps:
+        if not isinstance(item, dict):
+            continue
+        time_text = str(item.get("time", "")).strip()
+        title_text = _compact_text(item.get("title", ""), 40)
+        if not time_text and not title_text:
+            continue
+        timeline.append({"time": time_text or "00:00", "text": title_text})
+        if len(timeline) >= limit:
+            break
+    while len(timeline) < FALLBACK_MIN_STEPS:
+        defaults = ["00:00", "00:20", "00:40"]
+        timeline.append({"time": defaults[len(timeline)], "text": "待确认片段"})
+    return timeline
+
+
+def _build_key_points_from_steps(steps: List[Dict[str, Any]], limit: int = 5) -> List[str]:
+    key_points: List[str] = []
+    for item in steps:
+        if not isinstance(item, dict):
+            continue
+        title_text = _compact_text(item.get("title", ""), 24)
+        desc_text = _compact_text(item.get("description", ""), 48)
+        time_text = str(item.get("time", "")).strip() or "00:00"
+        if title_text:
+            key_points.append(f"{time_text}：{title_text}")
+        elif desc_text:
+            key_points.append(f"{time_text}：{desc_text}")
+        if len(key_points) >= limit:
+            break
+    while len(key_points) < 3:
+        key_points.append("00:00：待确认要点")
+    return key_points[:limit]
+
+
+def _parse_step_time_to_seconds(value: Any) -> float | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    direct_number = _safe_float(text, -1.0)
+    if direct_number >= 0:
+        return direct_number
+
+    normalized = text.replace("：", ":")
+    parts = [part.strip() for part in normalized.split(":") if str(part).strip()]
+    if len(parts) not in (2, 3):
+        return None
+    try:
+        if len(parts) == 2:
+            minutes = float(parts[0])
+            seconds = float(parts[1])
+            if minutes < 0 or seconds < 0:
+                return None
+            return minutes * 60 + seconds
+        hours = float(parts[0])
+        minutes = float(parts[1])
+        seconds = float(parts[2])
+        if hours < 0 or minutes < 0 or seconds < 0:
+            return None
+        return hours * 3600 + minutes * 60 + seconds
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_step_structure_score(steps: List[Dict[str, Any]]) -> float:
+    if not steps:
+        return 0.0
+    total = len(steps)
+    title_present = 0
+    desc_present = 0
+    time_present = 0
+    title_richness = 0.0
+    desc_richness = 0.0
+    for item in steps:
+        title = str(item.get("title", "")).strip()
+        desc = str(item.get("description", "")).strip()
+        time_text = str(item.get("time", "")).strip()
+        if title:
+            title_present += 1
+            title_richness += min(1.0, len(title) / 12.0)
+        if desc:
+            desc_present += 1
+            desc_richness += min(1.0, len(desc) / 40.0)
+        if time_text:
+            time_present += 1
+
+    title_ratio = title_present / total
+    desc_ratio = desc_present / total
+    time_ratio = time_present / total
+    title_rich = title_richness / total
+    desc_rich = desc_richness / total
+    score = (
+        title_ratio * 0.3
+        + desc_ratio * 0.24
+        + time_ratio * 0.18
+        + title_rich * 0.14
+        + desc_rich * 0.14
+    )
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _compute_step_temporal_score(steps: List[Dict[str, Any]]) -> float:
+    if not steps:
+        return 0.0
+    raw_times = [_parse_step_time_to_seconds(item.get("time")) for item in steps]
+    parsed_times = [value for value in raw_times if value is not None]
+    parse_ratio = len(parsed_times) / len(steps)
+    if len(parsed_times) <= 1:
+        base = 0.2 if parse_ratio <= 0 else 0.46
+        return round(max(0.0, min(1.0, base)), 3)
+
+    monotonic_hits = sum(
+        1 for idx in range(1, len(parsed_times)) if parsed_times[idx] >= parsed_times[idx - 1] - 0.5
+    )
+    monotonic_ratio = monotonic_hits / (len(parsed_times) - 1)
+
+    unique_ratio = len(set(round(value, 1) for value in parsed_times)) / len(parsed_times)
+    spread = max(parsed_times) - min(parsed_times)
+    target_spread = max(20.0, (len(parsed_times) - 1) * 12.0)
+    spread_ratio = min(1.0, spread / target_spread)
+
+    gap_hits = sum(
+        1 for idx in range(1, len(parsed_times)) if (parsed_times[idx] - parsed_times[idx - 1]) >= 1.0
+    )
+    gap_ratio = gap_hits / (len(parsed_times) - 1)
+
+    score = (
+        parse_ratio * 0.22
+        + monotonic_ratio * 0.24
+        + unique_ratio * 0.22
+        + spread_ratio * 0.22
+        + gap_ratio * 0.1
+    )
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _compute_step_confidence_score(steps: List[Dict[str, Any]], result_mode: str) -> float:
+    if not steps:
+        return 0.0
+    confidence_values: List[float] = []
+    for item in steps:
+        raw_confidence = _safe_float(item.get("confidence"), -1.0)
+        if raw_confidence >= 0:
+            confidence_values.append(_normalize_risk_score(raw_confidence, 0.0))
+
+    default_by_mode = {
+        "steps": 0.74,
+        "candidate_steps": 0.48,
+        "timeline_summary": 0.34,
+    }
+    if not confidence_values:
+        return round(default_by_mode.get(result_mode, 0.42), 3)
+
+    average = sum(confidence_values) / len(confidence_values)
+    variance = sum((value - average) ** 2 for value in confidence_values) / len(confidence_values)
+    std_dev = variance ** 0.5
+    stability = max(0.0, min(1.0, 1.0 - std_dev / 0.35))
+    presence_ratio = len(confidence_values) / len(steps)
+    score = average * 0.72 + stability * 0.18 + presence_ratio * 0.1
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _compute_step_source_score(steps: List[Dict[str, Any]], result_mode: str) -> float:
+    if not steps:
+        return 0.0
+    source_scores: List[float] = []
+    unique_sources: set[str] = set()
+    for item in steps:
+        source = str(item.get("source", "")).strip().lower()
+        if source:
+            unique_sources.add(source)
+            source_scores.append(QUALITY_SOURCE_WEIGHT_MAP.get(source, 0.72))
+
+    if not source_scores:
+        default_by_mode = {
+            "steps": 0.76,
+            "candidate_steps": 0.5,
+            "timeline_summary": 0.34,
+        }
+        return round(default_by_mode.get(result_mode, 0.52), 3)
+
+    average_score = sum(source_scores) / len(source_scores)
+    diversity_bonus = min(0.08, max(0, len(unique_sources) - 1) * 0.03)
+    score = average_score + diversity_bonus
+    return round(max(0.0, min(1.0, score)), 3)
+
+
+def _compute_step_count_score(step_count: int, result_mode: str) -> float:
+    if step_count <= 0:
+        return 0.0
+    if result_mode == "steps":
+        if 3 <= step_count <= 10:
+            return 1.0
+        if step_count in (2, 11, 12, 13, 14):
+            return 0.78
+        return 0.56
+    if result_mode == "candidate_steps":
+        if 3 <= step_count <= 6:
+            return 0.94
+        if step_count in (2, 7):
+            return 0.76
+        return 0.58
+    if result_mode == "timeline_summary":
+        if 3 <= step_count <= 5:
+            return 0.9
+        if step_count in (2, 6):
+            return 0.7
+        return 0.52
+    if 3 <= step_count <= 8:
+        return 0.85
+    if step_count in (2, 9):
+        return 0.65
+    return 0.5
+
+
+def _resolve_quality_reason_penalty(degrade_reason: str) -> float:
+    normalized_reason = str(degrade_reason or "").strip().lower()
+    if not normalized_reason:
+        return 0.0
+    if normalized_reason in QUALITY_REASON_PENALTY_MAP:
+        return QUALITY_REASON_PENALTY_MAP[normalized_reason]
+    if "failed" in normalized_reason:
+        return 0.12
+    if "summary" in normalized_reason:
+        return 0.06
+    if "candidate" in normalized_reason:
+        return 0.05
+    return 0.03
+
+
+def _resolve_quality_score(
+    result_mode: str,
+    steps: List[Dict[str, Any]],
+    fallback_used: bool,
+    degrade_reason: str = "",
+) -> float:
+    normalized_mode = str(result_mode or "steps").strip().lower()
+    if normalized_mode == "blocked_notice":
+        return 0.0
+
+    valid_steps = [item for item in steps if isinstance(item, dict)]
+    if not valid_steps:
+        return 0.0
+
+    prior = QUALITY_MODE_PRIOR.get(normalized_mode, 0.46)
+    structure_score = _compute_step_structure_score(valid_steps)
+    temporal_score = _compute_step_temporal_score(valid_steps)
+    confidence_score = _compute_step_confidence_score(valid_steps, normalized_mode)
+    source_score = _compute_step_source_score(valid_steps, normalized_mode)
+    count_score = _compute_step_count_score(len(valid_steps), normalized_mode)
+
+    score = (
+        prior * 0.18
+        + structure_score * 0.24
+        + temporal_score * 0.18
+        + confidence_score * 0.2
+        + source_score * 0.1
+        + count_score * 0.1
+    )
+
+    if fallback_used:
+        score -= 0.05 if normalized_mode == "steps" else 0.025
+
+    score -= _resolve_quality_reason_penalty(degrade_reason)
+    mode_cap = QUALITY_MODE_CAP.get(normalized_mode, 0.95)
+    score = max(0.0, min(mode_cap, score))
+    return round(score, 3)
+
+
+def _build_result_meta_from_steps(
+    *,
+    video_path: Path,
+    steps: List[Dict[str, Any]],
+    result_mode: str,
+    fallback_used: bool,
+    degrade_reason: str = "",
+    analysis_note: str = "",
+) -> Dict[str, Any]:
+    normalized_mode = str(result_mode or "steps").strip() or "steps"
+    title_seed = _compact_text(video_path.stem.replace("_", " ").replace("-", " "), 28) or "当前视频"
+    if normalized_mode == "steps":
+        content_title = f"{title_seed} 标准步骤结果"
+        confidence_note = "已提炼出标准步骤结构，可直接用于复盘与文档生成。"
+    elif normalized_mode == "candidate_steps":
+        content_title = f"{title_seed} 候选步骤（低置信度）"
+        confidence_note = "候选步骤由字幕自动抽取，建议结合原视频确认。"
+    elif normalized_mode == "timeline_summary":
+        content_title = f"{title_seed} 时间线摘要"
+        confidence_note = "当前为摘要保底模式，步骤细粒度较低。"
+    else:
+        content_title = f"{title_seed} 分析结果"
+        confidence_note = "系统已输出可读结果，建议按需复核。"
+
+    timeline = _extract_timeline_from_steps(steps)
+    key_points = _build_key_points_from_steps(steps)
+    return {
+        "result_mode": normalized_mode,
+        "fallback_used": bool(fallback_used),
+        "quality_score": _resolve_quality_score(
+            normalized_mode,
+            steps,
+            fallback_used,
+            degrade_reason=str(degrade_reason or "").strip(),
+        ),
+        "degrade_reason": str(degrade_reason or "").strip(),
+        "analysis_note": str(analysis_note or "").strip(),
+        "content_title": content_title,
+        "key_points": key_points,
+        "timeline_points": timeline,
+        "confidence_note": confidence_note,
+    }
+
+
+def _build_blocked_notice_payload(risk: Dict[str, Any]) -> Dict[str, Any]:
+    risk_level = str(risk.get("risk_level", "high")).strip().lower() or "high"
+    reason_code = str(risk.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip().upper()
+    reason = str(risk.get("reason", "")).strip() or CONTENT_POLICY_BLOCK_MESSAGE
+    return {
+        "title": "安全检测未通过（已拦截）",
+        "risk_level": risk_level,
+        "reason_code": reason_code,
+        "reason": reason,
+        "suggestions": [
+            "删除或替换涉及色情/裸露/血腥/暴力的敏感画面。",
+            "对高风险片段进行裁剪、打码或弱化处理后再导出视频。",
+            "完成整改后重新上传并发起安全检测。",
+        ],
+        "retry_guidance": "请先完成内容整改，再重新上传触发检测。",
+    }
+
+
 class VideoProcessingService:
     def process_video(
         self,
@@ -2699,9 +3701,10 @@ class VideoProcessingService:
         web_search: bool,
         max_vision: int,
         fps: float = 1.0,
+        summary_only: bool = False,
         history_owner_id: str = "",
         progress_callback: Callable[[str, str], None] | None = None,
-    ) -> Tuple[List[Dict[str, Any]], str, str, str, bool]:
+    ) -> Tuple[List[Dict[str, Any]], str, str, str, bool, Dict[str, Any]]:
         def report(stage: str, message: str) -> None:
             if progress_callback:
                 progress_callback(stage, message)
@@ -2800,17 +3803,36 @@ class VideoProcessingService:
         if not video_dest.exists():
             shutil.copy2(video_path, video_dest)
 
-        srt_path = None
+        srt_path: str | None = None
+        steps: List[Dict[str, Any]] = []
+        analysis_error = ""
+        fallback_used = bool(summary_only)
+        result_mode = "steps"
+        analysis_note = "已按要求仅生成摘要版内容。" if summary_only else ""
+        degrade_reason = "user_requested_summary_only" if summary_only else ""
+        result_meta: Dict[str, Any] = {}
 
         if not use_video:
             report("subtitle", "\u6b63\u5728\u751f\u6210\u5b57\u5e55...")
-            srt_path = agent.generate_subtitles(
-                str(video_path),
-                str(output_dir),
-                cache_identity=video_fingerprint or None,
-            )
-            report("analysis", "\u6b63\u5728\u5206\u6790\u5b57\u5e55\u5185\u5bb9...")
-            steps = _run_async(agent.analyze_subtitles(srt_path))
+            try:
+                srt_path = agent.generate_subtitles(
+                    str(video_path),
+                    str(output_dir),
+                    cache_identity=video_fingerprint or None,
+                )
+            except Exception as exc:
+                analysis_error = f"字幕生成失败: {str(exc)}"
+                logger.warning("Whisper 字幕生成失败，切换候选内容生成: %s", exc)
+                srt_path = None
+
+            if srt_path and not summary_only:
+                report("analysis", "\u6b63\u5728\u5206\u6790\u5b57\u5e55\u5185\u5bb9...")
+                try:
+                    steps = _run_async(agent.analyze_subtitles(srt_path))
+                except Exception as exc:
+                    analysis_error = f"字幕步骤识别失败: {str(exc)}"
+                    logger.warning("字幕步骤识别失败，切换候选内容生成: %s", exc)
+                    steps = []
         else:
             report("subtitle", "\u6b63\u5728\u5c1d\u8bd5\u751f\u6210\u5b57\u5e55...")
             try:
@@ -2822,19 +3844,107 @@ class VideoProcessingService:
             except Exception as exc:
                 logger.warning("Whisper 字幕生成失败，继续视频分析模式: %s", exc)
                 srt_path = None
-            report("analysis", "\u6b63\u5728\u5206\u6790\u89c6\u9891\u753b\u9762...")
-            steps = _run_async(agent.analyze_video(str(video_path), fps))
+
+            if not summary_only:
+                report("analysis", "\u6b63\u5728\u5206\u6790\u89c6\u9891\u753b\u9762...")
+                try:
+                    steps = _run_async(agent.analyze_video(str(video_path), fps))
+                except Exception as exc:
+                    analysis_error = f"视频步骤识别失败: {str(exc)}"
+                    logger.warning("视频步骤识别失败，切换候选内容生成: %s", exc)
+                    steps = []
+
+        if summary_only:
+            report("analysis", "\u5df2\u542f\u7528\u4ec5\u751f\u6210\u6458\u8981\u6a21\u5f0f\uff0c\u6b63\u5728\u6784\u5efa\u65f6\u95f4\u7ebf\u6458\u8981...")
+            summary_subtitles: List[Dict[str, Any]] = []
+            if srt_path and Path(srt_path).exists():
+                try:
+                    summary_subtitles = agent.parse_srt(srt_path)
+                except Exception as exc:
+                    logger.warning("摘要模式解析字幕失败，改用无字幕摘要保底: %s", exc)
+                    summary_subtitles = []
+            summary_steps, timeline_points, summary_title, key_points = _build_timeline_summary_steps(
+                video_path=video_path,
+                subtitles=summary_subtitles,
+                reason=analysis_error,
+            )
+            steps = summary_steps
+            result_mode = "timeline_summary"
+            fallback_used = True
+            result_meta = {
+                "result_mode": result_mode,
+                "fallback_used": True,
+                "degrade_reason": degrade_reason or "user_requested_summary_only",
+                "analysis_note": analysis_note or "已根据你的选择仅生成摘要版内容。",
+                "content_title": summary_title,
+                "key_points": key_points[:5],
+                "timeline_points": timeline_points[:5],
+                "confidence_note": "摘要版输出不追求完整步骤，重点保证可读摘要与时间线。",
+            }
 
         if not steps:
-            report("analysis", "\u672a\u8bc6\u522b\u5230\u6709\u6548\u6b65\u9aa4")
-            return [], "", str(output_dir), str(output_dir / "operation_guide.pdf"), False
+            report("analysis", "\u672a\u8bc6\u522b\u5230\u6807\u51c6\u6b65\u9aa4\uff0c\u6b63\u5728\u751f\u6210\u5019\u9009\u5185\u5bb9...")
+            steps, fallback_meta, fallback_srt_path = _build_fallback_steps_when_empty(
+                agent=agent,
+                video_path=video_path,
+                output_dir=output_dir,
+                srt_path=srt_path,
+                subtitle_cache_identity=video_fingerprint,
+                reason=analysis_error,
+            )
+            if fallback_srt_path and not srt_path:
+                srt_path = fallback_srt_path
+            fallback_used = bool(steps)
+            result_mode = str(fallback_meta.get("result_mode", "timeline_summary"))
+            analysis_note = str(fallback_meta.get("analysis_note", "")).strip() or analysis_note
+            degrade_reason = str(fallback_meta.get("degrade_reason", "")).strip() or degrade_reason
+            result_meta = dict(fallback_meta)
+            if fallback_used:
+                report("analysis", "\u5df2\u81ea\u52a8\u751f\u6210\u964d\u7ea7\u5185\u5bb9\uff0c\u5c06\u7ee7\u7eed\u751f\u6210\u6587\u6863")
+            else:
+                report("analysis", "\u5df2\u5b8c\u6210\u6446\u5e95\u5904\u7406\uff0c\u5c06\u8fd4\u56de\u6458\u8981\u7ed3\u679c")
+
+        if not steps:
+            report("analysis", "\u6807\u51c6\u4e0e\u5019\u9009\u6b65\u9aa4\u5747\u4e0d\u53ef\u7528\uff0c\u5df2\u542f\u52a8\u7d27\u6025\u6458\u8981\u4fdd\u5e95...")
+            emergency_subtitles: List[Dict[str, Any]] = []
+            if srt_path and Path(srt_path).exists():
+                try:
+                    emergency_subtitles = agent.parse_srt(srt_path)
+                except Exception as exc:
+                    logger.warning("紧急摘要解析字幕失败，改用无字幕摘要保底: %s", exc)
+                    emergency_subtitles = []
+            summary_steps, timeline_points, summary_title, key_points = _build_timeline_summary_steps(
+                video_path=video_path,
+                subtitles=emergency_subtitles,
+                reason=analysis_error or "fallback_content_generation_failed",
+            )
+            steps = summary_steps
+            result_mode = "timeline_summary"
+            fallback_used = True
+            analysis_note = (
+                analysis_note
+                or "未识别到标准步骤，已自动切换为紧急摘要保底结果。"
+            )
+            degrade_reason = (
+                degrade_reason or "content_generation_failed_emergency_summary_generated"
+            )
+            result_meta = {
+                "result_mode": result_mode,
+                "fallback_used": True,
+                "analysis_note": analysis_note,
+                "degrade_reason": degrade_reason,
+                "content_title": summary_title,
+                "key_points": key_points[:5],
+                "timeline_points": timeline_points[:5],
+                "confidence_note": "当前为紧急摘要保底模式，建议结合原视频复核细节。",
+            }
 
         image_dir = output_dir / "images"
         image_dir.mkdir(exist_ok=True)
         report("screenshots", "\u6b63\u5728\u751f\u6210\u5173\u952e\u622a\u56fe...")
         agent.generate_screenshots_from_steps(str(video_path), steps, str(image_dir))
 
-        if max_vision > 0 and not use_video and srt_path:
+        if max_vision > 0 and not use_video and srt_path and not fallback_used:
             report("vision", "\u6b63\u5728\u8fdb\u884c\u89c6\u89c9\u589e\u5f3a...")
             steps = _run_async(
                 agent.enhance_steps_with_vision(
@@ -2861,6 +3971,19 @@ class VideoProcessingService:
         report("done", "\u5f53\u524d\u89c6\u9891\u5206\u6790\u5b8c\u6210")
 
         has_steps = len(steps) > 0
+        normalized_meta = _build_result_meta_from_steps(
+            video_path=video_path,
+            steps=steps,
+            result_mode=result_mode,
+            fallback_used=fallback_used,
+            degrade_reason=degrade_reason,
+            analysis_note=analysis_note,
+        )
+        if isinstance(result_meta, dict):
+            normalized_meta.update({k: v for k, v in result_meta.items() if v not in (None, "")})
+        result_meta = normalized_meta
+        if analysis_error:
+            result_meta["analysis_error"] = _compact_text(analysis_error, 180)
         if has_steps:
             record = {
                 "id": datetime.now().strftime("%Y%m%d%H%M%S%f"),
@@ -2879,13 +4002,20 @@ class VideoProcessingService:
                 "risk_decision": str(risk.get("decision", "allow")),
                 "risk_level": str(risk.get("risk_level", "low")),
                 "risk_reason_code": str(risk.get("reason_code", "SAFE_CONTENT")),
+                "result_mode": result_meta.get("result_mode", result_mode),
+                "fallback_used": bool(result_meta.get("fallback_used", fallback_used)),
+                "analysis_note": str(result_meta.get("analysis_note", analysis_note)),
+                "quality_score": _safe_float(result_meta.get("quality_score", 0.0), 0.0, 0.0, 1.0),
+                "degrade_reason": str(result_meta.get("degrade_reason", "")).strip(),
+                "content_title": str(result_meta.get("content_title", "")).strip(),
+                "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
             }
             save_history(record, history_owner_id)
 
         with open(output_md, "r", encoding="utf-8") as f:
             md_content = f.read()
 
-        return steps, md_content, str(output_dir), str(output_pdf), has_steps
+        return steps, md_content, str(output_dir), str(output_pdf), has_steps, result_meta
 
 
 video_processing_service = VideoProcessingService()
@@ -2898,8 +4028,10 @@ class BackendServiceContainer:
         self.risk_blocklist = risk_blocklist_service
         self.risk_result_cache = risk_result_cache_service
         self.history = history_service
+        self.history_retention = history_retention_cleanup_service
         self.upload_session = upload_session_service
         self.upload_risk = upload_risk_service
+        self.upload_video_cleanup = upload_video_auto_cleanup_service
         self.video_processing = video_processing_service
 
 
@@ -2916,9 +4048,10 @@ def process_video(
     web_search: bool,
     max_vision: int,
     fps: float = 1.0,
+    summary_only: bool = False,
     history_owner_id: str = "",
     progress_callback: Callable[[str, str], None] | None = None,
-) -> Tuple[List[Dict[str, Any]], str, str, str, bool]:
+) -> Tuple[List[Dict[str, Any]], str, str, str, bool, Dict[str, Any]]:
     return video_processing_service.process_video(
         video_path=video_path,
         api_key=api_key,
@@ -2929,6 +4062,7 @@ def process_video(
         web_search=web_search,
         max_vision=max_vision,
         fps=fps,
+        summary_only=summary_only,
         history_owner_id=history_owner_id,
         progress_callback=progress_callback,
     )
@@ -3008,6 +4142,7 @@ def upload_file():
 
         save_path = _build_unique_upload_path(file.filename)
         shutil.move(str(staged_path), str(save_path))
+        _mark_uploaded_video_loaded_now(save_path)
         return jsonify({"filename": save_path.name, "filepath": str(save_path)})
     except ValueError as exc:
         _safe_remove_file(staged_path)
@@ -3354,6 +4489,7 @@ def upload_chunk_finalize():
 
         save_path = _build_unique_upload_path(filename)
         shutil.move(str(staging_path), str(save_path))
+        _mark_uploaded_video_loaded_now(save_path)
         if save_path.stat().st_size > total_size:
             with open(save_path, "r+b") as f:
                 f.truncate(total_size)
@@ -3378,6 +4514,7 @@ def analyze():
     whisper_model, use_video, web_search, max_vision, fps = _normalize_processing_options(
         data
     )
+    summary_only = _as_bool(data.get("summary_only", False))
     model_name, model_base_url = _normalize_model_options(data)
 
     try:
@@ -3403,7 +4540,7 @@ def analyze():
                 message=message,
             )
 
-        steps, md_content, output_dir, output_pdf, has_steps = process_video(
+        steps, md_content, output_dir, output_pdf, has_steps, result_meta = process_video(
             video_path,
             api_key,
             whisper_model,
@@ -3413,21 +4550,18 @@ def analyze():
             web_search,
             max_vision,
             fps,
+            summary_only=summary_only,
             history_owner_id=history_owner_id,
             progress_callback=_single_progress_callback,
         )
-        if not has_steps:
-            _update_single_progress(
-                status="failed",
-                stage="failed",
-                message="\u672a\u80fd\u8bc6\u522b\u5230\u64cd\u4f5c\u6b65\u9aa4",
-            )
-            return jsonify({"error": "未能识别到操作步骤"}), 500
-
         _update_single_progress(
             status="completed",
             stage="done",
-            message="\u89c6\u9891\u5206\u6790\u5df2\u5b8c\u6210",
+            message=(
+                "\u89c6\u9891\u5206\u6790\u5df2\u5b8c\u6210\uff08\u5df2\u81ea\u52a8\u751f\u6210\u5019\u9009\u5185\u5bb9\uff09"
+                if result_meta.get("fallback_used")
+                else "\u89c6\u9891\u5206\u6790\u5df2\u5b8c\u6210"
+            ),
         )
         return jsonify(
             {
@@ -3436,6 +4570,16 @@ def analyze():
                 "markdown": md_content,
                 "output_dir": output_dir,
                 "pdf_path": output_pdf,
+                "has_steps": has_steps,
+                "result_mode": result_meta.get("result_mode", "steps"),
+                "fallback_used": bool(result_meta.get("fallback_used", False)),
+                "analysis_note": str(result_meta.get("analysis_note", "")).strip(),
+                "quality_score": _safe_float(result_meta.get("quality_score", 0.0), 0.0, 0.0, 1.0),
+                "degrade_reason": str(result_meta.get("degrade_reason", "")).strip(),
+                "content_title": str(result_meta.get("content_title", "")).strip(),
+                "key_points": result_meta.get("key_points", []),
+                "timeline_points": result_meta.get("timeline_points", []),
+                "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
             }
         )
     except ContentPolicyBlockedError as exc:
@@ -3444,12 +4588,17 @@ def analyze():
             stage="moderation",
             message=str(exc),
         )
+        blocked_notice = _build_blocked_notice_payload(exc.risk)
         return (
             jsonify(
                 {
                     "error": str(exc),
                     "code": "content_policy_violation",
                     "risk": exc.risk,
+                    "result_mode": "blocked_notice",
+                    "quality_score": 0.0,
+                    "degrade_reason": "content_policy_blocked",
+                    "blocked_notice": blocked_notice,
                 }
             ),
             403,
@@ -3766,6 +4915,7 @@ def upload_batch_files():
 
             save_path = _build_unique_upload_path(file.filename)
             shutil.move(str(staged_path), str(save_path))
+            _mark_uploaded_video_loaded_now(save_path)
             uploaded.append({"filename": save_path.name, "filepath": str(save_path)})
         except Exception as exc:
             _safe_remove_file(staged_path)
@@ -3799,6 +4949,7 @@ def analyze_batch():
     whisper_model, use_video, web_search, max_vision, fps = _normalize_processing_options(
         data
     )
+    summary_only = _as_bool(data.get("summary_only", False))
     model_name, model_base_url = _normalize_model_options(data)
 
     filepaths: List[Path] = []
@@ -3838,7 +4989,7 @@ def analyze_batch():
                 )
 
             try:
-                steps, md_content, output_dir, output_pdf, has_steps = process_video(
+                steps, md_content, output_dir, output_pdf, has_steps, result_meta = process_video(
                     filepath,
                     api_key,
                     whisper_model,
@@ -3848,6 +4999,7 @@ def analyze_batch():
                     web_search,
                     max_vision,
                     fps,
+                    summary_only=summary_only,
                     history_owner_id=history_owner_id,
                     progress_callback=_batch_progress_callback,
                 )
@@ -3864,7 +5016,16 @@ def analyze_batch():
                             "index": idx,
                             "filename": filepath.name,
                             "success": False,
-                            "error": "未识别到操作步骤",
+                            "error": "未生成有效分析内容",
+                            "result_mode": str(result_meta.get("result_mode", "empty")),
+                            "fallback_used": bool(result_meta.get("fallback_used", False)),
+                            "analysis_note": str(result_meta.get("analysis_note", "")).strip(),
+                            "quality_score": _safe_float(result_meta.get("quality_score", 0.0), 0.0, 0.0, 1.0),
+                            "degrade_reason": str(result_meta.get("degrade_reason", "")).strip(),
+                            "content_title": str(result_meta.get("content_title", "")).strip(),
+                            "key_points": result_meta.get("key_points", []),
+                            "timeline_points": result_meta.get("timeline_points", []),
+                            "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
                         }
                     )
                     continue
@@ -3879,13 +5040,26 @@ def analyze_batch():
                         "pdf_path": output_pdf,
                         "markdown": md_content,
                         "steps": steps,
+                        "result_mode": str(result_meta.get("result_mode", "steps")),
+                        "fallback_used": bool(result_meta.get("fallback_used", False)),
+                        "analysis_note": str(result_meta.get("analysis_note", "")).strip(),
+                        "quality_score": _safe_float(result_meta.get("quality_score", 0.0), 0.0, 0.0, 1.0),
+                        "degrade_reason": str(result_meta.get("degrade_reason", "")).strip(),
+                        "content_title": str(result_meta.get("content_title", "")).strip(),
+                        "key_points": result_meta.get("key_points", []),
+                        "timeline_points": result_meta.get("timeline_points", []),
+                        "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
                     }
                 )
                 _update_batch_progress(
                     current=idx,
                     current_file=filepath.name,
                     stage="done",
-                    message=f"{filepath.name} \u5206\u6790\u5b8c\u6210",
+                    message=(
+                        f"{filepath.name} \u5206\u6790\u5b8c\u6210\uff08\u5019\u9009\u5185\u5bb9\uff09"
+                        if result_meta.get("fallback_used")
+                        else f"{filepath.name} \u5206\u6790\u5b8c\u6210"
+                    ),
                 )
             except ContentPolicyBlockedError as exc:
                 _update_batch_progress(
@@ -3894,6 +5068,7 @@ def analyze_batch():
                     stage="moderation",
                     message=str(exc),
                 )
+                blocked_notice = _build_blocked_notice_payload(exc.risk)
                 results.append(
                     {
                         "index": idx,
@@ -3902,6 +5077,10 @@ def analyze_batch():
                         "error": str(exc),
                         "code": "content_policy_violation",
                         "risk": exc.risk,
+                        "result_mode": "blocked_notice",
+                        "quality_score": 0.0,
+                        "degrade_reason": "content_policy_blocked",
+                        "blocked_notice": blocked_notice,
                     }
                 )
             except Exception as exc:
@@ -3982,5 +5161,8 @@ def download_batch_zip():
 
 if __name__ == "__main__":
     debug_mode = os.getenv("FLASK_DEBUG", "").strip().lower() in {"1", "true", "yes"}
+    if (not debug_mode) or os.getenv("WERKZEUG_RUN_MAIN", "").strip().lower() in {"1", "true"}:
+        _start_upload_video_auto_cleanup()
+        _start_history_retention_cleanup()
     app.run(debug=debug_mode, port=5000)
 

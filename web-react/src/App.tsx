@@ -183,6 +183,24 @@ const formatInlineErrorMessage = (rawMessage: string) => {
   return message.replace(/\s+/g, " ").trim();
 };
 
+const DEGRADE_REASON_LABELS: Record<string, string> = {
+  standard_steps_not_detected_subtitle_candidates_generated: "未识别到标准步骤，已根据字幕生成候选步骤",
+  subtitle_signal_insufficient_timeline_summary_generated: "字幕信号不足，已自动生成时间线摘要",
+  user_requested_summary_only: "已按你的选择仅生成摘要版内容",
+  content_generation_failed_emergency_summary_generated: "标准与候选步骤均不可用，已切换紧急摘要保底",
+  content_generation_failed: "内容提炼失败，已返回保底结果",
+  content_policy_blocked: "内容触发安全策略，已拦截",
+};
+
+const formatDegradeReason = (rawReason?: string) => {
+  const reason = String(rawReason || "").trim();
+  if (!reason) return "标准步骤未稳定提炼，已自动降级输出";
+  const mapped = DEGRADE_REASON_LABELS[reason.toLowerCase()];
+  if (mapped) return mapped;
+  if (/[\u4e00-\u9fa5]/u.test(reason)) return reason;
+  return "系统未提炼出高置信度标准步骤，已输出可读保底结果";
+};
+
 const STAGE_LABELS: Record<string, string> = {
   prepare: "准备中",
   upload: "上传中",
@@ -274,10 +292,24 @@ type RiskResult = {
   scores?: Partial<Record<"nudity" | "violence" | "gore", number>>;
 };
 
+type BlockedNotice = {
+  title?: string;
+  risk_level?: string;
+  reason_code?: string;
+  reason?: string;
+  suggestions?: string[];
+  retry_guidance?: string;
+};
+
 type ApiErrorPayload = {
   error?: string;
   code?: string;
   risk?: RiskResult;
+  result_mode?: string;
+  quality_score?: number;
+  degrade_reason?: string;
+  blocked_notice?: BlockedNotice;
+  analysis_note?: string;
 };
 
 type SingleResultData = {
@@ -285,6 +317,18 @@ type SingleResultData = {
   markdown: string;
   output_dir: string;
   pdf_path?: string;
+  has_steps?: boolean;
+  result_mode?: string;
+  fallback_used?: boolean;
+  analysis_note?: string;
+  quality_score?: number;
+  degrade_reason?: string;
+  content_title?: string;
+  key_points?: string[];
+  timeline_points?: Array<{ time?: string; text?: string }>;
+  confidence_note?: string;
+  blocked_notice?: BlockedNotice;
+  risk?: RiskResult;
 };
 
 type BatchResultItem = {
@@ -296,6 +340,16 @@ type BatchResultItem = {
   error?: string;
   code?: string;
   risk?: RiskResult;
+  result_mode?: string;
+  fallback_used?: boolean;
+  analysis_note?: string;
+  quality_score?: number;
+  degrade_reason?: string;
+  content_title?: string;
+  key_points?: string[];
+  timeline_points?: Array<{ time?: string; text?: string }>;
+  confidence_note?: string;
+  blocked_notice?: BlockedNotice;
 };
 
 type BatchResultData = {
@@ -314,6 +368,18 @@ type HistoryItem = {
   steps_count?: number;
   timestamp?: string;
 };
+
+class ApiRequestError extends Error {
+  status: number;
+  payload: ApiErrorPayload;
+
+  constructor(message: string, status: number, payload: ApiErrorPayload) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
 
 type ProgressBoard = {
   mode: Mode;
@@ -645,7 +711,7 @@ const HISTORY_VIRTUAL_OVERSCAN = 6;
 
 const ReadonlyStepsList = memo(function ReadonlyStepsList({ steps }: { steps: StepItem[] }) {
   return (
-    <div className="history-scroll max-h-[min(62vh,40rem)] space-y-2 overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+    <div className="space-y-2">
       {steps.map((step, i) => (
         <div key={`s-${i}`} className="rounded border border-neutral-800 bg-neutral-950/60 p-2">
           <p className="text-xs text-neutral-500">
@@ -781,9 +847,20 @@ const VirtualizedHistoryList = memo(function VirtualizedHistoryList({
   );
 });
 
-const MarkdownPreview = memo(function MarkdownPreview({ html }: { html: string }) {
+const MarkdownPreview = memo(function MarkdownPreview({
+  html,
+  className,
+}: {
+  html: string;
+  className?: string;
+}) {
   return (
-    <div className="history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+    <div
+      className={cn(
+        "history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]",
+        className,
+      )}
+    >
       <div className="prose prose-invert max-w-none text-sm" dangerouslySetInnerHTML={{ __html: html }} />
     </div>
   );
@@ -802,6 +879,7 @@ export default function App() {
   const [useVideo, setUseVideo] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
   const [fps, setFps] = useState(1);
+  const [summaryOnly, setSummaryOnly] = useState(false);
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
@@ -963,7 +1041,7 @@ export default function App() {
       const riskHint = formatRiskHint(data.risk);
       const codeText = data.code ? `code=${data.code}` : "";
       const merged = [base, codeText, riskHint].filter(Boolean).join(" | ");
-      throw new Error(merged);
+      throw new ApiRequestError(merged, response.status, data);
     }
     return data;
   }, [withHistoryClientHeader]);
@@ -1528,7 +1606,7 @@ export default function App() {
     setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "pending", error: "" })));
     stopBatchPolling();
     setIsAnalyzing(true);
-    showProgress("单文件处理中", "正在分析视频，请稍候...");
+    showProgress("单文件处理中", summaryOnly ? "正在生成摘要版，请稍候..." : "正在分析视频，请稍候...");
     updateProgressBoard({ mode: "single", stage: "prepare", total: 1, percent: 5, currentFile: file.filename });
     startSinglePolling();
     let reveal = false;
@@ -1546,12 +1624,16 @@ export default function App() {
           web_search: webSearch,
           max_vision: maxVision,
           fps,
+          summary_only: summaryOnly,
         }),
       });
       setResultData(data);
       setBatchResultData(null);
       setIsEditMode(false);
       setEditedSteps([]);
+      if (data?.fallback_used) {
+        showSuccess(String(data.analysis_note || "未识别到标准步骤，已自动生成候选内容。"));
+      }
       setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "success", error: "" })));
       updateProgressBoard({
         mode: "single",
@@ -1566,6 +1648,47 @@ export default function App() {
       reveal = true;
       await loadHistory();
     } catch (error) {
+      const apiError = error instanceof ApiRequestError ? error : null;
+      if (apiError?.payload?.code === "content_policy_violation") {
+        const blockedNotice = apiError.payload.blocked_notice || {
+          title: "安全检测未通过（已拦截）",
+          risk_level: String(apiError.payload.risk?.risk_level || "high"),
+          reason_code: String(apiError.payload.risk?.reason_code || "CONTENT_POLICY_VIOLATION"),
+          reason: String(apiError.payload.risk?.reason || CONTENT_POLICY_BLOCK_MESSAGE),
+          suggestions: ["删除敏感片段后重新上传检测。"],
+          retry_guidance: "请整改后重试。",
+        };
+        setResultData({
+          steps: [],
+          markdown: "",
+          output_dir: "",
+          pdf_path: "",
+          result_mode: "blocked_notice",
+          fallback_used: false,
+          analysis_note: String(apiError.payload.analysis_note || "已生成安全检测说明卡。"),
+          quality_score: Number(apiError.payload.quality_score || 0),
+          degrade_reason: String(apiError.payload.degrade_reason || "content_policy_blocked"),
+          blocked_notice: blockedNotice,
+          risk: apiError.payload.risk,
+        });
+        setBatchResultData(null);
+        setIsEditMode(false);
+        setEditedSteps([]);
+        setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "failed", error: "安全检测未通过" })));
+        updateProgressBoard({
+          mode: "single",
+          stage: "done",
+          total: 1,
+          current: 1,
+          success: 0,
+          failed: 1,
+          currentFile: file.filename,
+          percent: 100,
+        });
+        showSuccess("安全检测未通过，已生成检测结果说明卡。");
+        reveal = true;
+        return;
+      }
       const message = String((error as Error).message || error);
       if (WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint))) setWebSearch(false);
       setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "failed", error: message })));
@@ -1596,6 +1719,7 @@ export default function App() {
     modelBaseUrl,
     modelName,
     showError,
+    showSuccess,
     showProgress,
     startSinglePolling,
     stopBatchPolling,
@@ -1604,6 +1728,7 @@ export default function App() {
     useVideo,
     webSearch,
     whisperModel,
+    summaryOnly,
   ]);
 
   const analyzeBatch = useCallback(async () => {
@@ -1611,7 +1736,7 @@ export default function App() {
     setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "pending", error: "" })));
     stopSinglePolling();
     setIsAnalyzing(true);
-    showProgress("批量处理中", "正在逐个分析视频...");
+    showProgress("批量处理中", summaryOnly ? "正在逐个生成摘要版..." : "正在逐个分析视频...");
     updateProgressBoard({ mode: "batch", stage: "prepare", total: batchFilesRef.current.length, percent: 0 });
     startBatchPolling();
     let reveal = false;
@@ -1629,6 +1754,7 @@ export default function App() {
           web_search: webSearch,
           max_vision: maxVision,
           fps,
+          summary_only: summaryOnly,
         }),
       });
       setBatchResultData(data);
@@ -1700,6 +1826,7 @@ export default function App() {
     useVideo,
     webSearch,
     whisperModel,
+    summaryOnly,
   ]);
 
   const startAnalyze = useCallback(async () => {
@@ -1726,6 +1853,14 @@ export default function App() {
           markdown: record.markdown || "",
           output_dir: record.output_dir || "",
           pdf_path: record.pdf_path || "",
+          has_steps: Boolean(record.steps && Array.isArray(record.steps) && record.steps.length > 0),
+          result_mode: String(record.result_mode || ""),
+          fallback_used: Boolean(record.fallback_used),
+          analysis_note: String(record.analysis_note || ""),
+          quality_score: Number(record.quality_score || 0),
+          degrade_reason: String(record.degrade_reason || ""),
+          content_title: String(record.content_title || ""),
+          confidence_note: String(record.confidence_note || ""),
         });
         setBatchResultData(null);
         if (resultsRef.current) {
@@ -1999,6 +2134,9 @@ export default function App() {
   const hasBatchResult = Boolean(batchResultData);
   const hasAnyResult = hasSingleResult || hasBatchResult;
   const singleResultSteps = resultData?.steps || EMPTY_STEPS;
+  const singleResultMode = String(resultData?.result_mode || "").trim().toLowerCase();
+  const isBlockedNoticeResult = singleResultMode === "blocked_notice";
+  const isDegradedResult = singleResultMode === "candidate_steps" || singleResultMode === "timeline_summary";
   const drawerOverlayActive =
     historyDrawerOpen || settingsDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
   const heroCanvasAnimating = !drawerOverlayActive && heroAnimationActive;
@@ -2260,12 +2398,24 @@ export default function App() {
                   </span>
                 </button>
               </NoiseBackground>
+              <button
+                type="button"
+                className={`mt-2 w-full rounded border px-3 py-1.5 text-xs transition-colors ${
+                  summaryOnly
+                    ? "border-amber-400/60 bg-amber-500/15 text-amber-200"
+                    : "border-neutral-700 text-neutral-300 hover:border-amber-400/45 hover:text-amber-200"
+                }`}
+                disabled={isAnalyzing}
+                onClick={() => setSummaryOnly((prev) => !prev)}
+              >
+                {summaryOnly ? "仅生成摘要版：已开启" : "仅生成摘要版"}
+              </button>
             </section>
 
             {hasAnyResult ? (
               <div
                 ref={resultsRef}
-                className="results-grid grid items-start gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]"
+                className="results-grid grid items-stretch gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]"
               >
                 {hasBatchResult ? (
                   <section className="panel-card motion-enter rounded-xl border border-neutral-800 bg-neutral-900/70 p-4 xl:col-span-2">
@@ -2287,18 +2437,62 @@ export default function App() {
                         <div key={`${r.filename}-${i}`} className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
                           <div className="flex items-center justify-between">
                             <p className="truncate text-sm font-medium">{r.filename}</p>
-                            <span className={`text-xs ${r.success ? "text-emerald-300" : "text-rose-300"}`}>
-                              {r.success ? "成功" : "失败"}
+                            <span
+                              className={`text-xs ${
+                                r.success
+                                  ? r.result_mode === "candidate_steps" || r.result_mode === "timeline_summary"
+                                    ? "text-amber-300"
+                                    : "text-emerald-300"
+                                  : r.result_mode === "blocked_notice" || r.code === "content_policy_violation"
+                                    ? "text-amber-300"
+                                    : "text-rose-300"
+                              }`}
+                            >
+                              {r.success
+                                ? r.result_mode === "candidate_steps" || r.result_mode === "timeline_summary"
+                                  ? "已完成（降级）"
+                                  : "成功"
+                                : r.result_mode === "blocked_notice" || r.code === "content_policy_violation"
+                                  ? "已拦截"
+                                  : "失败"}
                             </span>
                           </div>
                           {r.success ? (
-                            <button
-                              className="zip-download-btn mt-1 flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
-                              onClick={() => void downloadSingleFromBatch(r.output_dir, r.filename)}
-                            >
-                              <DownloadSingleIcon className="h-3.5 w-3.5" />
-                              下载
-                            </button>
+                            <>
+                              <button
+                                className="zip-download-btn mt-1 flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
+                                onClick={() => void downloadSingleFromBatch(r.output_dir, r.filename)}
+                              >
+                                <DownloadSingleIcon className="h-3.5 w-3.5" />
+                                下载
+                              </button>
+                              {r.fallback_used ? (
+                                <p className="mt-1 text-xs text-amber-300/90">
+                                  {(r.analysis_note || "未识别到标准步骤，已自动生成候选内容。") +
+                                    `（质量分：${Number(r.quality_score || 0).toFixed(2)}）`}
+                                </p>
+                              ) : null}
+                            </>
+                          ) : r.result_mode === "blocked_notice" || r.code === "content_policy_violation" ? (
+                            <div className="mt-1 rounded border border-rose-500/45 bg-rose-500/10 p-2 text-xs text-rose-200/95">
+                              <p className="font-semibold">
+                                {r.blocked_notice?.title || "安全检测未通过（已拦截）"}
+                              </p>
+                              <p className="mt-1">
+                                等级：{String(r.blocked_notice?.risk_level || r.risk?.risk_level || "high")} · 规则：
+                                {String(r.blocked_notice?.reason_code || r.risk?.reason_code || "CONTENT_POLICY_VIOLATION")}
+                              </p>
+                              <p className="mt-1 break-words">
+                                {String(r.blocked_notice?.reason || r.risk?.reason || r.error || CONTENT_POLICY_BLOCK_MESSAGE)}
+                              </p>
+                              {(r.blocked_notice?.suggestions || []).length > 0 ? (
+                                <ul className="mt-1 list-disc space-y-1 pl-4">
+                                  {(r.blocked_notice?.suggestions || []).slice(0, 3).map((tip, idx) => (
+                                    <li key={`b-tip-${i}-${idx}`}>{tip}</li>
+                                  ))}
+                                </ul>
+                              ) : null}
+                            </div>
                           ) : (
                             <p className="mt-1 text-xs text-rose-300">{r.error || "处理失败"}</p>
                           )}
@@ -2309,13 +2503,21 @@ export default function App() {
                 ) : null}
 
                 {hasSingleResult ? (
-                  <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
+                  <section className="panel-card motion-enter result-heavy-surface flex h-full min-h-0 flex-col rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
                     <div className="mb-2 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <StepsIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">识别到的步骤</h2>
+                        <h2 className="text-base font-semibold">
+                          {isBlockedNoticeResult
+                            ? "安全检测结果说明"
+                            : isDegradedResult
+                              ? singleResultMode === "timeline_summary"
+                                ? "时间线摘要（自动降级）"
+                                : "候选步骤（自动降级）"
+                              : "识别到的步骤"}
+                        </h2>
                       </div>
-                      {!isEditMode ? (
+                      {!isEditMode && !isBlockedNoticeResult ? (
                         <button
                           className="steps-edit-btn flex items-center gap-1 rounded px-2 py-1 text-xs"
                           onClick={() => {
@@ -2337,10 +2539,78 @@ export default function App() {
                         </button>
                       ) : null}
                     </div>
-                    {!isEditMode ? (
-                      <ReadonlyStepsList steps={singleResultSteps} />
+                    {resultData?.analysis_note ? (
+                      <p
+                        className={`mb-2 text-xs ${
+                          isBlockedNoticeResult ? "text-rose-300/90" : "text-amber-300/90"
+                        }`}
+                      >
+                        {resultData.analysis_note}
+                      </p>
+                    ) : null}
+                    {isBlockedNoticeResult ? (
+                      <div className="rounded border border-rose-500/45 bg-rose-500/10 p-3 text-sm">
+                        <p className="font-semibold text-rose-200">
+                          {resultData?.blocked_notice?.title || "安全检测未通过（已拦截）"}
+                        </p>
+                        <p className="mt-1 text-rose-100/90">
+                          风险等级：{String(resultData?.blocked_notice?.risk_level || resultData?.risk?.risk_level || "high")}
+                        </p>
+                        <p className="text-rose-100/90">
+                          规则码：{String(resultData?.blocked_notice?.reason_code || resultData?.risk?.reason_code || "CONTENT_POLICY_VIOLATION")}
+                        </p>
+                        <p className="mt-1 text-rose-100/95 break-words">
+                          {String(resultData?.blocked_notice?.reason || resultData?.risk?.reason || CONTENT_POLICY_BLOCK_MESSAGE)}
+                        </p>
+                        {(resultData?.blocked_notice?.suggestions || []).length > 0 ? (
+                          <ul className="mt-2 list-disc space-y-1 pl-5 text-rose-100/90">
+                            {(resultData?.blocked_notice?.suggestions || []).slice(0, 4).map((tip, idx) => (
+                              <li key={`bn-tip-${idx}`}>{tip}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        {resultData?.blocked_notice?.retry_guidance ? (
+                          <p className="mt-2 text-rose-100/90">{resultData.blocked_notice.retry_guidance}</p>
+                        ) : null}
+                      </div>
+                    ) : !isEditMode ? (
+                      <div className="single-result-scroll history-scroll flex-1 min-h-0 space-y-2 overflow-auto pr-1">
+                        {isDegradedResult ? (
+                          <div className="space-y-2">
+                            <div className="rounded border border-amber-400/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200">
+                              置信度较低（质量分：{Number(resultData?.quality_score || 0).toFixed(2)}）。原因：
+                              {formatDegradeReason(resultData?.degrade_reason)}
+                            </div>
+                            {resultData?.content_title ? (
+                              <div className="rounded border border-amber-400/30 bg-amber-500/6 p-2 text-xs text-amber-100/95">
+                                <p className="font-semibold">标题：{resultData.content_title}</p>
+                                {(resultData.key_points || []).length > 0 ? (
+                                  <ul className="mt-1 list-disc space-y-1 pl-5">
+                                    {(resultData.key_points || []).slice(0, 5).map((item, idx) => (
+                                      <li key={`kp-${idx}`}>{item}</li>
+                                    ))}
+                                  </ul>
+                                ) : null}
+                                {(resultData.timeline_points || []).length > 0 ? (
+                                  <p className="mt-1">
+                                    时间点：
+                                    {(resultData.timeline_points || [])
+                                      .slice(0, 5)
+                                      .map((item) => String(item?.time || "00:00"))
+                                      .join(" / ")}
+                                  </p>
+                                ) : null}
+                                {resultData?.confidence_note ? (
+                                  <p className="mt-1">{resultData.confidence_note}</p>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        <ReadonlyStepsList steps={singleResultSteps} />
+                      </div>
                     ) : (
-                      <div className="steps-edit-scroll history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+                      <div className="steps-edit-scroll history-scroll flex-1 min-h-0 overflow-auto pr-1">
                         <div className="steps-edit-actions mb-2 flex gap-2">
                           <button
                             type="button"
@@ -2466,7 +2736,7 @@ export default function App() {
                   </section>
                 ) : null}
 
-                {hasSingleResult ? (
+                {hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.markdown) ? (
                   <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
                     <div className="mb-2 flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -2534,6 +2804,9 @@ export default function App() {
                         </button>
                       </div>
                     </div>
+                    <p className="mt-2 rounded border border-amber-400/35 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200/95">
+                      提醒：历史记录与服务器生成的总结文件仅保留 72 小时，系统会自动清理。
+                    </p>
                   </div>
                   <VirtualizedHistoryList
                     active={historyDrawerOpen}
