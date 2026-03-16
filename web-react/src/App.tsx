@@ -2233,7 +2233,7 @@ export default function App() {
               >
                 <button
                   aria-busy={isAnalyzing}
-                  className="h-full w-full cursor-pointer rounded-full bg-linear-to-r from-neutral-950 via-black to-neutral-900 px-4 py-2 text-neutral-100 shadow-[0px_1px_0px_0px_rgba(255,255,255,0.09)_inset,0px_0.5px_1px_0px_rgba(148,163,184,0.32)] transition-all duration-150 active:scale-98 disabled:cursor-not-allowed disabled:opacity-60"
+                  className="start-analyze-btn h-full w-full cursor-pointer rounded-full bg-linear-to-r from-neutral-950 via-black to-neutral-900 px-4 py-2 text-neutral-100 shadow-[0px_1px_0px_0px_rgba(255,255,255,0.09)_inset,0px_0.5px_1px_0px_rgba(148,163,184,0.32)] transition-all duration-150 active:scale-98 disabled:cursor-not-allowed disabled:opacity-60"
                   disabled={!canAnalyze}
                   onClick={() => {
                     if (!canAnalyze) return;

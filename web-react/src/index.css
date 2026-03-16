@@ -1790,6 +1790,97 @@ body {
   backdrop-filter: blur(6px);
 }
 
+@media (max-width: 900px) and (pointer: coarse) {
+  .app-main,
+  .motion-enter,
+  .panel-card,
+  .list-item-pop {
+    animation-duration: 0.34s;
+  }
+
+  .history-drawer-overlay,
+  .history-drawer-backdrop {
+    animation-duration: 0.14s;
+  }
+
+  .history-drawer-panel,
+  .progress-dialog-anim {
+    animation-duration: 0.2s;
+  }
+
+  .progress-fill-anim {
+    transition-duration: 0.35s;
+  }
+
+  .toast-anim {
+    animation-duration: 0.28s;
+    backdrop-filter: none;
+  }
+
+  .hero-icon-float,
+  .history-empty-art,
+  .api-key-guide-input,
+  .model-required-guide-input,
+  .model-test-guide-btn,
+  .file-status-chip-success,
+  .file-status-chip-failed,
+  .history-refresh-icon-spin {
+    animation: none !important;
+  }
+
+  .file-status-chip-success::after,
+  .hero-chip:hover::before,
+  .clear-list-btn:hover:not(:disabled)::before,
+  .clear-list-btn:hover:not(:disabled) .clear-list-icon,
+  .zip-download-btn:hover:not(:disabled),
+  .zip-download-btn:hover:not(:disabled)::before,
+  .steps-edit-btn:hover:not(:disabled)::before,
+  .app-main button.steps-edit-save-btn:hover:not(:disabled)::before,
+  .history-nav-btn:hover::before {
+    animation: none !important;
+  }
+
+  .hero-chip::before,
+  .upload-dropzone::after,
+  .history-nav-btn::before,
+  .history-refresh-btn::before,
+  .clear-list-btn::before,
+  .zip-download-btn::before,
+  .steps-edit-btn::before,
+  .app-main button.steps-edit-save-btn::before {
+    display: none;
+  }
+
+  .config-field,
+  .settings-select,
+  .settings-number-input,
+  .settings-stepper-btn,
+  .feature-toggle,
+  .feature-checkbox,
+  .history-nav-btn,
+  .history-refresh-btn,
+  .upload-dropzone,
+  .clear-list-btn,
+  .zip-download-btn,
+  .steps-edit-btn,
+  .app-main button.steps-edit-save-btn,
+  .app-main button.steps-edit-cancel-btn,
+  .app-main button:not(.start-analyze-btn),
+  .list-item-pop {
+    transition-duration: 0.14s;
+  }
+
+  .history-nav-btn:hover,
+  .clear-list-btn:hover:not(:disabled),
+  .zip-download-btn:hover:not(:disabled),
+  .steps-edit-btn:hover:not(:disabled),
+  .upload-dropzone:hover,
+  .app-main button:hover:not(:disabled):not(.start-analyze-btn) {
+    transform: none;
+    filter: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .app-main,
   .motion-enter,
