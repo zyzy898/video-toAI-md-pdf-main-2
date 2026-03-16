@@ -850,9 +850,11 @@ const VirtualizedHistoryList = memo(function VirtualizedHistoryList({
 const MarkdownPreview = memo(function MarkdownPreview({
   html,
   className,
+  contentClassName,
 }: {
   html: string;
   className?: string;
+  contentClassName?: string;
 }) {
   return (
     <div
@@ -861,7 +863,10 @@ const MarkdownPreview = memo(function MarkdownPreview({
         className,
       )}
     >
-      <div className="prose prose-invert max-w-none text-sm" dangerouslySetInnerHTML={{ __html: html }} />
+      <div
+        className={cn("prose prose-invert max-w-none text-sm", contentClassName)}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
     </div>
   );
 });
@@ -2751,7 +2756,13 @@ export default function App() {
                         下载 ZIP
                       </button>
                     </div>
-                    <MarkdownPreview html={renderedMarkdown} />
+                    <MarkdownPreview
+                      html={renderedMarkdown}
+                      className={summaryOnly ? "summary-only-scroll-rail" : undefined}
+                      contentClassName={
+                        summaryOnly ? "summary-only-markdown-content" : "standard-markdown-content"
+                      }
+                    />
                   </section>
                 ) : null}
               </div>
