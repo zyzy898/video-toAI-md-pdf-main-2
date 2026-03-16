@@ -1349,11 +1349,16 @@ export default function App() {
     let success = 0;
     let failed = 0;
     batchFilesRef.current.forEach((item) => {
+      if (!item.filepath) return;
       if (item.status === "success") success += 1;
       if (item.status === "failed") failed += 1;
     });
     return { success, failed };
   }, []);
+  const getAnalyzableBatchFiles = useCallback(
+    () => batchFilesRef.current.filter((item) => Boolean(String(item.filepath || "").trim())),
+    [],
+  );
   const loadHistory = useCallback(async () => {
     setLoadingHistory(true);
     try {
@@ -1422,7 +1427,7 @@ export default function App() {
       const stage = String(progress.stage || "").toLowerCase();
       const status = String(progress.status || "").toLowerCase();
       const currentFile = String(progress.current_file || "");
-      const total = Number(progress.total) || batchFilesRef.current.length;
+      const total = Number(progress.total) || getAnalyzableBatchFiles().length;
       const current = Number(progress.current) || 0;
       const { success, failed } = countBatchStatus();
       let percent = 0;
@@ -1466,7 +1471,7 @@ export default function App() {
     } catch {
       // ignore polling errors
     }
-  }, [countBatchStatus, fetchJson, getStageProgress, setProgressTextIfChanged, updateProgressBoard]);
+  }, [countBatchStatus, fetchJson, getAnalyzableBatchFiles, getStageProgress, setProgressTextIfChanged, updateProgressBoard]);
 
   const startSinglePolling = useCallback(() => {
     stopSinglePolling();
@@ -1556,39 +1561,65 @@ export default function App() {
       updateProgressBoard({ mode: "upload", stage: "prepare", total: files.length, percent: 0 });
       try {
         const uploaded: BatchFileItem[] = [];
+        let uploadedSuccess = 0;
+        let uploadedFailed = 0;
         for (let i = 0; i < files.length; i += 1) {
-          const item = await uploadSingleFileWithResume(
-            files[i],
-            i + 1,
-            files.length,
-            (currentFile, currentIndex, total) => {
-              const moderationPercent = Math.min(
-                99,
-                Math.round(((Math.max(0, currentIndex - 1) + STAGE_PERCENT.moderation / 100) / total) * 100),
-              );
-              setProgressTextIfChanged(`已上传完成，正在进行安全检测：${currentFile.name}（${currentIndex}/${total}）`);
-              updateProgressBoard({
-                mode: "upload",
-                stage: "moderation",
-                total,
-                current: currentIndex,
-                success: Math.max(0, currentIndex - 1),
-                percent: moderationPercent,
-                currentFile: currentFile.name,
-              });
-            },
-          );
-          uploaded.push({ filename: item.filename, filepath: item.filepath, status: "pending", error: "" });
+          const currentFile = files[i];
+          try {
+            const item = await uploadSingleFileWithResume(
+              currentFile,
+              i + 1,
+              files.length,
+              (processingFile, currentIndex, total) => {
+                const moderationPercent = Math.min(
+                  99,
+                  Math.round(((Math.max(0, currentIndex - 1) + STAGE_PERCENT.moderation / 100) / total) * 100),
+                );
+                setProgressTextIfChanged(`已上传完成，正在进行安全检测：${processingFile.name}（${currentIndex}/${total}）`);
+                updateProgressBoard({
+                  mode: "upload",
+                  stage: "moderation",
+                  total,
+                  current: currentIndex,
+                  success: uploadedSuccess,
+                  failed: uploadedFailed,
+                  percent: moderationPercent,
+                  currentFile: processingFile.name,
+                });
+              },
+            );
+            uploaded.push({ filename: item.filename, filepath: item.filepath, status: "pending", error: "" });
+            uploadedSuccess += 1;
+          } catch (error) {
+            const apiError = error instanceof ApiRequestError ? error : null;
+            let message = String((error as Error).message || error || "上传失败");
+            if (apiError?.payload?.code === "content_policy_violation") {
+              message = formatContentPolicyViolationMessage("", true);
+            } else if (apiError?.payload?.error) {
+              message = String(apiError.payload.error);
+            }
+            uploaded.push({
+              filename: currentFile.name,
+              filepath: "",
+              status: "failed",
+              error: formatInlineErrorMessage(message),
+            });
+            uploadedFailed += 1;
+          }
           updateProgressBoard({
             mode: "upload",
             stage: i + 1 >= files.length ? "done" : "upload",
             total: files.length,
             current: i + 1,
-            success: i + 1,
+            success: uploadedSuccess,
+            failed: uploadedFailed,
             percent: Math.round(((i + 1) / files.length) * 100),
           });
         }
         setBatchFiles((prev) => [...prev, ...uploaded]);
+        if (uploadedFailed > 0) {
+          showError(`已跳过 ${uploadedFailed} 个上传失败视频，可继续分析其余视频。`);
+        }
       } catch (error) {
         showError(`上传失败: ${String((error as Error).message || error)}`);
       } finally {
@@ -1606,9 +1637,14 @@ export default function App() {
     ],
   );
   const analyzeSingle = useCallback(async () => {
-    if (batchFilesRef.current.length !== 1) return;
-    const file = batchFilesRef.current[0];
-    setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "pending", error: "" })));
+    const analyzableFiles = getAnalyzableBatchFiles();
+    if (analyzableFiles.length !== 1) return;
+    const file = analyzableFiles[0];
+    setBatchFiles((prev) =>
+      prev.map((item) =>
+        item.filepath ? { ...item, status: item.filepath === file.filepath ? "pending" : item.status, error: "" } : item,
+      ),
+    );
     stopBatchPolling();
     setIsAnalyzing(true);
     showProgress("单文件处理中", summaryOnly ? "正在生成摘要版，请稍候..." : "正在分析视频，请稍候...");
@@ -1639,7 +1675,11 @@ export default function App() {
       if (data?.fallback_used) {
         showSuccess(String(data.analysis_note || "未识别到标准步骤，已自动生成候选内容。"));
       }
-      setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "success", error: "" })));
+      setBatchFiles((prev) =>
+        prev.map((item) =>
+          item.filepath === file.filepath ? { ...item, status: "success", error: "" } : item,
+        ),
+      );
       updateProgressBoard({
         mode: "single",
         stage: "done",
@@ -1679,7 +1719,11 @@ export default function App() {
         setBatchResultData(null);
         setIsEditMode(false);
         setEditedSteps([]);
-        setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "failed", error: "安全检测未通过" })));
+        setBatchFiles((prev) =>
+          prev.map((item) =>
+            item.filepath === file.filepath ? { ...item, status: "failed", error: "安全检测未通过" } : item,
+          ),
+        );
         updateProgressBoard({
           mode: "single",
           stage: "done",
@@ -1696,7 +1740,11 @@ export default function App() {
       }
       const message = String((error as Error).message || error);
       if (WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint))) setWebSearch(false);
-      setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "failed", error: message })));
+      setBatchFiles((prev) =>
+        prev.map((item) =>
+          item.filepath === file.filepath ? { ...item, status: "failed", error: message } : item,
+        ),
+      );
       updateProgressBoard({
         mode: "single",
         stage: "failed",
@@ -1733,16 +1781,20 @@ export default function App() {
     useVideo,
     webSearch,
     whisperModel,
+    getAnalyzableBatchFiles,
     summaryOnly,
   ]);
 
   const analyzeBatch = useCallback(async () => {
-    if (batchFilesRef.current.length <= 1) return;
-    setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "pending", error: "" })));
+    const analyzableFiles = getAnalyzableBatchFiles();
+    if (analyzableFiles.length <= 1) return;
+    setBatchFiles((prev) =>
+      prev.map((item) => (item.filepath ? { ...item, status: "pending", error: "" } : item)),
+    );
     stopSinglePolling();
     setIsAnalyzing(true);
     showProgress("批量处理中", summaryOnly ? "正在逐个生成摘要版..." : "正在逐个分析视频...");
-    updateProgressBoard({ mode: "batch", stage: "prepare", total: batchFilesRef.current.length, percent: 0 });
+    updateProgressBoard({ mode: "batch", stage: "prepare", total: analyzableFiles.length, percent: 0 });
     startBatchPolling();
     let reveal = false;
     try {
@@ -1753,7 +1805,7 @@ export default function App() {
           api_key: apiKey,
           model_name: modelName,
           model_base_url: modelBaseUrl,
-          filepaths: batchFilesRef.current.map((item) => item.filepath),
+          filepaths: analyzableFiles.map((item) => item.filepath),
           whisper_model: whisperModel,
           use_video: useVideo,
           web_search: webSearch,
@@ -1766,25 +1818,28 @@ export default function App() {
       setResultData(null);
       setIsEditMode(false);
       setEditedSteps([]);
-      const nextFiles: BatchFileItem[] = batchFilesRef.current.map((item, index) => ({
-        ...item,
-        status: data.results?.[index]?.success ? "success" : "failed",
-        error: (() => {
-          const result = data.results?.[index];
-          const base = String(result?.error || "");
-          const riskHint = formatRiskHint(result?.risk);
-          const codeText = result?.code ? `code=${result.code}` : "";
-          return [base, codeText, riskHint].filter(Boolean).join(" | ");
-        })(),
-      }));
+      let resultIndex = 0;
+      const nextFiles: BatchFileItem[] = batchFilesRef.current.map((item) => {
+        if (!item.filepath) return item;
+        const result = data.results?.[resultIndex];
+        resultIndex += 1;
+        const base = String(result?.error || "");
+        const riskHint = formatRiskHint(result?.risk);
+        const codeText = result?.code ? `code=${result.code}` : "";
+        return {
+          ...item,
+          status: result?.success ? "success" : "failed",
+          error: [base, codeText, riskHint].filter(Boolean).join(" | "),
+        };
+      });
       setBatchFiles(nextFiles);
-      const success = nextFiles.filter((item) => item.status === "success").length;
-      const failed = nextFiles.filter((item) => item.status === "failed").length;
+      const success = nextFiles.filter((item) => item.filepath && item.status === "success").length;
+      const failed = nextFiles.filter((item) => item.filepath && item.status === "failed").length;
       updateProgressBoard({
         mode: "batch",
         stage: "done",
-        total: Number(data?.summary?.total) || nextFiles.length,
-        current: Number(data?.summary?.total) || nextFiles.length,
+        total: Number(data?.summary?.total) || analyzableFiles.length,
+        current: Number(data?.summary?.total) || analyzableFiles.length,
         success: Number(data?.summary?.success) || success,
         failed: Number(data?.summary?.failed) || failed,
         currentFile: "",
@@ -1799,7 +1854,7 @@ export default function App() {
       updateProgressBoard({
         mode: "batch",
         stage: "failed",
-        total: batchFilesRef.current.length,
+        total: analyzableFiles.length,
         current: success + failed,
         success,
         failed,
@@ -1831,6 +1886,7 @@ export default function App() {
     useVideo,
     webSearch,
     whisperModel,
+    getAnalyzableBatchFiles,
     summaryOnly,
   ]);
 
@@ -1840,10 +1896,15 @@ export default function App() {
       return;
     }
     if (!validateModelConfig()) return;
-    if (batchFilesRef.current.length === 1) return analyzeSingle();
-    if (batchFilesRef.current.length > 1) return analyzeBatch();
+    const analyzableFiles = getAnalyzableBatchFiles();
+    if (analyzableFiles.length === 1) return analyzeSingle();
+    if (analyzableFiles.length > 1) return analyzeBatch();
+    if (batchFilesRef.current.length > 0) {
+      showError("没有可分析的视频，请查看失败原因后重试上传。");
+      return;
+    }
     showError("请先上传视频文件");
-  }, [analyzeBatch, analyzeSingle, apiKey, showError, validateModelConfig]);
+  }, [analyzeBatch, analyzeSingle, apiKey, getAnalyzableBatchFiles, showError, validateModelConfig]);
 
   const openHistoryRecord = useCallback(
     async (recordId: string) => {
@@ -2127,12 +2188,16 @@ export default function App() {
   const decreaseFps = useCallback(() => {
     setFps((prev) => clampFps(prev - FPS_STEP));
   }, [clampFps]);
-  const canAnalyze = !isAnalyzing && batchFiles.length > 0;
+  const analyzableBatchCount = useMemo(
+    () => batchFiles.filter((item) => Boolean(String(item.filepath || "").trim())).length,
+    [batchFiles],
+  );
+  const canAnalyze = !isAnalyzing && analyzableBatchCount > 0;
   const analyzeButtonText = isAnalyzing
-    ? batchFiles.length === 1
+    ? analyzableBatchCount === 1
       ? "单文件处理中..."
       : "批量处理中..."
-    : batchFiles.length === 1
+    : analyzableBatchCount === 1
       ? "开始单文件分析"
       : "开始分析";
   const hasSingleResult = Boolean(resultData);
