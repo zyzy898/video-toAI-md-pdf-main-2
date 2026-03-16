@@ -98,6 +98,9 @@ QUARANTINE_ROOT = (UPLOAD_ROOT / ".quarantine").resolve()
 UPLOAD_STAGING_ROOT = (UPLOAD_ROOT / ".staging").resolve()
 RISK_KEYWORD_LEXICON_PATH = (PROJECT_ROOT / "risk_keyword_lexicon.json").resolve()
 RISK_BLOCKLIST_PATH = (UPLOAD_ROOT / ".risk_blocklist.json").resolve()
+RISK_RESULT_CACHE_PATH = (UPLOAD_ROOT / ".risk_result_cache.json").resolve()
+RISK_RESULT_CACHE_TTL_SECONDS = 60 * 60 * 24
+RISK_RESULT_CACHE_MAX_ENTRIES = 500
 
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -131,6 +134,7 @@ risk_keyword_lexicon_lock = RLock()
 risk_keyword_lexicon_cache_mtime_ns: int | None = None
 risk_keyword_lexicon_cache_data: Dict[str, Dict[str, Any]] | None = None
 risk_blocklist_lock = RLock()
+risk_result_cache_lock = RLock()
 
 
 class RiskFallbackEnvService:
@@ -411,38 +415,42 @@ class RiskBlocklistService:
             "blacklist_match_count": _safe_int(entry.get("match_count", 0), 0, 0),
         }
 
-    def match_video_fingerprint(self, video_path: Path, source: str) -> Dict[str, Any] | None:
-        try:
-            fingerprint = self.compute_file_sha256(video_path)
-        except OSError as exc:
-            self.logger.warning("计算视频指纹失败，跳过黑名单比对: %s", exc)
+    def match_fingerprint(self, fingerprint: str, source: str) -> Dict[str, Any] | None:
+        normalized_fingerprint = self.normalize_sha256_fingerprint(fingerprint)
+        if not normalized_fingerprint:
             return None
 
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         with self.lock:
             entries = self.load_unlocked()
-            existing = entries.get(fingerprint)
+            existing = entries.get(normalized_fingerprint)
             if existing is None:
                 return None
 
             existing["last_match_at"] = now_text
             existing["last_match_source"] = str(source or "").strip()
             existing["match_count"] = _safe_int(existing.get("match_count", 0), 0, 0) + 1
-            entries[fingerprint] = existing
+            entries[normalized_fingerprint] = existing
             try:
                 self.write_unlocked(entries)
             except OSError as exc:
                 self.logger.warning("更新风控黑名单命中计数失败: %s", exc)
 
-        return self.build_match_risk(fingerprint, existing)
+        return self.build_match_risk(normalized_fingerprint, existing)
 
-    def register_blocked_video_fingerprint(
-        self, video_path: Path, risk: Dict[str, Any], source: str
-    ) -> str:
+    def match_video_fingerprint(self, video_path: Path, source: str) -> Dict[str, Any] | None:
         try:
             fingerprint = self.compute_file_sha256(video_path)
         except OSError as exc:
-            self.logger.warning("计算违规视频指纹失败，无法写入黑名单: %s", exc)
+            self.logger.warning("计算视频指纹失败，跳过黑名单比对: %s", exc)
+            return None
+        return self.match_fingerprint(fingerprint, source)
+
+    def register_blocked_fingerprint(
+        self, fingerprint: str, risk: Dict[str, Any], source: str
+    ) -> str:
+        normalized_fingerprint = self.normalize_sha256_fingerprint(fingerprint)
+        if not normalized_fingerprint:
             return ""
 
         now_text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -455,9 +463,9 @@ class RiskBlocklistService:
 
         with self.lock:
             entries = self.load_unlocked()
-            existing = entries.get(fingerprint, {})
+            existing = entries.get(normalized_fingerprint, {})
             entry = {
-                "sha256": fingerprint,
+                "sha256": normalized_fingerprint,
                 "decision": decision,
                 "risk_level": risk_level,
                 "reason_code": reason_code or "CONTENT_POLICY_VIOLATION",
@@ -470,13 +478,23 @@ class RiskBlocklistService:
                 "last_match_source": str(existing.get("last_match_source", "")).strip(),
                 "match_count": _safe_int(existing.get("match_count", 0), 0, 0),
             }
-            entries[fingerprint] = entry
+            entries[normalized_fingerprint] = entry
             try:
                 self.write_unlocked(entries)
             except OSError as exc:
                 self.logger.warning("写入风控黑名单失败: %s", exc)
 
-        return fingerprint
+        return normalized_fingerprint
+
+    def register_blocked_video_fingerprint(
+        self, video_path: Path, risk: Dict[str, Any], source: str
+    ) -> str:
+        try:
+            fingerprint = self.compute_file_sha256(video_path)
+        except OSError as exc:
+            self.logger.warning("计算违规视频指纹失败，无法写入黑名单: %s", exc)
+            return ""
+        return self.register_blocked_fingerprint(fingerprint, risk, source)
 
 
 risk_blocklist_service = RiskBlocklistService(
@@ -510,14 +528,274 @@ def _build_blacklist_match_risk(fingerprint: str, entry: Dict[str, Any]) -> Dict
     return risk_blocklist_service.build_match_risk(fingerprint, entry)
 
 
+def _match_blacklisted_video_fingerprint_by_hash(
+    fingerprint: str, source: str
+) -> Dict[str, Any] | None:
+    return risk_blocklist_service.match_fingerprint(fingerprint, source)
+
+
 def _match_blacklisted_video_fingerprint(video_path: Path, source: str) -> Dict[str, Any] | None:
     return risk_blocklist_service.match_video_fingerprint(video_path, source)
+
+
+def _register_blocked_video_fingerprint_by_hash(
+    fingerprint: str, risk: Dict[str, Any], source: str
+) -> str:
+    return risk_blocklist_service.register_blocked_fingerprint(fingerprint, risk, source)
 
 
 def _register_blocked_video_fingerprint(
     video_path: Path, risk: Dict[str, Any], source: str
 ) -> str:
     return risk_blocklist_service.register_blocked_video_fingerprint(video_path, risk, source)
+
+
+class RiskResultCacheService:
+    def __init__(
+        self,
+        cache_path: Path,
+        lock_obj: RLock,
+        ttl_seconds: int,
+        max_entries: int,
+        logger_obj: logging.Logger,
+    ):
+        self.cache_path = cache_path
+        self.lock = lock_obj
+        self.ttl_seconds = max(60, int(ttl_seconds or 0))
+        self.max_entries = max(50, int(max_entries or 0))
+        self.logger = logger_obj
+        self._entries: Dict[str, Dict[str, Any]] = {}
+        self._loaded = False
+
+    def _normalize_sha256(self, value: Any) -> str:
+        text = str(value or "").strip().lower()
+        text = re.sub(r"[^0-9a-f]", "", text)
+        return text if len(text) == 64 else ""
+
+    def _normalize_key_hash(self, value: Any) -> str:
+        return self._normalize_sha256(value)
+
+    def build_model_key(self, model_name: str, model_base_url: str) -> str:
+        normalized_name = str(model_name or "").strip().lower()
+        normalized_base_url = str(model_base_url or "").strip().rstrip("/").lower()
+        policy_signature = "|".join(
+            [
+                f"rb:{RISK_BLOCK_THRESHOLD:.4f}",
+                f"rr:{RISK_RESTRICT_THRESHOLD:.4f}",
+                f"bor:{int(RISK_BLOCK_ON_RESTRICT)}",
+                f"dh:{RISK_DIMENSION_HARD_BLOCK_SCORE:.4f}",
+                f"cs:{RISK_CRITICAL_SCORE:.4f}",
+                f"tb:{TEXT_RISK_BLOCK_THRESHOLD:.4f}",
+                f"tr:{TEXT_RISK_RESTRICT_THRESHOLD:.4f}",
+            ]
+        )
+        raw = f"{normalized_name}|{normalized_base_url}|{policy_signature}"
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def build_model_key_from_agent(self, risk_agent: VideoAnalyzerAgent) -> str:
+        model_name = str(getattr(risk_agent, "model", "")).strip()
+        model_base_url = str(getattr(risk_agent, "base_url", "")).strip()
+        return self.build_model_key(model_name, model_base_url)
+
+    def build_cache_key(self, fingerprint: str, model_key: str) -> str:
+        normalized_fingerprint = self._normalize_sha256(fingerprint)
+        normalized_model_key = self._normalize_key_hash(model_key)
+        if not normalized_fingerprint or not normalized_model_key:
+            return ""
+        return hashlib.sha256(
+            f"{normalized_fingerprint}:{normalized_model_key}".encode("utf-8")
+        ).hexdigest()
+
+    def normalize_entry(self, raw_entry: Any, now_ts: float) -> Dict[str, Any] | None:
+        if not isinstance(raw_entry, dict):
+            return None
+        fingerprint = self._normalize_sha256(raw_entry.get("sha256", ""))
+        model_key = self._normalize_key_hash(raw_entry.get("model_key", ""))
+        if not fingerprint or not model_key:
+            return None
+
+        cache_key = self._normalize_key_hash(raw_entry.get("cache_key", ""))
+        if not cache_key:
+            cache_key = self.build_cache_key(fingerprint, model_key)
+        if not cache_key:
+            return None
+
+        risk = raw_entry.get("risk", {})
+        if not isinstance(risk, dict) or not risk:
+            return None
+
+        created_at_ts = _safe_float(raw_entry.get("created_at_ts"), now_ts, 0.0)
+        expires_at_ts = _safe_float(
+            raw_entry.get("expires_at_ts"), created_at_ts + self.ttl_seconds, 0.0
+        )
+        if expires_at_ts <= now_ts:
+            return None
+
+        return {
+            "cache_key": cache_key,
+            "sha256": fingerprint,
+            "model_key": model_key,
+            "risk": dict(risk),
+            "created_at": str(raw_entry.get("created_at", "")).strip()
+            or datetime.fromtimestamp(created_at_ts).strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at_ts": created_at_ts,
+            "expires_at": str(raw_entry.get("expires_at", "")).strip()
+            or datetime.fromtimestamp(expires_at_ts).strftime("%Y-%m-%d %H:%M:%S"),
+            "expires_at_ts": expires_at_ts,
+            "hit_count": _safe_int(raw_entry.get("hit_count", 0), 0, 0),
+            "last_hit_at": str(raw_entry.get("last_hit_at", "")).strip(),
+        }
+
+    def load_unlocked(self) -> Dict[str, Dict[str, Any]]:
+        if not self.cache_path.exists():
+            return {}
+        try:
+            with open(self.cache_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            self.logger.warning("读取上传风控缓存失败，已忽略: %s", exc)
+            return {}
+
+        raw_entries: List[Any] = []
+        if isinstance(payload, dict) and isinstance(payload.get("entries"), list):
+            raw_entries = payload.get("entries", [])
+        elif isinstance(payload, list):
+            raw_entries = payload
+        else:
+            return {}
+
+        now_ts = datetime.now().timestamp()
+        entries: Dict[str, Dict[str, Any]] = {}
+        for item in raw_entries:
+            normalized = self.normalize_entry(item, now_ts)
+            if normalized is None:
+                continue
+            entries[normalized["cache_key"]] = normalized
+        return self._prune_unlocked(entries)
+
+    def _prune_unlocked(self, entries: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        now_ts = datetime.now().timestamp()
+        valid_entries = [
+            entry
+            for entry in entries.values()
+            if _safe_float(entry.get("expires_at_ts"), 0.0, 0.0) > now_ts
+        ]
+        valid_entries.sort(
+            key=lambda item: _safe_float(item.get("created_at_ts"), 0.0, 0.0),
+            reverse=True,
+        )
+        limited_entries = valid_entries[: self.max_entries]
+        return {str(entry.get("cache_key", "")): entry for entry in limited_entries}
+
+    def write_unlocked(self, entries: Dict[str, Dict[str, Any]]) -> None:
+        ordered_entries = sorted(
+            entries.values(),
+            key=lambda item: _safe_float(item.get("created_at_ts"), 0.0, 0.0),
+            reverse=True,
+        )
+        payload = {
+            "version": 1,
+            "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "ttl_seconds": self.ttl_seconds,
+            "max_entries": self.max_entries,
+            "entries": ordered_entries,
+        }
+        tmp_path = self.cache_path.with_suffix(".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        tmp_path.replace(self.cache_path)
+
+    def _ensure_loaded_unlocked(self) -> Dict[str, Dict[str, Any]]:
+        if self._loaded:
+            self._entries = self._prune_unlocked(self._entries)
+            return self._entries
+        self._entries = self.load_unlocked()
+        self._loaded = True
+        return self._entries
+
+    def get(self, fingerprint: str, model_key: str) -> Dict[str, Any] | None:
+        cache_key = self.build_cache_key(fingerprint, model_key)
+        if not cache_key:
+            return None
+        with self.lock:
+            entries = self._ensure_loaded_unlocked()
+            entry = entries.get(cache_key)
+            if entry is None:
+                return None
+            if _safe_float(entry.get("expires_at_ts"), 0.0, 0.0) <= datetime.now().timestamp():
+                entries.pop(cache_key, None)
+                self._entries = entries
+                try:
+                    self.write_unlocked(entries)
+                except OSError as exc:
+                    self.logger.warning("写入上传风控缓存失败: %s", exc)
+                return None
+            entry["hit_count"] = _safe_int(entry.get("hit_count", 0), 0, 0) + 1
+            entry["last_hit_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            entries[cache_key] = entry
+            self._entries = entries
+            risk = entry.get("risk", {})
+            return dict(risk) if isinstance(risk, dict) else None
+
+    def set(self, fingerprint: str, model_key: str, risk: Dict[str, Any]) -> None:
+        cache_key = self.build_cache_key(fingerprint, model_key)
+        normalized_fingerprint = self._normalize_sha256(fingerprint)
+        normalized_model_key = self._normalize_key_hash(model_key)
+        if not cache_key or not normalized_fingerprint or not normalized_model_key:
+            return
+        if not isinstance(risk, dict) or not risk:
+            return
+
+        now = datetime.now()
+        now_ts = now.timestamp()
+        expires_at_ts = now_ts + self.ttl_seconds
+        entry = {
+            "cache_key": cache_key,
+            "sha256": normalized_fingerprint,
+            "model_key": normalized_model_key,
+            "risk": dict(risk),
+            "created_at": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "created_at_ts": now_ts,
+            "expires_at": datetime.fromtimestamp(expires_at_ts).strftime("%Y-%m-%d %H:%M:%S"),
+            "expires_at_ts": expires_at_ts,
+            "hit_count": 0,
+            "last_hit_at": "",
+        }
+
+        with self.lock:
+            entries = self._ensure_loaded_unlocked()
+            entries[cache_key] = entry
+            entries = self._prune_unlocked(entries)
+            self._entries = entries
+            try:
+                self.write_unlocked(entries)
+            except OSError as exc:
+                self.logger.warning("写入上传风控缓存失败: %s", exc)
+
+
+risk_result_cache_service = RiskResultCacheService(
+    cache_path=RISK_RESULT_CACHE_PATH,
+    lock_obj=risk_result_cache_lock,
+    ttl_seconds=RISK_RESULT_CACHE_TTL_SECONDS,
+    max_entries=RISK_RESULT_CACHE_MAX_ENTRIES,
+    logger_obj=logger,
+)
+
+
+def _build_upload_risk_model_cache_key(model_name: str, model_base_url: str) -> str:
+    return risk_result_cache_service.build_model_key(model_name, model_base_url)
+
+
+def _build_upload_risk_model_cache_key_from_agent(risk_agent: VideoAnalyzerAgent) -> str:
+    return risk_result_cache_service.build_model_key_from_agent(risk_agent)
+
+
+def _get_cached_upload_risk_result(fingerprint: str, model_key: str) -> Dict[str, Any] | None:
+    return risk_result_cache_service.get(fingerprint, model_key)
+
+
+def _set_cached_upload_risk_result(fingerprint: str, model_key: str, risk: Dict[str, Any]) -> None:
+    risk_result_cache_service.set(fingerprint, model_key, risk)
 
 
 def _as_bool(value: Any) -> bool:
@@ -2235,6 +2513,83 @@ def _build_upload_risk_failure_response(risk: Dict[str, Any]) -> Tuple[Dict[str,
     return upload_risk_service.build_upload_risk_failure_response(risk)
 
 
+def _compute_video_fingerprint_safely(video_path: Path, source: str) -> str:
+    try:
+        return _compute_file_sha256(video_path)
+    except OSError as exc:
+        logger.warning("计算视频指纹失败（%s），将回退到非缓存路径: %s", source, exc)
+        return ""
+
+
+def _check_upload_blacklist_precheck(
+    staged_video_path: Path,
+    *,
+    source: str,
+    file_fingerprint: str = "",
+) -> Tuple[Dict[str, Any] | None, str]:
+    fingerprint = file_fingerprint or _compute_video_fingerprint_safely(staged_video_path, source)
+    if fingerprint:
+        blacklist_risk = _match_blacklisted_video_fingerprint_by_hash(fingerprint, source)
+    else:
+        blacklist_risk = _match_blacklisted_video_fingerprint(staged_video_path, source)
+    if blacklist_risk is not None and fingerprint and not str(
+        blacklist_risk.get("hash_sha256", "")
+    ).strip():
+        blacklist_risk["hash_sha256"] = fingerprint
+    return blacklist_risk, fingerprint
+
+
+def _run_upload_pre_risk_check(
+    staged_video_path: Path,
+    risk_agent: VideoAnalyzerAgent,
+    *,
+    source: str,
+    file_fingerprint: str = "",
+    skip_blacklist: bool = False,
+) -> Tuple[Dict[str, Any], str, str]:
+    fingerprint = file_fingerprint or _compute_video_fingerprint_safely(staged_video_path, source)
+    if not skip_blacklist:
+        blacklist_risk, fingerprint = _check_upload_blacklist_precheck(
+            staged_video_path=staged_video_path,
+            source=source,
+            file_fingerprint=fingerprint,
+        )
+        if blacklist_risk is not None:
+            return blacklist_risk, fingerprint, "blacklist"
+
+    cache_model_key = _build_upload_risk_model_cache_key_from_agent(risk_agent)
+    if fingerprint and cache_model_key:
+        cached_risk = _get_cached_upload_risk_result(fingerprint, cache_model_key)
+        if cached_risk is not None:
+            logger.info(
+                "上传前风控缓存命中: source=%s, sha256_prefix=%s",
+                source,
+                fingerprint[:12],
+            )
+            cached_risk["cache_hit"] = True
+            cached_risk["cache_source"] = "upload_risk_precheck"
+            if not str(cached_risk.get("hash_sha256", "")).strip():
+                cached_risk["hash_sha256"] = fingerprint
+            return cached_risk, fingerprint, "cache"
+
+    risk = _moderate_staged_upload(staged_video_path, risk_agent)
+    if fingerprint and not str(risk.get("hash_sha256", "")).strip():
+        risk["hash_sha256"] = fingerprint
+    if (
+        fingerprint
+        and cache_model_key
+        and not _is_risk_infra_failure(risk)
+        and not _should_block_by_risk(str(risk.get("decision", "")))
+    ):
+        _set_cached_upload_risk_result(fingerprint, cache_model_key, risk)
+        logger.info(
+            "上传前风控缓存写入: source=%s, sha256_prefix=%s",
+            source,
+            fingerprint[:12],
+        )
+    return risk, fingerprint, "model"
+
+
 def _normalize_processing_options(data: Dict[str, Any]) -> Tuple[str, bool, bool, int, float]:
     whisper_model = str(data.get("whisper_model", "base")).strip().lower() or "base"
     if whisper_model not in ALLOWED_WHISPER_MODELS:
@@ -2318,7 +2673,13 @@ class VideoProcessingService:
             model_base_url=model_base_url,
         )
         report("moderation", "正在执行黑名单指纹比对...")
-        blacklist_risk = _match_blacklisted_video_fingerprint(video_path, source="analyze")
+        video_fingerprint = _compute_video_fingerprint_safely(video_path, "analyze")
+        if video_fingerprint:
+            blacklist_risk = _match_blacklisted_video_fingerprint_by_hash(
+                video_fingerprint, source="analyze"
+            )
+        else:
+            blacklist_risk = _match_blacklisted_video_fingerprint(video_path, source="analyze")
         if blacklist_risk is not None:
             quarantine_path = _quarantine_upload_file(video_path, str(blacklist_risk.get("reason_code", "")))
             if quarantine_path is not None:
@@ -2330,7 +2691,32 @@ class VideoProcessingService:
             )
 
         report("moderation", "正在执行内容风控检测...")
-        risk, risk_frame_dir = _run_video_risk_gate(agent, video_path, output_dir)
+        risk_cache_model_key = _build_upload_risk_model_cache_key_from_agent(agent)
+        risk_frame_dir = output_dir / ".risk_frames"
+        cached_risk = (
+            _get_cached_upload_risk_result(video_fingerprint, risk_cache_model_key)
+            if video_fingerprint and risk_cache_model_key
+            else None
+        )
+        if cached_risk is not None:
+            logger.info("分析前风控缓存命中: sha256_prefix=%s", video_fingerprint[:12])
+            cached_risk["cache_hit"] = True
+            cached_risk["cache_source"] = "analyze_risk_precheck"
+            if not str(cached_risk.get("hash_sha256", "")).strip():
+                cached_risk["hash_sha256"] = video_fingerprint
+            risk = cached_risk
+        else:
+            risk, risk_frame_dir = _run_video_risk_gate(agent, video_path, output_dir)
+            if video_fingerprint and not str(risk.get("hash_sha256", "")).strip():
+                risk["hash_sha256"] = video_fingerprint
+            if (
+                video_fingerprint
+                and risk_cache_model_key
+                and not _is_risk_infra_failure(risk)
+                and not _should_block_by_risk(str(risk.get("decision", "")))
+            ):
+                _set_cached_upload_risk_result(video_fingerprint, risk_cache_model_key, risk)
+
         if _is_risk_infra_failure(risk):
             if risk_frame_dir.exists():
                 shutil.rmtree(risk_frame_dir, ignore_errors=True)
@@ -2339,8 +2725,14 @@ class VideoProcessingService:
                 str(risk.get("provider_error") or risk.get("reason") or "风控服务不可用")
             )
         if _should_block_by_risk(str(risk.get("decision", ""))):
-            blocked_hash = _register_blocked_video_fingerprint(
-                video_path, risk, source="analyze_risk_block"
+            blocked_hash = (
+                _register_blocked_video_fingerprint_by_hash(
+                    video_fingerprint, risk, source="analyze_risk_block"
+                )
+                if video_fingerprint
+                else _register_blocked_video_fingerprint(
+                    video_path, risk, source="analyze_risk_block"
+                )
             )
             if blocked_hash:
                 risk["hash_sha256"] = blocked_hash
@@ -2448,6 +2840,7 @@ class BackendServiceContainer:
         self.risk_fallback_env = risk_fallback_env_service
         self.progress = progress_state_service
         self.risk_blocklist = risk_blocklist_service
+        self.risk_result_cache = risk_result_cache_service
         self.history = history_service
         self.upload_session = upload_session_service
         self.upload_risk = upload_risk_service
@@ -2519,7 +2912,10 @@ def upload_file():
     staged_path = _build_upload_staging_path(file.filename)
     try:
         file.save(str(staged_path))
-        blacklist_risk = _match_blacklisted_video_fingerprint(staged_path, source="upload_single")
+        blacklist_risk, file_fingerprint = _check_upload_blacklist_precheck(
+            staged_video_path=staged_path,
+            source="upload_single",
+        )
         if blacklist_risk is not None:
             _safe_remove_file(staged_path)
             return jsonify(_risk_reject_payload(blacklist_risk)), 403
@@ -2527,15 +2923,27 @@ def upload_file():
         risk_agent = _build_risk_agent_for_upload(
             upload_api_key, upload_model_name, upload_model_base_url
         )
-        risk = _moderate_staged_upload(staged_path, risk_agent)
+        risk, file_fingerprint, _ = _run_upload_pre_risk_check(
+            staged_video_path=staged_path,
+            risk_agent=risk_agent,
+            source="upload_single",
+            file_fingerprint=file_fingerprint,
+            skip_blacklist=True,
+        )
         if _is_risk_infra_failure(risk):
             _safe_remove_file(staged_path)
             logger.warning("上传风控服务异常（single upload）: %s", risk)
             payload, status_code = _build_upload_risk_failure_response(risk)
             return jsonify(payload), status_code
         if _should_block_by_risk(str(risk.get("decision", ""))):
-            blocked_hash = _register_blocked_video_fingerprint(
-                staged_path, risk, source="upload_single_risk_block"
+            blocked_hash = (
+                _register_blocked_video_fingerprint_by_hash(
+                    file_fingerprint, risk, source="upload_single_risk_block"
+                )
+                if file_fingerprint
+                else _register_blocked_video_fingerprint(
+                    staged_path, risk, source="upload_single_risk_block"
+                )
             )
             if blocked_hash:
                 risk["hash_sha256"] = blocked_hash
@@ -2850,8 +3258,9 @@ def upload_chunk_finalize():
         return jsonify({"error": "上传文件状态异常"}), 500
 
     try:
-        blacklist_risk = _match_blacklisted_video_fingerprint(
-            staging_path, source="upload_chunk_finalize"
+        blacklist_risk, file_fingerprint = _check_upload_blacklist_precheck(
+            staged_video_path=staging_path,
+            source="upload_chunk_finalize",
         )
         if blacklist_risk is not None:
             _safe_remove_file(staging_path)
@@ -2860,15 +3269,27 @@ def upload_chunk_finalize():
         risk_agent = _build_risk_agent_for_upload(
             risk_api_key, risk_model_name, risk_model_base_url
         )
-        risk = _moderate_staged_upload(staging_path, risk_agent)
+        risk, file_fingerprint, _ = _run_upload_pre_risk_check(
+            staged_video_path=staging_path,
+            risk_agent=risk_agent,
+            source="upload_chunk_finalize",
+            file_fingerprint=file_fingerprint,
+            skip_blacklist=True,
+        )
         if _is_risk_infra_failure(risk):
             _safe_remove_file(staging_path)
             logger.warning("上传风控服务异常（chunk finalize）: %s", risk)
             payload, status_code = _build_upload_risk_failure_response(risk)
             return jsonify(payload), status_code
         if _should_block_by_risk(str(risk.get("decision", ""))):
-            blocked_hash = _register_blocked_video_fingerprint(
-                staging_path, risk, source="upload_chunk_finalize_risk_block"
+            blocked_hash = (
+                _register_blocked_video_fingerprint_by_hash(
+                    file_fingerprint, risk, source="upload_chunk_finalize_risk_block"
+                )
+                if file_fingerprint
+                else _register_blocked_video_fingerprint(
+                    staging_path, risk, source="upload_chunk_finalize_risk_block"
+                )
             )
             if blocked_hash:
                 risk["hash_sha256"] = blocked_hash
@@ -3256,23 +3677,30 @@ def upload_batch_files():
         staged_path = _build_upload_staging_path(file.filename)
         try:
             file.save(str(staged_path))
-            blacklist_risk = _match_blacklisted_video_fingerprint(
-                staged_path, source="upload_batch"
+            risk, file_fingerprint, risk_source = _run_upload_pre_risk_check(
+                staged_video_path=staged_path,
+                risk_agent=risk_agent,
+                source="upload_batch",
             )
-            if blacklist_risk is not None:
+            if risk_source == "blacklist":
                 _safe_remove_file(staged_path)
                 errors.append(f"{file.filename}: 命中黑名单指纹拦截（完全一致视频）")
                 continue
 
-            risk = _moderate_staged_upload(staged_path, risk_agent)
             if _is_risk_infra_failure(risk):
                 _safe_remove_file(staged_path)
                 payload, _ = _build_upload_risk_failure_response(risk)
                 errors.append(f"{file.filename}: {str(payload.get('error', '上传风控服务不可用'))}")
                 continue
             if _should_block_by_risk(str(risk.get("decision", ""))):
-                blocked_hash = _register_blocked_video_fingerprint(
-                    staged_path, risk, source="upload_batch_risk_block"
+                blocked_hash = (
+                    _register_blocked_video_fingerprint_by_hash(
+                        file_fingerprint, risk, source="upload_batch_risk_block"
+                    )
+                    if file_fingerprint
+                    else _register_blocked_video_fingerprint(
+                        staged_path, risk, source="upload_batch_risk_block"
+                    )
                 )
                 if blocked_hash:
                     risk["hash_sha256"] = blocked_hash
