@@ -153,6 +153,14 @@ LONG_VIDEO_PREPROCESS_TARGET_FPS = 12
 LONG_VIDEO_PREPROCESS_CRF = 30
 LONG_VIDEO_PREPROCESS_PRESET = "veryfast"
 LONG_VIDEO_PREPROCESS_AUDIO_BITRATE = "64k"
+VIDEO_SEGMENT_STANDARD_MAX_DURATION_SECONDS = 20 * 60
+VIDEO_SEGMENT_LONG_MAX_DURATION_SECONDS = 45 * 60
+VIDEO_SEGMENT_SUPER_LONG_MAX_DURATION_SECONDS = 90 * 60
+VIDEO_SEGMENT_STANDARD_MAX_SIZE_MB = 250.0
+VIDEO_SEGMENT_CROP_REQUIRED_MIN_SIZE_MB = 500.0
+VIDEO_SEGMENT_BATCH_STANDARD_RECOMMENDED_MAX_FILES = 5
+VIDEO_SEGMENT_BATCH_STANDARD_RECOMMENDED_MAX_TOTAL_DURATION_SECONDS = 60 * 60
+VIDEO_SEGMENT_BATCH_LONG_MAX_FILES = 2
 
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1809,6 +1817,257 @@ def _probe_video_duration_seconds(video_path: Path, ffmpeg_cmd: str = "ffmpeg") 
         return None
 
 
+def _format_duration_brief(duration_seconds: float | None) -> str:
+    if duration_seconds is None or duration_seconds <= 0:
+        return "未知"
+    total = int(max(0, round(float(duration_seconds))))
+    hours = total // 3600
+    minutes = (total % 3600) // 60
+    seconds = total % 60
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m"
+    if minutes > 0:
+        return f"{minutes}m{seconds:02d}s"
+    return f"{seconds}s"
+
+
+def _classify_video_segment_zone(duration_seconds: float | None, file_size_mb: float) -> str:
+    size_mb = max(0.0, float(file_size_mb or 0.0))
+    duration = None if duration_seconds is None else max(0.0, float(duration_seconds))
+
+    if size_mb >= VIDEO_SEGMENT_CROP_REQUIRED_MIN_SIZE_MB:
+        return "trim_required"
+    if duration is not None and duration > VIDEO_SEGMENT_SUPER_LONG_MAX_DURATION_SECONDS:
+        return "trim_required"
+    if duration is not None and duration > VIDEO_SEGMENT_LONG_MAX_DURATION_SECONDS:
+        return "super_long"
+    if (duration is not None and duration > VIDEO_SEGMENT_STANDARD_MAX_DURATION_SECONDS) or (
+        size_mb > VIDEO_SEGMENT_STANDARD_MAX_SIZE_MB
+    ):
+        return "long"
+    return "standard"
+
+
+def _build_video_segment_policy(video_path: Path, ffmpeg_cmd: str = "ffmpeg") -> Dict[str, Any]:
+    try:
+        size_bytes = int(video_path.stat().st_size)
+    except OSError:
+        size_bytes = 0
+    file_size_mb = float(size_bytes) / (1024.0 * 1024.0)
+    duration_seconds = _probe_video_duration_seconds(video_path, ffmpeg_cmd=ffmpeg_cmd)
+    zone = _classify_video_segment_zone(duration_seconds, file_size_mb)
+
+    zone_label_map = {
+        "standard": "标准区",
+        "long": "长视频区",
+        "super_long": "超长区",
+        "trim_required": "裁剪优先区",
+    }
+    recommendations: List[str] = []
+    allow_upload = True
+    allow_batch = True
+
+    if zone == "standard":
+        recommendations = [
+            "允许正常接收与分析。",
+            "批量建议最多 5 个视频，且总时长尽量 <= 60 分钟。",
+        ]
+    elif zone == "long":
+        recommendations = [
+            "允许接收，默认走长视频压缩机制。",
+            "优先 use_video=false、max_vision=0；必要时改为 summary_only=true。",
+            "如果批次含此类视频，整批建议最多 2 个。",
+        ]
+    elif zone == "super_long":
+        allow_batch = False
+        recommendations = [
+            "建议仅单文件处理，不建议进入批量分析。",
+            "强烈建议先裁剪；如不裁剪，至少使用摘要模式或低峰期处理。",
+        ]
+    else:
+        allow_upload = False
+        allow_batch = False
+        recommendations = [
+            "不建议直接进入系统，需先裁剪后再上传。",
+            "判定条件：单视频 > 90 分钟，或文件接近/超过 500MB。",
+        ]
+
+    policy = {
+        "filename": video_path.name,
+        "zone": zone,
+        "zone_label": zone_label_map.get(zone, "未知区"),
+        "duration_seconds": None
+        if duration_seconds is None
+        else round(max(0.0, float(duration_seconds)), 2),
+        "duration_text": _format_duration_brief(duration_seconds),
+        "file_size_mb": round(max(0.0, file_size_mb), 2),
+        "allow_upload": allow_upload,
+        "allow_batch": allow_batch,
+        "requires_trim": zone == "trim_required",
+        "recommendations": recommendations,
+    }
+    return policy
+
+
+def _build_segment_policy_reject_payload(
+    policy: Dict[str, Any],
+    *,
+    code: str,
+    error_message: str,
+) -> Dict[str, Any]:
+    return {
+        "error": error_message,
+        "code": code,
+        "segment_policy": policy,
+    }
+
+
+def _apply_video_segment_processing_guardrails(
+    policy: Dict[str, Any],
+    *,
+    use_video: bool,
+    web_search: bool,
+    max_vision: int,
+    summary_only: bool,
+) -> Tuple[bool, bool, int, bool, List[str]]:
+    zone = str(policy.get("zone", "")).strip().lower()
+    adjusted_use_video = bool(use_video)
+    adjusted_web_search = bool(web_search)
+    adjusted_max_vision = max(0, int(max_vision))
+    adjusted_summary_only = bool(summary_only)
+    notes: List[str] = []
+
+    if zone == "long":
+        if adjusted_use_video:
+            adjusted_use_video = False
+            notes.append("长视频区已自动设置 use_video=false 以降低 CPU 压力。")
+        if adjusted_max_vision > 0:
+            adjusted_max_vision = 0
+            notes.append("长视频区已自动设置 max_vision=0 以降低额外视觉开销。")
+    elif zone == "super_long":
+        if adjusted_use_video:
+            adjusted_use_video = False
+            notes.append("超长区已自动设置 use_video=false。")
+        if adjusted_max_vision > 0:
+            adjusted_max_vision = 0
+            notes.append("超长区已自动设置 max_vision=0。")
+        if not adjusted_summary_only:
+            adjusted_summary_only = True
+            notes.append("超长区已自动启用 summary_only=true（摘要模式）。")
+        if adjusted_web_search:
+            adjusted_web_search = False
+            notes.append("超长区已自动关闭 web_search 以减少处理时延。")
+
+    return (
+        adjusted_use_video,
+        adjusted_web_search,
+        adjusted_max_vision,
+        adjusted_summary_only,
+        notes,
+    )
+
+
+def _evaluate_batch_segment_policy(file_policies: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total_files = len(file_policies)
+    long_policies = [item for item in file_policies if str(item.get("zone", "")).strip() == "long"]
+    super_long_policies = [
+        item for item in file_policies if str(item.get("zone", "")).strip() == "super_long"
+    ]
+    trim_required_policies = [
+        item for item in file_policies if str(item.get("zone", "")).strip() == "trim_required"
+    ]
+
+    known_durations = [
+        float(item.get("duration_seconds", 0.0))
+        for item in file_policies
+        if isinstance(item.get("duration_seconds"), (int, float))
+        and float(item.get("duration_seconds", 0.0)) > 0
+    ]
+    total_duration_seconds = sum(known_durations)
+    warnings: List[str] = []
+
+    if trim_required_policies:
+        first = trim_required_policies[0]
+        return {
+            "allowed": False,
+            "code": "video_segment_trim_required",
+            "error": (
+                f"{first.get('filename', '视频')} 属于裁剪优先区（{first.get('duration_text', '未知')} / "
+                f"{first.get('file_size_mb', 0)}MB），请先裁剪后再上传分析。"
+            ),
+            "warnings": warnings,
+            "summary": {
+                "total_files": total_files,
+                "long_count": len(long_policies),
+                "super_long_count": len(super_long_policies),
+                "trim_required_count": len(trim_required_policies),
+                "total_duration_seconds": round(total_duration_seconds, 2),
+            },
+        }
+
+    if super_long_policies:
+        first = super_long_policies[0]
+        return {
+            "allowed": False,
+            "code": "video_segment_super_long_batch_not_allowed",
+            "error": (
+                f"{first.get('filename', '视频')} 属于超长区（{first.get('duration_text', '未知')}），"
+                "建议仅单文件处理，不支持进入批量分析。"
+            ),
+            "warnings": warnings,
+            "summary": {
+                "total_files": total_files,
+                "long_count": len(long_policies),
+                "super_long_count": len(super_long_policies),
+                "trim_required_count": len(trim_required_policies),
+                "total_duration_seconds": round(total_duration_seconds, 2),
+            },
+        }
+
+    if long_policies and total_files > VIDEO_SEGMENT_BATCH_LONG_MAX_FILES:
+        return {
+            "allowed": False,
+            "code": "video_segment_long_batch_limit",
+            "error": (
+                "当前批次包含长视频区内容时，整批最多允许 2 个视频。"
+                f"当前数量: {total_files}。"
+            ),
+            "warnings": warnings,
+            "summary": {
+                "total_files": total_files,
+                "long_count": len(long_policies),
+                "super_long_count": len(super_long_policies),
+                "trim_required_count": len(trim_required_policies),
+                "total_duration_seconds": round(total_duration_seconds, 2),
+            },
+        }
+
+    if not long_policies and total_files > VIDEO_SEGMENT_BATCH_STANDARD_RECOMMENDED_MAX_FILES:
+        warnings.append(
+            "当前批次为标准区，建议最多 5 个视频；数量过多可能导致整体耗时明显上升。"
+        )
+    if (
+        not long_policies
+        and known_durations
+        and total_duration_seconds > VIDEO_SEGMENT_BATCH_STANDARD_RECOMMENDED_MAX_TOTAL_DURATION_SECONDS
+    ):
+        warnings.append("当前批次总时长已超过 60 分钟，建议拆分批次以降低峰值负载。")
+
+    return {
+        "allowed": True,
+        "code": "",
+        "error": "",
+        "warnings": warnings,
+        "summary": {
+            "total_files": total_files,
+            "long_count": len(long_policies),
+            "super_long_count": len(super_long_policies),
+            "trim_required_count": len(trim_required_policies),
+            "total_duration_seconds": round(total_duration_seconds, 2),
+        },
+    }
+
+
 def _format_ffmpeg_seconds(seconds: float) -> str:
     safe_seconds = max(0.0, float(seconds or 0.0))
     text = f"{safe_seconds:.3f}"
@@ -2047,10 +2306,10 @@ def _prepare_long_video_analysis_source(
 
     should_preprocess_by_duration = (
         duration_seconds is not None
-        and float(duration_seconds) >= float(LONG_VIDEO_PREPROCESS_MIN_DURATION_SECONDS)
+        and float(duration_seconds) > float(LONG_VIDEO_PREPROCESS_MIN_DURATION_SECONDS)
     )
     should_preprocess_by_size = (
-        original_size_mb >= float(LONG_VIDEO_PREPROCESS_MIN_FILE_SIZE_MB)
+        original_size_mb > float(LONG_VIDEO_PREPROCESS_MIN_FILE_SIZE_MB)
     )
     if not should_preprocess_by_duration and not should_preprocess_by_size:
         meta["reason"] = "below_threshold"
@@ -4484,6 +4743,23 @@ def upload_file():
     staged_path = _build_upload_staging_path(file.filename)
     try:
         file.save(str(staged_path))
+        segment_policy = _build_video_segment_policy(staged_path)
+        if bool(segment_policy.get("requires_trim")):
+            _safe_remove_file(staged_path)
+            return (
+                jsonify(
+                    _build_segment_policy_reject_payload(
+                        segment_policy,
+                        code="video_segment_trim_required",
+                        error_message=(
+                            "当前视频属于裁剪优先区（超长或超大文件），"
+                            "请先裁剪后再上传。"
+                        ),
+                    )
+                ),
+                400,
+            )
+
         blacklist_risk, file_fingerprint = _check_upload_blacklist_precheck(
             staged_video_path=staged_path,
             source="upload_single",
@@ -4525,7 +4801,13 @@ def upload_file():
         save_path = _build_unique_upload_path(file.filename)
         shutil.move(str(staged_path), str(save_path))
         _mark_uploaded_video_loaded_now(save_path)
-        return jsonify({"filename": save_path.name, "filepath": str(save_path)})
+        return jsonify(
+            {
+                "filename": save_path.name,
+                "filepath": str(save_path),
+                "segment_policy": segment_policy,
+            }
+        )
     except ValueError as exc:
         _safe_remove_file(staged_path)
         logger.warning("上传风控不可用（single upload）: %s", exc)
@@ -4547,6 +4829,30 @@ def upload_chunk_init():
     total_size = _safe_int(data.get("total_size"), 0, 1)
     if total_size <= 0:
         return jsonify({"error": "文件大小无效"}), 400
+    total_size_mb = float(total_size) / (1024.0 * 1024.0)
+    if total_size_mb >= VIDEO_SEGMENT_CROP_REQUIRED_MIN_SIZE_MB:
+        return (
+            jsonify(
+                {
+                    "error": (
+                        f"文件大小约 {total_size_mb:.1f}MB，已进入裁剪优先区；"
+                        "请先裁剪后再上传。"
+                    ),
+                    "code": "video_segment_trim_required",
+                    "segment_policy": {
+                        "zone": "trim_required",
+                        "zone_label": "裁剪优先区",
+                        "duration_seconds": None,
+                        "duration_text": "未知",
+                        "file_size_mb": round(total_size_mb, 2),
+                        "requires_trim": True,
+                        "allow_upload": False,
+                        "allow_batch": False,
+                    },
+                }
+            ),
+            400,
+        )
 
     requested_chunk_size = _safe_int(
         data.get("chunk_size", DEFAULT_UPLOAD_CHUNK_SIZE),
@@ -4831,6 +5137,23 @@ def upload_chunk_finalize():
         return jsonify({"error": "上传文件状态异常"}), 500
 
     try:
+        segment_policy = _build_video_segment_policy(staging_path)
+        if bool(segment_policy.get("requires_trim")):
+            _safe_remove_file(staging_path)
+            return (
+                jsonify(
+                    _build_segment_policy_reject_payload(
+                        segment_policy,
+                        code="video_segment_trim_required",
+                        error_message=(
+                            "当前视频属于裁剪优先区（超长或超大文件），"
+                            "请先裁剪后再上传。"
+                        ),
+                    )
+                ),
+                400,
+            )
+
         blacklist_risk, file_fingerprint = _check_upload_blacklist_precheck(
             staged_video_path=staging_path,
             source="upload_chunk_finalize",
@@ -4875,7 +5198,14 @@ def upload_chunk_finalize():
         if save_path.stat().st_size > total_size:
             with open(save_path, "r+b") as f:
                 f.truncate(total_size)
-        return jsonify({"success": True, "filename": save_path.name, "filepath": str(save_path)})
+        return jsonify(
+            {
+                "success": True,
+                "filename": save_path.name,
+                "filepath": str(save_path),
+                "segment_policy": segment_policy,
+            }
+        )
     except ValueError as exc:
         _safe_remove_file(staging_path)
         logger.warning("上传风控不可用（chunk finalize）: %s", exc)
@@ -4906,6 +5236,36 @@ def analyze():
     except FileNotFoundError:
         return jsonify({"error": "文件不存在"}), 400
 
+    segment_policy = _build_video_segment_policy(video_path)
+    if bool(segment_policy.get("requires_trim")):
+        return (
+            jsonify(
+                _build_segment_policy_reject_payload(
+                    segment_policy,
+                    code="video_segment_trim_required",
+                    error_message=(
+                        "当前视频属于裁剪优先区（超长或超大文件），"
+                        "请先裁剪后再分析。"
+                    ),
+                )
+            ),
+            400,
+        )
+
+    (
+        effective_use_video,
+        effective_web_search,
+        effective_max_vision,
+        effective_summary_only,
+        segment_guardrails,
+    ) = _apply_video_segment_processing_guardrails(
+        segment_policy,
+        use_video=use_video,
+        web_search=web_search,
+        max_vision=max_vision,
+        summary_only=summary_only,
+    )
+
     try:
         _update_single_progress(
             status="processing",
@@ -4928,14 +5288,17 @@ def analyze():
             whisper_model,
             model_name,
             model_base_url,
-            use_video,
-            web_search,
-            max_vision,
+            effective_use_video,
+            effective_web_search,
+            effective_max_vision,
             fps,
-            summary_only=summary_only,
+            summary_only=effective_summary_only,
             history_owner_id=history_owner_id,
             progress_callback=_single_progress_callback,
         )
+        result_meta["segment_policy"] = segment_policy
+        if segment_guardrails:
+            result_meta["segment_guardrails"] = segment_guardrails
         _update_single_progress(
             status="completed",
             stage="done",
@@ -4962,6 +5325,14 @@ def analyze():
                 "key_points": result_meta.get("key_points", []),
                 "timeline_points": result_meta.get("timeline_points", []),
                 "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                "segment_policy": segment_policy,
+                "segment_guardrails": segment_guardrails,
+                "effective_options": {
+                    "use_video": effective_use_video,
+                    "web_search": effective_web_search,
+                    "max_vision": effective_max_vision,
+                    "summary_only": effective_summary_only,
+                },
             }
         )
     except ContentPolicyBlockedError as exc:
@@ -5264,6 +5635,18 @@ def upload_batch_files():
         staged_path = _build_upload_staging_path(file.filename)
         try:
             file.save(str(staged_path))
+            segment_policy = _build_video_segment_policy(staged_path)
+            if bool(segment_policy.get("requires_trim")):
+                _safe_remove_file(staged_path)
+                errors.append(
+                    (
+                        f"{file.filename}: 属于裁剪优先区（"
+                        f"{segment_policy.get('duration_text', '未知')} / "
+                        f"{segment_policy.get('file_size_mb', 0)}MB），请先裁剪后再上传"
+                    )
+                )
+                continue
+
             risk, file_fingerprint, risk_source = _run_upload_pre_risk_check(
                 staged_video_path=staged_path,
                 risk_agent=risk_agent,
@@ -5298,7 +5681,13 @@ def upload_batch_files():
             save_path = _build_unique_upload_path(file.filename)
             shutil.move(str(staged_path), str(save_path))
             _mark_uploaded_video_loaded_now(save_path)
-            uploaded.append({"filename": save_path.name, "filepath": str(save_path)})
+            uploaded.append(
+                {
+                    "filename": save_path.name,
+                    "filepath": str(save_path),
+                    "segment_policy": segment_policy,
+                }
+            )
         except Exception as exc:
             _safe_remove_file(staged_path)
             errors.append(f"{file.filename}: {str(exc)}")
@@ -5343,18 +5732,63 @@ def analyze_batch():
         except FileNotFoundError:
             return jsonify({"error": f"文件不存在: {raw_path}"}), 400
 
+    file_segment_policies: List[Dict[str, Any]] = []
+    file_segment_policy_map: Dict[str, Dict[str, Any]] = {}
+    for path in filepaths:
+        policy = _build_video_segment_policy(path)
+        file_segment_policies.append(policy)
+        file_segment_policy_map[str(path.resolve(strict=False))] = policy
+
+    batch_segment_eval = _evaluate_batch_segment_policy(file_segment_policies)
+    if not bool(batch_segment_eval.get("allowed", False)):
+        return (
+            jsonify(
+                {
+                    "error": str(batch_segment_eval.get("error", "")).strip() or "批量任务不符合分段策略",
+                    "code": str(batch_segment_eval.get("code", "")).strip()
+                    or "video_segment_batch_not_allowed",
+                    "batch_segment_policy": batch_segment_eval,
+                    "file_segment_policies": file_segment_policies,
+                }
+            ),
+            400,
+        )
+    batch_policy_warnings = list(batch_segment_eval.get("warnings", []) or [])
+
     _update_batch_progress(
         total=len(filepaths),
         current=0,
         status="processing",
         current_file="",
         stage="prepare",
-        message="\u6279\u91cf\u4efb\u52a1\u5df2\u542f\u52a8\uff0c\u6b63\u5728\u7b49\u5f85\u5904\u7406...",
+        message=(
+            "批量任务已启动，正在等待处理..."
+            if not batch_policy_warnings
+            else f"批量任务已启动（策略提醒：{batch_policy_warnings[0]}）"
+        ),
     )
 
     results = []
     try:
         for idx, filepath in enumerate(filepaths, start=1):
+            filepath_key = str(filepath.resolve(strict=False))
+            segment_policy = file_segment_policy_map.get(filepath_key) or _build_video_segment_policy(
+                filepath
+            )
+            (
+                effective_use_video,
+                effective_web_search,
+                effective_max_vision,
+                effective_summary_only,
+                segment_guardrails,
+            ) = _apply_video_segment_processing_guardrails(
+                segment_policy,
+                use_video=use_video,
+                web_search=web_search,
+                max_vision=max_vision,
+                summary_only=summary_only,
+            )
+
             _update_batch_progress(
                 current=idx,
                 current_file=filepath.name,
@@ -5377,14 +5811,17 @@ def analyze_batch():
                     whisper_model,
                     model_name,
                     model_base_url,
-                    use_video,
-                    web_search,
-                    max_vision,
+                    effective_use_video,
+                    effective_web_search,
+                    effective_max_vision,
                     fps,
-                    summary_only=summary_only,
+                    summary_only=effective_summary_only,
                     history_owner_id=history_owner_id,
                     progress_callback=_batch_progress_callback,
                 )
+                result_meta["segment_policy"] = segment_policy
+                if segment_guardrails:
+                    result_meta["segment_guardrails"] = segment_guardrails
 
                 if not has_steps:
                     _update_batch_progress(
@@ -5408,6 +5845,14 @@ def analyze_batch():
                             "key_points": result_meta.get("key_points", []),
                             "timeline_points": result_meta.get("timeline_points", []),
                             "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                            "segment_policy": segment_policy,
+                            "segment_guardrails": segment_guardrails,
+                            "effective_options": {
+                                "use_video": effective_use_video,
+                                "web_search": effective_web_search,
+                                "max_vision": effective_max_vision,
+                                "summary_only": effective_summary_only,
+                            },
                         }
                     )
                     continue
@@ -5431,6 +5876,14 @@ def analyze_batch():
                         "key_points": result_meta.get("key_points", []),
                         "timeline_points": result_meta.get("timeline_points", []),
                         "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                        "segment_policy": segment_policy,
+                        "segment_guardrails": segment_guardrails,
+                        "effective_options": {
+                            "use_video": effective_use_video,
+                            "web_search": effective_web_search,
+                            "max_vision": effective_max_vision,
+                            "summary_only": effective_summary_only,
+                        },
                     }
                 )
                 _update_batch_progress(
@@ -5463,6 +5916,7 @@ def analyze_batch():
                         "quality_score": 0.0,
                         "degrade_reason": "content_policy_blocked",
                         "blocked_notice": blocked_notice,
+                        "segment_policy": segment_policy,
                     }
                 )
             except Exception as exc:
@@ -5479,6 +5933,7 @@ def analyze_batch():
                         "filename": filepath.name,
                         "success": False,
                         "error": error_msg,
+                        "segment_policy": segment_policy,
                     }
                 )
     finally:
@@ -5494,6 +5949,8 @@ def analyze_batch():
         {
             "success": True,
             "results": results,
+            "batch_segment_policy": batch_segment_eval,
+            "batch_policy_warnings": batch_policy_warnings,
             "summary": {
                 "total": len(filepaths),
                 "success": success_count,

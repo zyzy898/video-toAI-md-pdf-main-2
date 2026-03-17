@@ -127,6 +127,65 @@ const formatRiskHint = (risk?: RiskResult) => {
   return parts.join(" | ");
 };
 
+const SEGMENT_ZONE_LABELS: Record<string, string> = {
+  standard: "标准区",
+  long: "长视频区",
+  super_long: "超长区",
+  trim_required: "裁剪优先区",
+};
+
+const SEGMENT_POLICY_CODE_GUIDES: Record<string, string> = {
+  video_segment_trim_required: "当前视频属于裁剪优先区，请先裁剪后再上传或分析。",
+  video_segment_super_long_batch_not_allowed: "批量中包含超长视频，建议改为单文件处理。",
+  video_segment_long_batch_limit: "包含长视频时，整批最多允许 2 个视频。",
+  video_segment_batch_not_allowed: "当前批次不符合分段策略，请按提示拆分或裁剪后重试。",
+};
+
+const getSegmentZoneLabel = (zone?: string, fallback?: string) =>
+  SEGMENT_ZONE_LABELS[String(zone || "").trim().toLowerCase()] || String(fallback || "").trim() || "未知区";
+
+const formatSegmentPolicyHint = (policy?: SegmentPolicy) => {
+  if (!policy) return "";
+  const zoneText = getSegmentZoneLabel(policy.zone, policy.zone_label);
+  const durationText = String(policy.duration_text || "").trim() || "未知";
+  const sizeMb = Number(policy.file_size_mb || 0);
+  const sizeText = Number.isFinite(sizeMb) && sizeMb > 0 ? `${sizeMb.toFixed(1)}MB` : "未知大小";
+  return `分段策略: ${zoneText}（时长 ${durationText}，大小 ${sizeText}）`;
+};
+
+const formatBatchSegmentPolicyHint = (policy?: BatchSegmentPolicy) => {
+  if (!policy) return "";
+  const total = Number(policy.summary?.total_files || 0);
+  const longCount = Number(policy.summary?.long_count || 0);
+  const superLongCount = Number(policy.summary?.super_long_count || 0);
+  const trimCount = Number(policy.summary?.trim_required_count || 0);
+  const parts = [
+    total > 0 ? `批次: ${total} 个` : "",
+    longCount > 0 ? `长视频 ${longCount}` : "",
+    superLongCount > 0 ? `超长 ${superLongCount}` : "",
+    trimCount > 0 ? `裁剪优先 ${trimCount}` : "",
+  ].filter(Boolean);
+  return parts.length > 0 ? `分段策略: ${parts.join(" / ")}` : "";
+};
+
+const compactErrorDetail = (message: string) => {
+  const parts = String(message || "")
+    .split("|")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => !/^code=/i.test(item))
+    .filter((item) => !/^等级[:：]/.test(item))
+    .filter((item) => !/^规则[:：]/.test(item));
+  return parts.slice(0, 2).join("；");
+};
+
+const formatSegmentPolicyGuideByCode = (errorCode: string, message: string, requestIdText: string) => {
+  const guide = SEGMENT_POLICY_CODE_GUIDES[String(errorCode || "").trim().toLowerCase()];
+  if (!guide) return "";
+  const detail = compactErrorDetail(message);
+  return `${guide}${requestIdText}${detail ? ` ${detail}` : ""}`;
+};
+
 const formatErrorMessage = (rawMessage: string) => {
   const message = String(rawMessage || "").trim();
   if (!message) return "操作失败";
@@ -140,6 +199,8 @@ const formatErrorMessage = (rawMessage: string) => {
   if (errorCode === "risk_model_auth_failed") {
     return `上传前模型鉴权失败：请检查 API Key 是否有效，并确认与当前 Base URL/平台匹配${requestIdText}`;
   }
+  const segmentPolicyGuide = formatSegmentPolicyGuideByCode(errorCode, message, requestIdText);
+  if (segmentPolicyGuide) return segmentPolicyGuide;
   if (errorCode === "content_policy_violation" || message.includes("上传被拒绝")) {
     return formatContentPolicyViolationMessage(message);
   }
@@ -168,6 +229,8 @@ const formatInlineErrorMessage = (rawMessage: string) => {
   if (errorCode === "risk_model_auth_failed") {
     return `模型鉴权失败，请检查 API Key 与平台匹配关系${requestIdText}`;
   }
+  const segmentPolicyGuide = formatSegmentPolicyGuideByCode(errorCode, message, requestIdText);
+  if (segmentPolicyGuide) return segmentPolicyGuide;
   if (errorCode === "content_policy_violation" || message.includes("上传被拒绝")) {
     return formatContentPolicyViolationMessage(message, true);
   }
@@ -199,6 +262,17 @@ const formatDegradeReason = (rawReason?: string) => {
   if (mapped) return mapped;
   if (/[\u4e00-\u9fa5]/u.test(reason)) return reason;
   return "系统未提炼出高置信度标准步骤，已输出可读保底结果";
+};
+
+const formatSegmentPolicyLine = (policy?: SegmentPolicy) => {
+  if (!policy) return "";
+  const zoneText = getSegmentZoneLabel(policy.zone, policy.zone_label);
+  const durationText = String(policy.duration_text || "").trim() || "未知";
+  const sizeText =
+    typeof policy.file_size_mb === "number" && Number.isFinite(policy.file_size_mb)
+      ? `${Number(policy.file_size_mb).toFixed(1)}MB`
+      : "未知大小";
+  return `${zoneText} · 时长 ${durationText} · 大小 ${sizeText}`;
 };
 
 const STAGE_LABELS: Record<string, string> = {
@@ -301,6 +375,40 @@ type BlockedNotice = {
   retry_guidance?: string;
 };
 
+type SegmentPolicy = {
+  filename?: string;
+  zone?: string;
+  zone_label?: string;
+  duration_seconds?: number | null;
+  duration_text?: string;
+  file_size_mb?: number;
+  allow_upload?: boolean;
+  allow_batch?: boolean;
+  requires_trim?: boolean;
+  recommendations?: string[];
+};
+
+type BatchSegmentPolicy = {
+  allowed?: boolean;
+  code?: string;
+  error?: string;
+  warnings?: string[];
+  summary?: {
+    total_files?: number;
+    long_count?: number;
+    super_long_count?: number;
+    trim_required_count?: number;
+    total_duration_seconds?: number;
+  };
+};
+
+type EffectiveOptions = {
+  use_video?: boolean;
+  web_search?: boolean;
+  max_vision?: number;
+  summary_only?: boolean;
+};
+
 type ApiErrorPayload = {
   error?: string;
   code?: string;
@@ -310,6 +418,10 @@ type ApiErrorPayload = {
   degrade_reason?: string;
   blocked_notice?: BlockedNotice;
   analysis_note?: string;
+  segment_policy?: SegmentPolicy;
+  batch_segment_policy?: BatchSegmentPolicy;
+  file_segment_policies?: SegmentPolicy[];
+  batch_policy_warnings?: string[];
 };
 
 type SingleResultData = {
@@ -329,6 +441,9 @@ type SingleResultData = {
   confidence_note?: string;
   blocked_notice?: BlockedNotice;
   risk?: RiskResult;
+  segment_policy?: SegmentPolicy;
+  segment_guardrails?: string[];
+  effective_options?: EffectiveOptions;
 };
 
 type BatchResultItem = {
@@ -350,10 +465,15 @@ type BatchResultItem = {
   timeline_points?: Array<{ time?: string; text?: string }>;
   confidence_note?: string;
   blocked_notice?: BlockedNotice;
+  segment_policy?: SegmentPolicy;
+  segment_guardrails?: string[];
+  effective_options?: EffectiveOptions;
 };
 
 type BatchResultData = {
   results: BatchResultItem[];
+  batch_segment_policy?: BatchSegmentPolicy;
+  batch_policy_warnings?: string[];
   summary?: {
     total?: number;
     success?: number;
@@ -1044,8 +1164,10 @@ export default function App() {
     if (!response.ok || data.error) {
       const base = String(data.error || `请求失败 (${response.status})`);
       const riskHint = formatRiskHint(data.risk);
+      const segmentHint = formatSegmentPolicyHint(data.segment_policy);
+      const batchSegmentHint = formatBatchSegmentPolicyHint(data.batch_segment_policy);
       const codeText = data.code ? `code=${data.code}` : "";
-      const merged = [base, codeText, riskHint].filter(Boolean).join(" | ");
+      const merged = [base, codeText, segmentHint, batchSegmentHint, riskHint].filter(Boolean).join(" | ");
       throw new ApiRequestError(merged, response.status, data);
     }
     return data;
@@ -1598,6 +1720,8 @@ export default function App() {
             } else if (apiError?.payload?.error) {
               message = String(apiError.payload.error);
             }
+            const segmentHint = formatSegmentPolicyHint(apiError?.payload?.segment_policy);
+            if (segmentHint) message = [message, segmentHint].filter(Boolean).join(" | ");
             uploaded.push({
               filename: currentFile.name,
               filepath: "",
@@ -2371,6 +2495,40 @@ export default function App() {
                 <p>点击选择单个/多个视频文件</p>
                 <p className="mt-1 text-xs text-neutral-500">支持 MP4, AVI, MOV, MKV, WMV, FLV, WebM, M4V 等格式</p>
               </div>
+              <div className="mt-2 rounded-lg border border-sky-400/30 bg-sky-500/8 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold tracking-wide text-sky-100/95">上传策略建议</p>
+                  <span className="rounded-full border border-sky-300/35 bg-sky-500/15 px-2 py-0.5 text-[11px] text-sky-100/90">
+                    稳定性优先
+                  </span>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
+                    <p className="text-[11px] font-medium text-sky-200/95">标准推荐</p>
+                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
+                      推荐上传 20 分钟以内、250MB 以内的视频，处理速度和稳定性最佳。
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
+                    <p className="text-[11px] font-medium text-sky-200/95">长视频模式</p>
+                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
+                      20 分钟以上或 250MB 以上的视频会自动进入长视频处理模式，系统将进行切片/压缩后再分析，耗时会明显增加。
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
+                    <p className="text-[11px] font-medium text-sky-200/95">超长视频建议</p>
+                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
+                      45 分钟以上的视频建议先按章节裁剪后再上传；90 分钟以上的超长视频请拆分后上传，以保证处理稳定性。
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
+                    <p className="text-[11px] font-medium text-sky-200/95">批量建议</p>
+                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
+                      批量上传建议最多 5 个视频；若包含长视频，建议最多 2 个。
+                    </p>
+                  </div>
+                </div>
+              </div>
               <div className="mt-2 space-y-2">
                 {batchFiles.map((item, index) => (
                   <div
@@ -2502,6 +2660,28 @@ export default function App() {
                         下载批量 ZIP
                       </button>
                     </div>
+                    {(batchResultData?.batch_policy_warnings || []).length > 0 ? (
+                      <div className="mb-2 rounded border border-amber-400/35 bg-amber-500/10 p-2 text-xs text-amber-200/95">
+                        <p className="font-semibold">批次策略提醒</p>
+                        <ul className="mt-1 list-disc space-y-1 pl-5">
+                          {(batchResultData?.batch_policy_warnings || []).slice(0, 3).map((tip, idx) => (
+                            <li key={`batch-policy-warning-${idx}`}>{tip}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {batchResultData?.batch_segment_policy?.summary ? (
+                      <div className="mb-2 rounded border border-sky-400/30 bg-sky-500/8 p-2 text-xs text-sky-100/95">
+                        <p className="font-semibold">
+                          批次分段统计：总计 {Number(batchResultData.batch_segment_policy.summary.total_files || 0)} 个
+                        </p>
+                        <p className="mt-1">
+                          长视频 {Number(batchResultData.batch_segment_policy.summary.long_count || 0)} · 超长{" "}
+                          {Number(batchResultData.batch_segment_policy.summary.super_long_count || 0)} · 裁剪优先{" "}
+                          {Number(batchResultData.batch_segment_policy.summary.trim_required_count || 0)}
+                        </p>
+                      </div>
+                    ) : null}
                     <div className="space-y-2">
                       {(batchResultData?.results || []).map((r, i) => (
                         <div key={`${r.filename}-${i}`} className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
@@ -2527,6 +2707,16 @@ export default function App() {
                                   : "失败"}
                             </span>
                           </div>
+                          {r.segment_policy ? (
+                            <p className="mt-1 text-[11px] text-sky-200/90">
+                              分段策略：{formatSegmentPolicyLine(r.segment_policy)}
+                            </p>
+                          ) : null}
+                          {(r.segment_guardrails || []).length > 0 ? (
+                            <p className="mt-1 text-[11px] text-amber-200/90">
+                              调整：{String((r.segment_guardrails || [])[0] || "")}
+                            </p>
+                          ) : null}
                           {r.success ? (
                             <>
                               <button
@@ -2617,6 +2807,25 @@ export default function App() {
                       >
                         {resultData.analysis_note}
                       </p>
+                    ) : null}
+                    {resultData?.segment_policy ? (
+                      <div className="mb-2 rounded border border-sky-400/35 bg-sky-500/8 p-2 text-xs text-sky-100/95">
+                        <p className="font-semibold">分段策略：{formatSegmentPolicyLine(resultData.segment_policy)}</p>
+                        {(resultData.segment_policy.recommendations || []).length > 0 ? (
+                          <ul className="mt-1 list-disc space-y-1 pl-5 text-sky-100/90">
+                            {(resultData.segment_policy.recommendations || []).slice(0, 3).map((tip, idx) => (
+                              <li key={`single-policy-tip-${idx}`}>{tip}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        {(resultData.segment_guardrails || []).length > 0 ? (
+                          <ul className="mt-1 list-disc space-y-1 pl-5 text-amber-200/90">
+                            {(resultData.segment_guardrails || []).slice(0, 3).map((tip, idx) => (
+                              <li key={`single-guardrail-${idx}`}>{tip}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
                     ) : null}
                     {isBlockedNoticeResult ? (
                       <div className="rounded border border-rose-500/45 bg-rose-500/10 p-3 text-sm">
