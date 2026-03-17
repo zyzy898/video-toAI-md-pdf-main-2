@@ -559,6 +559,26 @@ const FPS_MIN = 0.1;
 const FPS_MAX = 10;
 const FPS_STEP = 0.1;
 const HERO_ANIMATION_TOP_THRESHOLD = 4;
+const MOBILE_PERF_MEDIA_QUERY = "(max-width: 900px) and (pointer: coarse)";
+const REDUCED_MOTION_MEDIA_QUERY = "(prefers-reduced-motion: reduce)";
+const PROGRESS_POLL_INTERVAL_DESKTOP_MS = 5000;
+const PROGRESS_POLL_INTERVAL_MOBILE_MS = 9000;
+
+type NavigatorWithConnection = Navigator & {
+  connection?: {
+    saveData?: boolean;
+    addEventListener?: (type: "change", listener: () => void) => void;
+    removeEventListener?: (type: "change", listener: () => void) => void;
+  };
+};
+
+const shouldEnableMobilePerfMode = () => {
+  if (typeof window === "undefined") return false;
+  const coarseMobile = window.matchMedia(MOBILE_PERF_MEDIA_QUERY).matches;
+  const reducedMotion = window.matchMedia(REDUCED_MOTION_MEDIA_QUERY).matches;
+  const saveData = Boolean((navigator as NavigatorWithConnection).connection?.saveData);
+  return coarseMobile || reducedMotion || saveData;
+};
 
 const isValidVideo = (filename: string) => {
   const ext = String(filename || "").split(".").pop()?.toLowerCase() || "";
@@ -1040,6 +1060,7 @@ export default function App() {
   const [successMessage, setSuccessMessage] = useState("");
   const [showSuccessToast, setShowSuccessToast] = useState(false);
   const [heroAnimationActive, setHeroAnimationActive] = useState(true);
+  const [mobilePerfMode, setMobilePerfMode] = useState<boolean>(() => shouldEnableMobilePerfMode());
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
@@ -1060,6 +1081,10 @@ export default function App() {
   const progressVisibleRef = useRef(false);
   const batchFilesRef = useRef<BatchFileItem[]>([]);
   const verifiedModelConfigSignatureRef = useRef("");
+  const progressPollIntervalMs = mobilePerfMode
+    ? PROGRESS_POLL_INTERVAL_MOBILE_MS
+    : PROGRESS_POLL_INTERVAL_DESKTOP_MS;
+  const uiScrollBehavior: ScrollBehavior = mobilePerfMode ? "auto" : "smooth";
 
   useEffect(() => {
     progressVisibleRef.current = progressVisible;
@@ -1068,6 +1093,43 @@ export default function App() {
   useEffect(() => {
     batchFilesRef.current = batchFiles;
   }, [batchFiles]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const coarseMobileQuery = window.matchMedia(MOBILE_PERF_MEDIA_QUERY);
+    const reducedMotionQuery = window.matchMedia(REDUCED_MOTION_MEDIA_QUERY);
+    const connection = (navigator as NavigatorWithConnection).connection;
+    const updateMode = () => {
+      const next = coarseMobileQuery.matches || reducedMotionQuery.matches || Boolean(connection?.saveData);
+      setMobilePerfMode((prev) => (prev === next ? prev : next));
+    };
+    const addMediaListener = (media: MediaQueryList, listener: () => void) => {
+      if (typeof media.addEventListener === "function") {
+        media.addEventListener("change", listener);
+        return;
+      }
+      media.addListener(listener);
+    };
+    const removeMediaListener = (media: MediaQueryList, listener: () => void) => {
+      if (typeof media.removeEventListener === "function") {
+        media.removeEventListener("change", listener);
+        return;
+      }
+      media.removeListener(listener);
+    };
+
+    updateMode();
+    addMediaListener(coarseMobileQuery, updateMode);
+    addMediaListener(reducedMotionQuery, updateMode);
+    connection?.addEventListener?.("change", updateMode);
+
+    return () => {
+      removeMediaListener(coarseMobileQuery, updateMode);
+      removeMediaListener(reducedMotionQuery, updateMode);
+      connection?.removeEventListener?.("change", updateMode);
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -1125,6 +1187,10 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (mobilePerfMode) {
+      setHeroAnimationActive(false);
+      return;
+    }
 
     let rafId = 0;
     const syncHeroAnimationState = () => {
@@ -1147,7 +1213,7 @@ export default function App() {
       if (rafId) window.cancelAnimationFrame(rafId);
       window.removeEventListener("scroll", handleScroll);
     };
-  }, []);
+  }, [mobilePerfMode]);
 
   const withHistoryClientHeader = useCallback((options: RequestInit = {}) => {
     const headers = new Headers(options.headers || {});
@@ -1231,7 +1297,7 @@ export default function App() {
         if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
         apiKeyGuideFocusTimerRef.current = setTimeout(() => {
           apiKeyInputRef.current?.focus();
-          apiKeyInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+          apiKeyInputRef.current?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
         }, 220);
       } else if (needModelGuide) {
         if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
@@ -1244,11 +1310,11 @@ export default function App() {
               ? modelNameInputRef.current
               : modelNameInputRef.current;
           target?.focus();
-          target?.scrollIntoView({ behavior: "smooth", block: "center" });
+          target?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
         }, 220);
       }
     }
-  }, [modelBaseUrl, modelName, modelPreset]);
+  }, [modelBaseUrl, modelName, modelPreset, uiScrollBehavior]);
 
   const showSuccess = useCallback((message: string) => {
     const rawMessage = String(message || "").trim() || "操作成功";
@@ -1281,9 +1347,9 @@ export default function App() {
           ? modelNameInputRef.current
           : modelBaseUrlInputRef.current;
       target?.focus();
-      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+      target?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
     }, 220);
-  }, [modelBaseUrl, modelName, modelPreset]);
+  }, [modelBaseUrl, modelName, modelPreset, uiScrollBehavior]);
 
   const triggerModelTestGuide = useCallback(() => {
     setHistoryDrawerOpen(false);
@@ -1299,9 +1365,9 @@ export default function App() {
     if (modelTestGuideFocusTimerRef.current) clearTimeout(modelTestGuideFocusTimerRef.current);
     modelTestGuideFocusTimerRef.current = setTimeout(() => {
       modelTestButtonRef.current?.focus();
-      modelTestButtonRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      modelTestButtonRef.current?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
     }, 260);
-  }, []);
+  }, [uiScrollBehavior]);
 
   const validateModelConfig = useCallback(() => {
     const hasBaseUrl = Boolean(String(modelBaseUrl || "").trim());
@@ -1598,14 +1664,19 @@ export default function App() {
   const startSinglePolling = useCallback(() => {
     stopSinglePolling();
     void pullSingleProgress();
-    singleTimerRef.current = setInterval(() => void pullSingleProgress(), 5000);
-  }, [pullSingleProgress, stopSinglePolling]);
+    singleTimerRef.current = setInterval(() => void pullSingleProgress(), progressPollIntervalMs);
+  }, [progressPollIntervalMs, pullSingleProgress, stopSinglePolling]);
 
   const startBatchPolling = useCallback(() => {
     stopBatchPolling();
     void pullBatchProgress();
-    batchTimerRef.current = setInterval(() => void pullBatchProgress(), 5000);
-  }, [pullBatchProgress, stopBatchPolling]);
+    batchTimerRef.current = setInterval(() => void pullBatchProgress(), progressPollIntervalMs);
+  }, [progressPollIntervalMs, pullBatchProgress, stopBatchPolling]);
+
+  useEffect(() => {
+    if (singleTimerRef.current) startSinglePolling();
+    if (batchTimerRef.current) startBatchPolling();
+  }, [progressPollIntervalMs, startBatchPolling, startSinglePolling]);
 
   const uploadSingleFileWithResume = useCallback(
     async (
@@ -1884,7 +1955,7 @@ export default function App() {
       stopSinglePolling();
       setIsAnalyzing(false);
       hideProgress();
-      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
     }
   }, [
     apiKey,
@@ -1902,6 +1973,7 @@ export default function App() {
     stopBatchPolling,
     stopSinglePolling,
     updateProgressBoard,
+    uiScrollBehavior,
     useVideo,
     webSearch,
     whisperModel,
@@ -1989,7 +2061,7 @@ export default function App() {
       stopBatchPolling();
       setIsAnalyzing(false);
       hideProgress();
-      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
     }
   }, [
     apiKey,
@@ -2007,6 +2079,7 @@ export default function App() {
     stopBatchPolling,
     stopSinglePolling,
     updateProgressBoard,
+    uiScrollBehavior,
     useVideo,
     webSearch,
     whisperModel,
@@ -2054,7 +2127,7 @@ export default function App() {
         });
         setBatchResultData(null);
         if (resultsRef.current) {
-          resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+          resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
         }
       } catch (error) {
         showError(`加载历史失败: ${String((error as Error).message || error)}`);
@@ -2062,7 +2135,7 @@ export default function App() {
         hideProgress();
       }
     },
-    [fetchJson, hideProgress, showError, showProgress],
+    [fetchJson, hideProgress, showError, showProgress, uiScrollBehavior],
   );
 
   const openDeleteHistoryConfirm = useCallback(
@@ -2333,9 +2406,32 @@ export default function App() {
   const isDegradedResult = singleResultMode === "candidate_steps" || singleResultMode === "timeline_summary";
   const drawerOverlayActive =
     historyDrawerOpen || settingsDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
-  const heroCanvasAnimating = !drawerOverlayActive && heroAnimationActive;
+  const heroCanvasAnimating = !mobilePerfMode && !drawerOverlayActive && heroAnimationActive;
+  const shouldShowBackgroundBeams = !mobilePerfMode;
+  const shouldAnimateNoiseBackground = !mobilePerfMode && !drawerOverlayActive;
+  const analyzeActionButton = (
+    <button
+      aria-busy={isAnalyzing}
+      className="start-analyze-btn h-full w-full cursor-pointer rounded-full bg-linear-to-r from-neutral-950 via-black to-neutral-900 px-4 py-2 text-neutral-100 shadow-[0px_1px_0px_0px_rgba(255,255,255,0.09)_inset,0px_0.5px_1px_0px_rgba(148,163,184,0.32)] transition-all duration-150 active:scale-98 disabled:cursor-not-allowed disabled:opacity-60"
+      disabled={!canAnalyze}
+      onClick={() => {
+        if (!canAnalyze) return;
+        void startAnalyze();
+      }}
+    >
+      <span className="inline-flex items-center justify-center gap-1.5">
+        <PlayIcon className="h-3.5 w-3.5" />
+        <span>{analyzeButtonText}</span>
+      </span>
+    </button>
+  );
   const handleStudioClick = useCallback(() => {
     if (typeof window === "undefined") return;
+    if (mobilePerfMode) {
+      window.scrollTo({ top: 0, behavior: "auto" });
+      window.location.reload();
+      return;
+    }
 
     const startY = window.scrollY || document.documentElement.scrollTop || 0;
     if (startY <= 1) {
@@ -2361,13 +2457,15 @@ export default function App() {
     };
 
     window.requestAnimationFrame(animateToTop);
-  }, []);
+  }, [mobilePerfMode]);
 
   return (
     <div className="app-root relative min-h-screen bg-neutral-950 text-neutral-100">
-      <div className="pointer-events-none absolute inset-0">
-        <BackgroundBeams className="opacity-70" />
-      </div>
+      {shouldShowBackgroundBeams ? (
+        <div className="pointer-events-none absolute inset-0">
+          <BackgroundBeams className="opacity-70" />
+        </div>
+      ) : null}
       <nav className="fixed inset-x-0 top-0 z-40 w-full border-y border-neutral-800 bg-neutral-900/80 backdrop-blur-md">
         <div className="mx-auto flex min-h-[52px] w-full max-w-[1320px] items-center justify-between px-4 sm:px-6 md:px-8">
           <button
@@ -2422,29 +2520,37 @@ export default function App() {
               )}
             >
               视频转文档 
-              <CanvasText
-                text=" 不止是提取   更是理解"
-                className="hero-toast-anchor inline align-middle"
-                backgroundClassName="bg-blue-600 dark:bg-blue-700"
-                colors={HERO_TITLE_CANVAS_COLORS}
-                animating={heroCanvasAnimating}
-                lineGap={4}
-                animationDuration={20}
-              />
+              {mobilePerfMode ? (
+                <span className="hero-toast-anchor inline align-middle text-sky-300/90"> 不止是提取 更是理解</span>
+              ) : (
+                <CanvasText
+                  text=" 不止是提取   更是理解"
+                  className="hero-toast-anchor inline align-middle"
+                  backgroundClassName="bg-blue-600 dark:bg-blue-700"
+                  colors={HERO_TITLE_CANVAS_COLORS}
+                  animating={heroCanvasAnimating}
+                  lineGap={4}
+                  animationDuration={20}
+                />
+              )}
             </h1>
             <p className="mx-auto max-w-3xl text-balance text-center text-sm font-medium text-neutral-300 sm:text-base md:text-lg">
               AI 自动分析视频内容，抓取关键截图，拆解核心步骤，输出结构清晰、重点明确的总结文档。
             </p>
             <p className="mx-auto max-w-3xl text-balance text-center text-sm font-medium text-neutral-300 sm:text-base">
-              <CanvasText
-                text="让信息沉淀更高效，Turn insights into docs。"
-                className="inline align-middle"
-                backgroundClassName="bg-blue-600/80 dark:bg-blue-700/80"
-                colors={HERO_SUBTITLE_CANVAS_COLORS}
-                animating={heroCanvasAnimating}
-                lineGap={4}
-                animationDuration={22}
-              />
+              {mobilePerfMode ? (
+                <span className="inline align-middle text-sky-200/95">让信息沉淀更高效，Turn insights into docs。</span>
+              ) : (
+                <CanvasText
+                  text="让信息沉淀更高效，Turn insights into docs。"
+                  className="inline align-middle"
+                  backgroundClassName="bg-blue-600/80 dark:bg-blue-700/80"
+                  colors={HERO_SUBTITLE_CANVAS_COLORS}
+                  animating={heroCanvasAnimating}
+                  lineGap={4}
+                  animationDuration={22}
+                />
+              )}
             </p>
             <div className="mt-2 flex flex-wrap justify-center gap-2">
               <span className="hero-chip rounded-full border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300">Whisper</span>
@@ -2603,29 +2709,22 @@ export default function App() {
                   清空列表
                 </button>
               ) : null}
-              <NoiseBackground
-                containerClassName="mt-3 mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5"
-                className="w-full"
-                gradientColors={ANALYZE_BUTTON_GRADIENT_COLORS}
-                noiseIntensity={0.07}
-                speed={0.13}
-                animating={!drawerOverlayActive}
-              >
-                <button
-                  aria-busy={isAnalyzing}
-                  className="start-analyze-btn h-full w-full cursor-pointer rounded-full bg-linear-to-r from-neutral-950 via-black to-neutral-900 px-4 py-2 text-neutral-100 shadow-[0px_1px_0px_0px_rgba(255,255,255,0.09)_inset,0px_0.5px_1px_0px_rgba(148,163,184,0.32)] transition-all duration-150 active:scale-98 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={!canAnalyze}
-                  onClick={() => {
-                    if (!canAnalyze) return;
-                    void startAnalyze();
-                  }}
+              {mobilePerfMode ? (
+                <div className="mt-3 mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5">
+                  {analyzeActionButton}
+                </div>
+              ) : (
+                <NoiseBackground
+                  containerClassName="mt-3 mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5"
+                  className="w-full"
+                  gradientColors={ANALYZE_BUTTON_GRADIENT_COLORS}
+                  noiseIntensity={0.07}
+                  speed={0.13}
+                  animating={shouldAnimateNoiseBackground}
                 >
-                  <span className="inline-flex items-center justify-center gap-1.5">
-                    <PlayIcon className="h-3.5 w-3.5" />
-                    <span>{analyzeButtonText}</span>
-                  </span>
-                </button>
-              </NoiseBackground>
+                  {analyzeActionButton}
+                </NoiseBackground>
+              )}
               <button
                 type="button"
                 className={`mt-2 w-full rounded border px-3 py-1.5 text-xs transition-colors ${
