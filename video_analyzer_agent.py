@@ -21,6 +21,11 @@ try:
 except Exception:  # pragma: no cover - 兜底兼容
     ffmpeg = None
 
+try:
+    import whisper as whisper_lib
+except Exception:  # pragma: no cover - 兜底兼容
+    whisper_lib = None
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -33,6 +38,9 @@ class VideoAnalyzerAgent:
     DEFAULT_CHAT_TEMPERATURE = 0.2
     SUBTITLE_CACHE_ROOT = (Path(__file__).resolve().parent / "outputs" / ".subtitle_cache").resolve()
     _subtitle_cache_lock = RLock()
+    _whisper_model_cache_lock = RLock()
+    _whisper_infer_lock = RLock()
+    _whisper_model_cache: Dict[str, Any] = {}
     FONT_PATHS = [
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\simsun.ttc",
@@ -321,6 +329,103 @@ class VideoAnalyzerAgent:
 
     # ========== Whisper 字幕生成 ==========
 
+    def _get_resident_whisper_model(self):
+        model_name = str(self.whisper_model or "").strip().lower() or "base"
+        if whisper_lib is None:
+            raise RuntimeError("openai-whisper Python 包不可用")
+
+        with self._whisper_model_cache_lock:
+            cached_model = self._whisper_model_cache.get(model_name)
+            if cached_model is not None:
+                return cached_model
+
+            # 使用 CPU 时，尽量将线程数控制在配置值内，避免过度占用。
+            try:
+                import torch
+
+                torch.set_num_threads(int(self.whisper_threads))
+            except Exception:
+                pass
+
+            try:
+                model = whisper_lib.load_model(model_name, device="cpu")
+            except TypeError:
+                model = whisper_lib.load_model(model_name)
+
+            self._whisper_model_cache[model_name] = model
+            logging.info("Whisper 常驻模型已加载: %s", model_name)
+            return model
+
+    def _generate_subtitles_with_resident_whisper(
+        self,
+        video_file: Path,
+        output_dir: Path,
+        srt_path: Path,
+    ) -> tuple[bool, str]:
+        if whisper_lib is None:
+            return False, "openai-whisper Python 包不可用"
+
+        try:
+            model = self._get_resident_whisper_model()
+        except Exception as exc:
+            return False, str(exc)
+
+        try:
+            with self._whisper_infer_lock:
+                result = model.transcribe(
+                    str(video_file),
+                    language="zh",
+                    task="transcribe",
+                    fp16=False,
+                    verbose=False,
+                )
+
+            writer = whisper_lib.utils.get_writer("srt", str(output_dir))
+            writer(result, str(video_file))
+        except Exception as exc:
+            return False, str(exc)
+
+        if not srt_path.exists() or srt_path.stat().st_size <= 0:
+            return False, f"Whisper 常驻模式未生成字幕文件: {srt_path}"
+        return True, ""
+
+    def _generate_subtitles_with_whisper_cli(
+        self,
+        video_file: Path,
+        output_dir: Path,
+        srt_path: Path,
+    ) -> tuple[bool, str]:
+        cmd = [
+            "whisper",
+            str(video_file),
+            "--model",
+            self.whisper_model,
+            "--language",
+            "zh",
+            "--task",
+            "transcribe",
+            "--fp16",
+            "False",
+            "--threads",
+            str(self.whisper_threads),
+            "--output_format",
+            "srt",
+            "--output_dir",
+            str(output_dir),
+        ]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+        if result.returncode != 0:
+            return False, str(result.stderr or "").strip()
+        if not srt_path.exists() or srt_path.stat().st_size <= 0:
+            return False, f"Whisper CLI 未生成字幕文件: {srt_path}"
+        return True, ""
+
     def _build_subtitle_cache_key(
         self,
         video_path: Path,
@@ -410,35 +515,22 @@ class VideoAnalyzerAgent:
             print(f"字幕缓存命中: {srt_path}")
             return str(srt_path)
 
-        cmd = [
-            "whisper",
-            str(video_file),
-            "--model",
-            self.whisper_model,
-            "--language",
-            "zh",
-            "--task",
-            "transcribe",
-            "--fp16",
-            "False",
-            "--threads",
-            str(self.whisper_threads),
-            "--output_format",
-            "srt",
-            "--output_dir",
-            str(output_dir),
-        ]
-        print(f"正在使用 Whisper ({self.whisper_model}) 生成字幕...")
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
+        print(f"正在使用 Whisper ({self.whisper_model}) 常驻模型生成字幕...")
+        resident_ok, resident_error = self._generate_subtitles_with_resident_whisper(
+            video_file,
+            output_dir,
+            srt_path,
         )
-
-        if result.returncode != 0:
-            raise RuntimeError(f"Whisper 字幕生成失败: {result.stderr}")
+        if not resident_ok:
+            logging.warning("Whisper 常驻模式失败，回退命令行模式: %s", resident_error)
+            print("Whisper 常驻模式失败，正在回退命令行模式...")
+            cli_ok, cli_error = self._generate_subtitles_with_whisper_cli(
+                video_file,
+                output_dir,
+                srt_path,
+            )
+            if not cli_ok:
+                raise RuntimeError(f"Whisper 字幕生成失败: {cli_error}")
 
         if not srt_path.exists():
             raise FileNotFoundError(f"Whisper 未生成字幕文件: {srt_path}")
