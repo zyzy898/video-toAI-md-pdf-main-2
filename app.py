@@ -140,6 +140,19 @@ HISTORY_RETENTION_TTL_SECONDS = 72 * 60 * 60
 HISTORY_RETENTION_SCAN_INTERVAL_SECONDS = 60 * 30
 UPLOAD_VIDEO_AUTO_DELETE_TTL_SECONDS = 60 * 60 * 24
 UPLOAD_VIDEO_AUTO_DELETE_SCAN_INTERVAL_SECONDS = 60 * 30
+LONG_VIDEO_PREPROCESS_ENABLED = (
+    str(os.getenv("LONG_VIDEO_PREPROCESS_ENABLED", "1")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+LONG_VIDEO_PREPROCESS_MIN_DURATION_SECONDS = 20 * 60
+LONG_VIDEO_PREPROCESS_MIN_FILE_SIZE_MB = 250
+LONG_VIDEO_PREPROCESS_SLICE_SECONDS = 8 * 60
+LONG_VIDEO_PREPROCESS_MAX_SLICES = 24
+LONG_VIDEO_PREPROCESS_MAX_WIDTH = 960
+LONG_VIDEO_PREPROCESS_TARGET_FPS = 12
+LONG_VIDEO_PREPROCESS_CRF = 30
+LONG_VIDEO_PREPROCESS_PRESET = "veryfast"
+LONG_VIDEO_PREPROCESS_AUDIO_BITRATE = "64k"
 
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -1794,6 +1807,345 @@ def _probe_video_duration_seconds(video_path: Path, ffmpeg_cmd: str = "ffmpeg") 
         return duration if duration > 0 else None
     except Exception:
         return None
+
+
+def _format_ffmpeg_seconds(seconds: float) -> str:
+    safe_seconds = max(0.0, float(seconds or 0.0))
+    text = f"{safe_seconds:.3f}"
+    text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _run_video_transcode_for_analysis(
+    ffmpeg_cmd: str,
+    input_path: Path,
+    output_path: Path,
+    *,
+    start_seconds: float | None = None,
+    duration_seconds: float | None = None,
+) -> Tuple[bool, str]:
+    """
+    转码为更轻量的分析副本（低分辨率/低帧率/低音频码率）。
+    先尝试 libx264，失败后回退 mpeg4，提升兼容性。
+    """
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    vf_expr = (
+        f"scale='min({int(LONG_VIDEO_PREPROCESS_MAX_WIDTH)},iw)':-2:flags=lanczos,"
+        f"fps={max(1, int(LONG_VIDEO_PREPROCESS_TARGET_FPS))}"
+    )
+
+    codec_profiles: List[Tuple[str, List[str]]] = [
+        (
+            "libx264",
+            [
+                "-crf",
+                str(max(18, int(LONG_VIDEO_PREPROCESS_CRF))),
+                "-pix_fmt",
+                "yuv420p",
+            ],
+        ),
+        (
+            "mpeg4",
+            [
+                "-q:v",
+                "5",
+            ],
+        ),
+    ]
+
+    last_error = "unknown ffmpeg error"
+    for video_codec, video_codec_args in codec_profiles:
+        cmd: List[str] = [str(ffmpeg_cmd or "ffmpeg"), "-y"]
+        if start_seconds is not None and float(start_seconds) > 0:
+            cmd.extend(["-ss", _format_ffmpeg_seconds(float(start_seconds))])
+        if duration_seconds is not None and float(duration_seconds) > 0:
+            cmd.extend(["-t", _format_ffmpeg_seconds(float(duration_seconds))])
+        cmd.extend(
+            [
+                "-i",
+                str(input_path),
+                "-vf",
+                vf_expr,
+                "-analyzeduration",
+                "32M",
+                "-probesize",
+                "32M",
+                "-c:v",
+                video_codec,
+                *video_codec_args,
+                "-c:a",
+                "aac",
+                "-b:a",
+                str(LONG_VIDEO_PREPROCESS_AUDIO_BITRATE),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+        )
+        if video_codec == "libx264":
+            cmd.insert(cmd.index("-c:a"), "-preset")
+            cmd.insert(cmd.index("-c:a"), str(LONG_VIDEO_PREPROCESS_PRESET))
+
+        try:
+            result = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="ignore",
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            continue
+
+        if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            return True, ""
+
+        stderr_tail = (result.stderr or "").strip()[-300:]
+        last_error = f"codec={video_codec}, rc={result.returncode}, stderr={stderr_tail}"
+
+    return False, last_error
+
+
+def _build_ffmpeg_concat_file(list_path: Path, video_paths: List[Path]) -> None:
+    lines: List[str] = []
+    for path in video_paths:
+        normalized = str(path.resolve(strict=False)).replace("\\", "/")
+        escaped = normalized.replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+    list_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _concat_preprocessed_video_chunks(
+    ffmpeg_cmd: str, chunk_paths: List[Path], output_path: Path
+) -> Tuple[bool, str]:
+    if not chunk_paths:
+        return False, "empty chunk list"
+
+    concat_list_path = output_path.parent / "concat_list.txt"
+    _build_ffmpeg_concat_file(concat_list_path, chunk_paths)
+
+    copy_cmd = [
+        str(ffmpeg_cmd or "ffmpeg"),
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_list_path),
+        "-c",
+        "copy",
+        str(output_path),
+    ]
+
+    try:
+        result = subprocess.run(
+            copy_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+        if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+            return True, ""
+    except Exception as exc:
+        logger.warning("Preprocess concat(copy) 执行异常: %s", exc)
+
+    # 回退到重编码拼接，兼容更多时间基/容器差异。
+    reencode_cmd = [
+        str(ffmpeg_cmd or "ffmpeg"),
+        "-y",
+        "-f",
+        "concat",
+        "-safe",
+        "0",
+        "-i",
+        str(concat_list_path),
+        "-vf",
+        (
+            f"scale='min({int(LONG_VIDEO_PREPROCESS_MAX_WIDTH)},iw)':-2:flags=lanczos,"
+            f"fps={max(1, int(LONG_VIDEO_PREPROCESS_TARGET_FPS))}"
+        ),
+        "-c:v",
+        "libx264",
+        "-crf",
+        str(max(18, int(LONG_VIDEO_PREPROCESS_CRF))),
+        "-preset",
+        str(LONG_VIDEO_PREPROCESS_PRESET),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        str(LONG_VIDEO_PREPROCESS_AUDIO_BITRATE),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(
+            reencode_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+    except Exception as exc:
+        return False, str(exc)
+
+    if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        return True, ""
+
+    stderr_tail = (result.stderr or "").strip()[-320:]
+    return False, f"concat re-encode failed: rc={result.returncode}, stderr={stderr_tail}"
+
+
+def _prepare_long_video_analysis_source(
+    *,
+    agent: VideoAnalyzerAgent,
+    video_path: Path,
+    output_dir: Path,
+) -> Tuple[Path, Dict[str, Any]]:
+    meta: Dict[str, Any] = {
+        "enabled": False,
+        "used": False,
+        "strategy": "",
+        "reason": "",
+        "duration_seconds": None,
+        "original_size_mb": 0.0,
+        "optimized_size_mb": 0.0,
+        "slice_count": 0,
+        "slice_seconds": int(LONG_VIDEO_PREPROCESS_SLICE_SECONDS),
+    }
+    if not LONG_VIDEO_PREPROCESS_ENABLED:
+        meta["reason"] = "disabled_by_config"
+        return video_path, meta
+
+    try:
+        original_size_bytes = int(video_path.stat().st_size)
+    except OSError:
+        original_size_bytes = 0
+    original_size_mb = float(original_size_bytes) / (1024.0 * 1024.0)
+    meta["original_size_mb"] = round(original_size_mb, 2)
+
+    ffmpeg_cmd = str(getattr(agent, "ffmpeg_cmd", "")).strip() or "ffmpeg"
+    duration_seconds = _probe_video_duration_seconds(video_path, ffmpeg_cmd=ffmpeg_cmd)
+    if duration_seconds is not None:
+        meta["duration_seconds"] = round(float(duration_seconds), 2)
+
+    should_preprocess_by_duration = (
+        duration_seconds is not None
+        and float(duration_seconds) >= float(LONG_VIDEO_PREPROCESS_MIN_DURATION_SECONDS)
+    )
+    should_preprocess_by_size = (
+        original_size_mb >= float(LONG_VIDEO_PREPROCESS_MIN_FILE_SIZE_MB)
+    )
+    if not should_preprocess_by_duration and not should_preprocess_by_size:
+        meta["reason"] = "below_threshold"
+        return video_path, meta
+
+    preprocess_dir = output_dir / ".analysis_proxy"
+    preprocess_dir.mkdir(parents=True, exist_ok=True)
+    final_proxy_path = preprocess_dir / video_path.name
+    meta["enabled"] = True
+
+    slice_seconds = max(120, int(LONG_VIDEO_PREPROCESS_SLICE_SECONDS))
+    max_slices = max(1, int(LONG_VIDEO_PREPROCESS_MAX_SLICES))
+
+    # 长视频优先切片后压缩，降低单次转码压力并提升失败可恢复性。
+    if duration_seconds is not None and float(duration_seconds) > float(slice_seconds):
+        total_slices = int((float(duration_seconds) + float(slice_seconds) - 1) // float(slice_seconds))
+        if total_slices > max_slices:
+            slice_seconds = max(slice_seconds, int(float(duration_seconds) // float(max_slices)) + 1)
+            total_slices = int((float(duration_seconds) + float(slice_seconds) - 1) // float(slice_seconds))
+
+        chunk_paths: List[Path] = []
+        for idx in range(total_slices):
+            start_second = float(idx * slice_seconds)
+            if duration_seconds is not None and start_second >= float(duration_seconds):
+                break
+            clip_duration = float(slice_seconds)
+            if duration_seconds is not None:
+                clip_duration = max(1.0, min(clip_duration, float(duration_seconds) - start_second))
+
+            chunk_output = preprocess_dir / f"chunk_{idx:03d}.mp4"
+            ok, err_text = _run_video_transcode_for_analysis(
+                ffmpeg_cmd=ffmpeg_cmd,
+                input_path=video_path,
+                output_path=chunk_output,
+                start_seconds=start_second,
+                duration_seconds=clip_duration,
+            )
+            if not ok:
+                logger.warning(
+                    "长视频切片转码失败，回退原视频: index=%s start=%ss duration=%ss err=%s",
+                    idx,
+                    _format_ffmpeg_seconds(start_second),
+                    _format_ffmpeg_seconds(clip_duration),
+                    err_text,
+                )
+                meta["reason"] = f"slice_transcode_failed:{idx}"
+                return video_path, meta
+            chunk_paths.append(chunk_output)
+
+        if not chunk_paths:
+            meta["reason"] = "slice_generation_empty"
+            return video_path, meta
+
+        if len(chunk_paths) == 1:
+            shutil.copy2(chunk_paths[0], final_proxy_path)
+            concat_ok, concat_err = True, ""
+        else:
+            concat_ok, concat_err = _concat_preprocessed_video_chunks(
+                ffmpeg_cmd=ffmpeg_cmd,
+                chunk_paths=chunk_paths,
+                output_path=final_proxy_path,
+            )
+        if not concat_ok:
+            logger.warning("长视频切片拼接失败，回退原视频: %s", concat_err)
+            meta["reason"] = "slice_concat_failed"
+            return video_path, meta
+
+        meta["strategy"] = "slice_then_compress"
+        meta["slice_count"] = len(chunk_paths)
+        meta["slice_seconds"] = int(slice_seconds)
+    else:
+        ok, err_text = _run_video_transcode_for_analysis(
+            ffmpeg_cmd=ffmpeg_cmd,
+            input_path=video_path,
+            output_path=final_proxy_path,
+        )
+        if not ok:
+            logger.warning("长视频压缩失败，回退原视频: %s", err_text)
+            meta["reason"] = "direct_compress_failed"
+            return video_path, meta
+        meta["strategy"] = "direct_compress"
+        meta["slice_count"] = 1
+
+    if not final_proxy_path.exists():
+        meta["reason"] = "proxy_missing"
+        return video_path, meta
+
+    try:
+        optimized_size_mb = float(final_proxy_path.stat().st_size) / (1024.0 * 1024.0)
+    except OSError:
+        optimized_size_mb = 0.0
+    meta["optimized_size_mb"] = round(optimized_size_mb, 2)
+    meta["used"] = True
+    meta["reason"] = "ok"
+    return final_proxy_path, meta
 
 
 def _build_risk_timestamps(
@@ -3803,6 +4155,25 @@ class VideoProcessingService:
         if not video_dest.exists():
             shutil.copy2(video_path, video_dest)
 
+        report("prepare", "正在评估长视频预处理策略...")
+        analysis_video_path, analysis_preprocess_meta = _prepare_long_video_analysis_source(
+            agent=agent,
+            video_path=video_path,
+            output_dir=output_dir,
+        )
+        analysis_subtitle_cache_identity: str | None = video_fingerprint or None
+        if analysis_video_path != video_path and video_fingerprint:
+            analysis_subtitle_cache_identity = f"{video_fingerprint}:analysis_proxy"
+        if analysis_preprocess_meta.get("used"):
+            report(
+                "prepare",
+                (
+                    "长视频已完成切片/压缩预处理，正在使用优化副本继续分析"
+                    if str(analysis_preprocess_meta.get("strategy", "")).strip() == "slice_then_compress"
+                    else "长视频已完成压缩预处理，正在使用优化副本继续分析"
+                ),
+            )
+
         srt_path: str | None = None
         steps: List[Dict[str, Any]] = []
         analysis_error = ""
@@ -3816,9 +4187,9 @@ class VideoProcessingService:
             report("subtitle", "\u6b63\u5728\u751f\u6210\u5b57\u5e55...")
             try:
                 srt_path = agent.generate_subtitles(
-                    str(video_path),
+                    str(analysis_video_path),
                     str(output_dir),
-                    cache_identity=video_fingerprint or None,
+                    cache_identity=analysis_subtitle_cache_identity,
                 )
             except Exception as exc:
                 analysis_error = f"字幕生成失败: {str(exc)}"
@@ -3837,9 +4208,9 @@ class VideoProcessingService:
             report("subtitle", "\u6b63\u5728\u5c1d\u8bd5\u751f\u6210\u5b57\u5e55...")
             try:
                 srt_path = agent.generate_subtitles(
-                    str(video_path),
+                    str(analysis_video_path),
                     str(output_dir),
-                    cache_identity=video_fingerprint or None,
+                    cache_identity=analysis_subtitle_cache_identity,
                 )
             except Exception as exc:
                 logger.warning("Whisper 字幕生成失败，继续视频分析模式: %s", exc)
@@ -3848,7 +4219,7 @@ class VideoProcessingService:
             if not summary_only:
                 report("analysis", "\u6b63\u5728\u5206\u6790\u89c6\u9891\u753b\u9762...")
                 try:
-                    steps = _run_async(agent.analyze_video(str(video_path), fps))
+                    steps = _run_async(agent.analyze_video(str(analysis_video_path), fps))
                 except Exception as exc:
                     analysis_error = f"视频步骤识别失败: {str(exc)}"
                     logger.warning("视频步骤识别失败，切换候选内容生成: %s", exc)
@@ -3886,10 +4257,10 @@ class VideoProcessingService:
             report("analysis", "\u672a\u8bc6\u522b\u5230\u6807\u51c6\u6b65\u9aa4\uff0c\u6b63\u5728\u751f\u6210\u5019\u9009\u5185\u5bb9...")
             steps, fallback_meta, fallback_srt_path = _build_fallback_steps_when_empty(
                 agent=agent,
-                video_path=video_path,
+                video_path=analysis_video_path,
                 output_dir=output_dir,
                 srt_path=srt_path,
-                subtitle_cache_identity=video_fingerprint,
+                subtitle_cache_identity=analysis_subtitle_cache_identity or "",
                 reason=analysis_error,
             )
             if fallback_srt_path and not srt_path:
@@ -3982,6 +4353,10 @@ class VideoProcessingService:
         if isinstance(result_meta, dict):
             normalized_meta.update({k: v for k, v in result_meta.items() if v not in (None, "")})
         result_meta = normalized_meta
+        if isinstance(analysis_preprocess_meta, dict):
+            result_meta["analysis_preprocess"] = {
+                k: v for k, v in analysis_preprocess_meta.items() if v not in ("", None)
+            }
         if analysis_error:
             result_meta["analysis_error"] = _compact_text(analysis_error, 180)
         if has_steps:
@@ -4009,6 +4384,13 @@ class VideoProcessingService:
                 "degrade_reason": str(result_meta.get("degrade_reason", "")).strip(),
                 "content_title": str(result_meta.get("content_title", "")).strip(),
                 "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                "analysis_preprocess_used": bool(analysis_preprocess_meta.get("used", False)),
+                "analysis_preprocess_strategy": str(
+                    analysis_preprocess_meta.get("strategy", "")
+                ).strip(),
+                "analysis_video_path": (
+                    str(analysis_video_path) if analysis_video_path != video_path else ""
+                ),
             }
             save_history(record, history_owner_id)
 
