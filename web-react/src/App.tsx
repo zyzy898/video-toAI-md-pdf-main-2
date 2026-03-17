@@ -33,6 +33,7 @@ const DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_RESUME_KEY_PREFIX = "video-upload-resume-v1";
 const HISTORY_CLIENT_ID_KEY = "video-insights-client-id-v1";
 const HISTORY_CLIENT_ID_HEADER = "X-Client-ID";
+const USER_SETTINGS_STORAGE_KEY_PREFIX = "video-insights-user-settings-v1";
 const ERROR_TOAST_DURATION_MS = 9000;
 const ERROR_GUIDE_DURATION_MS = 5200;
 
@@ -305,6 +306,21 @@ const STAGE_PERCENT: Record<string, number> = {
 
 type ModelPreset = "ark" | "openai" | "deepseek" | "qwen" | "custom";
 
+type PersistedUserSettings = {
+  version?: number;
+  apiKey?: string;
+  modelPreset?: ModelPreset | string;
+  modelName?: string;
+  modelBaseUrl?: string;
+  whisperModel?: string;
+  maxVision?: number;
+  useVideo?: boolean;
+  webSearch?: boolean;
+  fps?: number;
+  summaryOnly?: boolean;
+  updatedAt?: string;
+};
+
 const normalizeModelBaseUrlForSignature = (value: string) =>
   String(value || "").trim().replace(/\/+$/u, "");
 
@@ -339,6 +355,18 @@ const MODEL_PRESETS: Record<Exclude<ModelPreset, "custom">, { label: string; bas
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
   },
 };
+
+const MODEL_PRESET_VALUES: ModelPreset[] = ["ark", "openai", "deepseek", "qwen", "custom"];
+const WHISPER_MODEL_VALUES = new Set(["tiny", "base", "small", "medium", "large"]);
+
+const clampNumber = (value: unknown, fallback: number, min: number, max: number) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+};
+
+const safeString = (value: unknown, maxLength: number, fallback = "") =>
+  typeof value === "string" ? value.slice(0, Math.max(0, maxLength)) : fallback;
 
 type Mode = "" | "upload" | "single" | "batch";
 type FileStatus = "pending" | "processing" | "success" | "failed";
@@ -1081,6 +1109,8 @@ export default function App() {
   const progressVisibleRef = useRef(false);
   const batchFilesRef = useRef<BatchFileItem[]>([]);
   const verifiedModelConfigSignatureRef = useRef("");
+  const userSettingsStorageKeyRef = useRef("");
+  const [userSettingsLoaded, setUserSettingsLoaded] = useState(false);
   const progressPollIntervalMs = mobilePerfMode
     ? PROGRESS_POLL_INTERVAL_MOBILE_MS
     : PROGRESS_POLL_INTERVAL_DESKTOP_MS;
@@ -1093,6 +1123,73 @@ export default function App() {
   useEffect(() => {
     batchFilesRef.current = batchFiles;
   }, [batchFiles]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const clientId = getOrCreateHistoryClientId() || "anonymous";
+    const storageKey = `${USER_SETTINGS_STORAGE_KEY_PREFIX}:${clientId}`;
+    userSettingsStorageKeyRef.current = storageKey;
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as PersistedUserSettings;
+      if (!parsed || typeof parsed !== "object") return;
+
+      const presetText = String(parsed.modelPreset || "").trim().toLowerCase();
+      if (MODEL_PRESET_VALUES.includes(presetText as ModelPreset)) {
+        setModelPreset(presetText as ModelPreset);
+      }
+
+      const whisperText = String(parsed.whisperModel || "").trim().toLowerCase();
+      if (WHISPER_MODEL_VALUES.has(whisperText)) {
+        setWhisperModel(whisperText);
+      }
+
+      setApiKey(safeString(parsed.apiKey, 500, ""));
+      setModelName(safeString(parsed.modelName, 200, ""));
+      setModelBaseUrl(safeString(parsed.modelBaseUrl, 300, "https://ark.cn-beijing.volces.com/api/v3"));
+      setMaxVision(Math.round(clampNumber(parsed.maxVision, 10, MAX_VISION_MIN, MAX_VISION_MAX)));
+      setFps(Number(clampNumber(parsed.fps, 1, FPS_MIN, FPS_MAX).toFixed(1)));
+
+      if (typeof parsed.useVideo === "boolean") setUseVideo(parsed.useVideo);
+      if (typeof parsed.webSearch === "boolean") setWebSearch(parsed.webSearch);
+      if (typeof parsed.summaryOnly === "boolean") setSummaryOnly(parsed.summaryOnly);
+    } catch {
+      // ignore malformed local data
+    } finally {
+      setUserSettingsLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!userSettingsLoaded) return;
+
+    const storageKey =
+      userSettingsStorageKeyRef.current ||
+      `${USER_SETTINGS_STORAGE_KEY_PREFIX}:${getOrCreateHistoryClientId() || "anonymous"}`;
+    userSettingsStorageKeyRef.current = storageKey;
+    const payload: PersistedUserSettings = {
+      version: 1,
+      apiKey: safeString(apiKey, 500, ""),
+      modelPreset,
+      modelName: safeString(modelName, 200, ""),
+      modelBaseUrl: safeString(modelBaseUrl, 300, ""),
+      whisperModel,
+      maxVision: Math.round(clampNumber(maxVision, 10, MAX_VISION_MIN, MAX_VISION_MAX)),
+      useVideo: Boolean(useVideo),
+      webSearch: Boolean(webSearch),
+      fps: Number(clampNumber(fps, 1, FPS_MIN, FPS_MAX).toFixed(1)),
+      summaryOnly: Boolean(summaryOnly),
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(payload));
+    } catch {
+      // ignore storage write failure
+    }
+  }, [apiKey, fps, maxVision, modelBaseUrl, modelName, modelPreset, summaryOnly, useVideo, userSettingsLoaded, webSearch, whisperModel]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
