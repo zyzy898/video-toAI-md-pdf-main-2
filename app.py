@@ -11,6 +11,7 @@ import subprocess
 import time
 import traceback
 import zipfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -189,6 +190,7 @@ VIDEO_SEGMENT_CROP_REQUIRED_MIN_SIZE_MB = 500.0
 VIDEO_SEGMENT_BATCH_STANDARD_RECOMMENDED_MAX_FILES = 5
 VIDEO_SEGMENT_BATCH_STANDARD_RECOMMENDED_MAX_TOTAL_DURATION_SECONDS = 60 * 60
 VIDEO_SEGMENT_BATCH_LONG_MAX_FILES = 2
+BATCH_ANALYZE_MAX_WORKERS = max(1, min(16, _env_int("BATCH_ANALYZE_MAX_WORKERS", 2)))
 
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -200,21 +202,9 @@ logger = logging.getLogger(__name__)
 history_lock = RLock()
 upload_session_lock = RLock()
 batch_progress_lock = Lock()
-batch_progress: Dict[str, Any] = {
-    "total": 0,
-    "current": 0,
-    "status": "idle",
-    "current_file": "",
-    "stage": "idle",
-    "message": "",
-}
+batch_progress_by_owner: Dict[str, Dict[str, Dict[str, Any]]] = {}
 single_progress_lock = Lock()
-single_progress: Dict[str, Any] = {
-    "status": "idle",
-    "current_file": "",
-    "stage": "idle",
-    "message": "",
-}
+single_progress_by_owner: Dict[str, Dict[str, Dict[str, Any]]] = {}
 upload_memory_buffers: Dict[str, Dict[int, bytes]] = {}
 upload_memory_reserved_bytes: Dict[str, int] = {}
 upload_memory_reserved_total_bytes = 0
@@ -288,33 +278,176 @@ class RiskFallbackEnvService:
 
 
 class ProgressStateService:
+    DEFAULT_BATCH_STATE: Dict[str, Any] = {
+        "task_id": "",
+        "total": 0,
+        "current": 0,
+        "status": "idle",
+        "current_file": "",
+        "stage": "idle",
+        "message": "",
+        "updated_at": "",
+        "updated_at_ts": 0.0,
+    }
+    DEFAULT_SINGLE_STATE: Dict[str, Any] = {
+        "task_id": "",
+        "status": "idle",
+        "current_file": "",
+        "stage": "idle",
+        "message": "",
+        "updated_at": "",
+        "updated_at_ts": 0.0,
+    }
+
     def __init__(
         self,
-        batch_state: Dict[str, Any],
+        batch_state_map: Dict[str, Dict[str, Dict[str, Any]]],
         batch_lock_obj: Lock,
-        single_state: Dict[str, Any],
+        single_state_map: Dict[str, Dict[str, Dict[str, Any]]],
         single_lock_obj: Lock,
+        owner_pattern: re.Pattern[str],
+        owner_max_len: int,
+        max_tasks_per_owner: int = 100,
     ):
-        self.batch_state = batch_state
+        self.batch_state_map = batch_state_map
         self.batch_lock = batch_lock_obj
-        self.single_state = single_state
+        self.single_state_map = single_state_map
         self.single_lock = single_lock_obj
+        self.owner_pattern = owner_pattern
+        self.owner_max_len = max(1, int(owner_max_len))
+        self.task_pattern = re.compile(r"[^A-Za-z0-9._-]")
+        self.max_tasks_per_owner = max(10, min(500, int(max_tasks_per_owner)))
 
-    def update_batch(self, **kwargs: Any) -> None:
+    def _normalize_owner(self, raw_owner: Any) -> str:
+        owner = str(raw_owner or "").strip()
+        if not owner:
+            return ""
+        owner = self.owner_pattern.sub("", owner)
+        if len(owner) > self.owner_max_len:
+            owner = owner[: self.owner_max_len]
+        return owner
+
+    def _normalize_task_id(self, raw_task_id: Any) -> str:
+        task_id = str(raw_task_id or "").strip()
+        if not task_id:
+            return ""
+        task_id = self.task_pattern.sub("", task_id)
+        if len(task_id) > 120:
+            task_id = task_id[:120]
+        return task_id
+
+    def resolve_task_id(self, raw_task_id: Any) -> str:
+        task_id = self._normalize_task_id(raw_task_id)
+        return task_id or uuid4().hex
+
+    def _new_batch_state(self) -> Dict[str, Any]:
+        return dict(self.DEFAULT_BATCH_STATE)
+
+    def _new_single_state(self) -> Dict[str, Any]:
+        return dict(self.DEFAULT_SINGLE_STATE)
+
+    def _trim_owner_tasks(self, owner_tasks: Dict[str, Dict[str, Any]]) -> None:
+        if len(owner_tasks) <= self.max_tasks_per_owner:
+            return
+
+        def _sort_key(item: Tuple[str, Dict[str, Any]]) -> float:
+            state = item[1]
+            try:
+                return float(state.get("updated_at_ts", 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        sorted_items = sorted(owner_tasks.items(), key=_sort_key, reverse=True)
+        owner_tasks.clear()
+        for task_id, state in sorted_items[: self.max_tasks_per_owner]:
+            owner_tasks[task_id] = state
+
+    def _select_latest_state(
+        self,
+        owner_tasks: Dict[str, Dict[str, Any]],
+        default_state: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        if not owner_tasks:
+            return default_state
+
+        def _state_ts(state: Dict[str, Any]) -> float:
+            try:
+                return float(state.get("updated_at_ts", 0.0))
+            except (TypeError, ValueError):
+                return 0.0
+
+        latest = max(owner_tasks.values(), key=_state_ts)
+        payload = dict(default_state)
+        payload.update(latest)
+        return payload
+
+    def update_batch(self, owner_id: str, task_id: str, **kwargs: Any) -> None:
+        owner = self._normalize_owner(owner_id)
+        if not owner:
+            return
+        normalized_task_id = self.resolve_task_id(task_id)
         with self.batch_lock:
-            self.batch_state.update(kwargs)
+            owner_tasks = self.batch_state_map.setdefault(owner, {})
+            state = owner_tasks.setdefault(normalized_task_id, self._new_batch_state())
+            state.update(kwargs)
+            state["task_id"] = normalized_task_id
+            state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            state["updated_at_ts"] = time.time()
+            owner_tasks[normalized_task_id] = state
+            self._trim_owner_tasks(owner_tasks)
 
-    def update_single(self, **kwargs: Any) -> None:
+    def update_single(self, owner_id: str, task_id: str, **kwargs: Any) -> None:
+        owner = self._normalize_owner(owner_id)
+        if not owner:
+            return
+        normalized_task_id = self.resolve_task_id(task_id)
         with self.single_lock:
-            self.single_state.update(kwargs)
+            owner_tasks = self.single_state_map.setdefault(owner, {})
+            state = owner_tasks.setdefault(normalized_task_id, self._new_single_state())
+            state.update(kwargs)
+            state["task_id"] = normalized_task_id
+            state["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            state["updated_at_ts"] = time.time()
+            owner_tasks[normalized_task_id] = state
+            self._trim_owner_tasks(owner_tasks)
 
-    def get_batch_snapshot(self) -> Dict[str, Any]:
+    def get_batch_snapshot(self, owner_id: str, task_id: str = "") -> Dict[str, Any]:
+        owner = self._normalize_owner(owner_id)
+        requested_task_id = self._normalize_task_id(task_id)
+        if not owner:
+            payload = self._new_batch_state()
+            payload["task_id"] = requested_task_id
+            return payload
         with self.batch_lock:
-            return dict(self.batch_state)
+            owner_tasks = self.batch_state_map.get(owner, {})
+            if requested_task_id:
+                state = owner_tasks.get(requested_task_id)
+                payload = self._new_batch_state()
+                if state is None:
+                    payload["task_id"] = requested_task_id
+                    return payload
+                payload.update(state)
+                return payload
+            return self._select_latest_state(owner_tasks, self._new_batch_state())
 
-    def get_single_snapshot(self) -> Dict[str, Any]:
+    def get_single_snapshot(self, owner_id: str, task_id: str = "") -> Dict[str, Any]:
+        owner = self._normalize_owner(owner_id)
+        requested_task_id = self._normalize_task_id(task_id)
+        if not owner:
+            payload = self._new_single_state()
+            payload["task_id"] = requested_task_id
+            return payload
         with self.single_lock:
-            return dict(self.single_state)
+            owner_tasks = self.single_state_map.get(owner, {})
+            if requested_task_id:
+                state = owner_tasks.get(requested_task_id)
+                payload = self._new_single_state()
+                if state is None:
+                    payload["task_id"] = requested_task_id
+                    return payload
+                payload.update(state)
+                return payload
+            return self._select_latest_state(owner_tasks, self._new_single_state())
 
 
 risk_fallback_env_service = RiskFallbackEnvService(
@@ -325,10 +458,12 @@ risk_fallback_env_service = RiskFallbackEnvService(
     logger_obj=logger,
 )
 progress_state_service = ProgressStateService(
-    batch_state=batch_progress,
+    batch_state_map=batch_progress_by_owner,
     batch_lock_obj=batch_progress_lock,
-    single_state=single_progress,
+    single_state_map=single_progress_by_owner,
     single_lock_obj=single_progress_lock,
+    owner_pattern=HISTORY_OWNER_PATTERN,
+    owner_max_len=HISTORY_OWNER_MAX_LEN,
 )
 
 
@@ -349,12 +484,16 @@ class ContentPolicyBlockedError(RuntimeError):
         self.risk = risk
 
 
-def _update_batch_progress(**kwargs: Any) -> None:
-    progress_state_service.update_batch(**kwargs)
+def _resolve_progress_task_id(raw_task_id: Any) -> str:
+    return progress_state_service.resolve_task_id(raw_task_id)
 
 
-def _update_single_progress(**kwargs: Any) -> None:
-    progress_state_service.update_single(**kwargs)
+def _update_batch_progress(owner_id: str, task_id: str, **kwargs: Any) -> None:
+    progress_state_service.update_batch(owner_id, task_id, **kwargs)
+
+
+def _update_single_progress(owner_id: str, task_id: str, **kwargs: Any) -> None:
+    progress_state_service.update_single(owner_id, task_id, **kwargs)
 
 
 def allowed_file(filename: str) -> bool:
@@ -390,6 +529,21 @@ def _safe_float(
     if max_value is not None:
         number = min(max_value, number)
     return number
+
+
+def _resolve_batch_analyze_workers(
+    *,
+    total_files: int,
+) -> int:
+    workers = _safe_int(
+        _env_text(("BATCH_ANALYZE_MAX_WORKERS", "batch_analyze_max_workers"), str(BATCH_ANALYZE_MAX_WORKERS)),
+        BATCH_ANALYZE_MAX_WORKERS,
+        1,
+        16,
+    )
+    cpu_cap = max(1, int(os.cpu_count() or 1))
+    file_cap = max(1, int(total_files or 1))
+    return max(1, min(workers, cpu_cap, file_cap))
 
 
 class RiskBlocklistService:
@@ -5218,9 +5372,10 @@ def upload_chunk_finalize():
 def analyze():
     data = _json_payload()
     history_owner_id = _ensure_history_owner()
+    task_id = _resolve_progress_task_id(data.get("task_id", data.get("progress_task_id", "")))
     api_key = str(data.get("api_key", "")).strip()
     if not api_key:
-        return jsonify({"error": "请输入 API Key"}), 400
+        return jsonify({"error": "请输入 API Key", "task_id": task_id}), 400
 
     whisper_model, use_video, web_search, max_vision, fps = _normalize_processing_options(
         data
@@ -5231,23 +5386,23 @@ def analyze():
     try:
         video_path = _resolve_upload_filepath(data.get("filepath"))
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        return jsonify({"error": str(exc), "task_id": task_id}), 400
     except FileNotFoundError:
-        return jsonify({"error": "文件不存在"}), 400
+        return jsonify({"error": "文件不存在", "task_id": task_id}), 400
 
     segment_policy = _build_video_segment_policy(video_path)
     if bool(segment_policy.get("requires_trim")):
-        return (
-            jsonify(
-                _build_segment_policy_reject_payload(
-                    segment_policy,
-                    code="video_segment_trim_required",
-                    error_message=(
-                        "当前视频属于裁剪优先区（超长或超大文件），"
-                        "请先裁剪后再分析。"
-                    ),
-                )
+        reject_payload = _build_segment_policy_reject_payload(
+            segment_policy,
+            code="video_segment_trim_required",
+            error_message=(
+                "当前视频属于裁剪优先区（超长或超大文件），"
+                "请先裁剪后再分析。"
             ),
+        )
+        reject_payload["task_id"] = task_id
+        return (
+            jsonify(reject_payload),
             400,
         )
 
@@ -5267,6 +5422,8 @@ def analyze():
 
     try:
         _update_single_progress(
+            owner_id=history_owner_id,
+            task_id=task_id,
             status="processing",
             current_file=video_path.name,
             stage="prepare",
@@ -5275,6 +5432,8 @@ def analyze():
 
         def _single_progress_callback(stage: str, message: str) -> None:
             _update_single_progress(
+                owner_id=history_owner_id,
+                task_id=task_id,
                 status="processing",
                 current_file=video_path.name,
                 stage=stage,
@@ -5299,6 +5458,8 @@ def analyze():
         if segment_guardrails:
             result_meta["segment_guardrails"] = segment_guardrails
         _update_single_progress(
+            owner_id=history_owner_id,
+            task_id=task_id,
             status="completed",
             stage="done",
             message=(
@@ -5324,6 +5485,7 @@ def analyze():
                 "key_points": result_meta.get("key_points", []),
                 "timeline_points": result_meta.get("timeline_points", []),
                 "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                "task_id": task_id,
                 "segment_policy": segment_policy,
                 "segment_guardrails": segment_guardrails,
                 "effective_options": {
@@ -5336,6 +5498,8 @@ def analyze():
         )
     except ContentPolicyBlockedError as exc:
         _update_single_progress(
+            owner_id=history_owner_id,
+            task_id=task_id,
             status="failed",
             stage="moderation",
             message=str(exc),
@@ -5351,6 +5515,7 @@ def analyze():
                     "quality_score": 0.0,
                     "degrade_reason": "content_policy_blocked",
                     "blocked_notice": blocked_notice,
+                    "task_id": task_id,
                 }
             ),
             403,
@@ -5360,11 +5525,13 @@ def analyze():
             exc, default_status=500
         )
         _update_single_progress(
+            owner_id=history_owner_id,
+            task_id=task_id,
             status="failed",
             stage="failed",
             message=error_message,
         )
-        payload: Dict[str, Any] = {"error": error_message}
+        payload: Dict[str, Any] = {"error": error_message, "task_id": task_id}
         if status_code >= 500 and not normalized:
             payload["trace"] = traceback.format_exc()
         return jsonify(payload), status_code
@@ -5701,25 +5868,30 @@ def upload_batch_files():
 
 @app.route("/batch_progress", methods=["GET"])
 def get_batch_progress():
-    return jsonify(progress_state_service.get_batch_snapshot())
+    owner_id = _ensure_history_owner()
+    task_id = str(request.args.get("task_id", "")).strip()
+    return jsonify(progress_state_service.get_batch_snapshot(owner_id, task_id=task_id))
 
 
 @app.route("/single_progress", methods=["GET"])
 def get_single_progress():
-    return jsonify(progress_state_service.get_single_snapshot())
+    owner_id = _ensure_history_owner()
+    task_id = str(request.args.get("task_id", "")).strip()
+    return jsonify(progress_state_service.get_single_snapshot(owner_id, task_id=task_id))
 
 
 @app.route("/analyze_batch", methods=["POST"])
 def analyze_batch():
     data = _json_payload()
     history_owner_id = _ensure_history_owner()
+    task_id = _resolve_progress_task_id(data.get("task_id", data.get("progress_task_id", "")))
     api_key = str(data.get("api_key", "")).strip()
     if not api_key:
-        return jsonify({"error": "请输入 API Key"}), 400
+        return jsonify({"error": "请输入 API Key", "task_id": task_id}), 400
 
     raw_filepaths = data.get("filepaths", [])
     if not isinstance(raw_filepaths, list) or not raw_filepaths:
-        return jsonify({"error": "没有视频文件"}), 400
+        return jsonify({"error": "没有视频文件", "task_id": task_id}), 400
 
     whisper_model, use_video, web_search, max_vision, fps = _normalize_processing_options(
         data
@@ -5732,9 +5904,9 @@ def analyze_batch():
         try:
             filepaths.append(_resolve_upload_filepath(raw_path))
         except ValueError as exc:
-            return jsonify({"error": str(exc)}), 400
+            return jsonify({"error": str(exc), "task_id": task_id}), 400
         except FileNotFoundError:
-            return jsonify({"error": f"文件不存在: {raw_path}"}), 400
+            return jsonify({"error": f"文件不存在: {raw_path}", "task_id": task_id}), 400
 
     file_segment_policies: List[Dict[str, Any]] = []
     file_segment_policy_map: Dict[str, Dict[str, Any]] = {}
@@ -5745,133 +5917,118 @@ def analyze_batch():
 
     batch_segment_eval = _evaluate_batch_segment_policy(file_segment_policies)
     if not bool(batch_segment_eval.get("allowed", False)):
+        reject_payload = {
+            "error": str(batch_segment_eval.get("error", "")).strip() or "批量任务不符合分段策略",
+            "code": str(batch_segment_eval.get("code", "")).strip()
+            or "video_segment_batch_not_allowed",
+            "batch_segment_policy": batch_segment_eval,
+            "file_segment_policies": file_segment_policies,
+            "task_id": task_id,
+        }
         return (
-            jsonify(
-                {
-                    "error": str(batch_segment_eval.get("error", "")).strip() or "批量任务不符合分段策略",
-                    "code": str(batch_segment_eval.get("code", "")).strip()
-                    or "video_segment_batch_not_allowed",
-                    "batch_segment_policy": batch_segment_eval,
-                    "file_segment_policies": file_segment_policies,
-                }
-            ),
+            jsonify(reject_payload),
             400,
         )
     batch_policy_warnings = list(batch_segment_eval.get("warnings", []) or [])
+    batch_workers = _resolve_batch_analyze_workers(
+        total_files=len(filepaths),
+    )
 
     _update_batch_progress(
+        owner_id=history_owner_id,
+        task_id=task_id,
         total=len(filepaths),
         current=0,
         status="processing",
         current_file="",
         stage="prepare",
         message=(
-            "批量任务已启动，正在等待处理..."
+            f"批量任务已启动（并行度={batch_workers}），正在等待处理..."
             if not batch_policy_warnings
-            else f"批量任务已启动（策略提醒：{batch_policy_warnings[0]}）"
+            else f"批量任务已启动（并行度={batch_workers}，策略提醒：{batch_policy_warnings[0]}）"
         ),
     )
 
-    results = []
-    try:
-        for idx, filepath in enumerate(filepaths, start=1):
-            filepath_key = str(filepath.resolve(strict=False))
-            segment_policy = file_segment_policy_map.get(filepath_key) or _build_video_segment_policy(
-                filepath
+    total_files = len(filepaths)
+    results_by_index: Dict[int, Dict[str, Any]] = {}
+    completed_counter = {"value": 0}
+    completed_counter_lock = Lock()
+
+    def _get_completed_count() -> int:
+        with completed_counter_lock:
+            return int(completed_counter["value"])
+
+    def _mark_task_completed() -> int:
+        with completed_counter_lock:
+            completed_counter["value"] = int(completed_counter["value"]) + 1
+            return int(completed_counter["value"])
+
+    def _analyze_single_batch_file(idx: int, filepath: Path) -> Tuple[int, Dict[str, Any], str, str]:
+        filepath_key = str(filepath.resolve(strict=False))
+        segment_policy = file_segment_policy_map.get(filepath_key) or _build_video_segment_policy(
+            filepath
+        )
+        (
+            effective_use_video,
+            effective_web_search,
+            effective_max_vision,
+            effective_summary_only,
+            segment_guardrails,
+        ) = _apply_video_segment_processing_guardrails(
+            segment_policy,
+            use_video=use_video,
+            web_search=web_search,
+            max_vision=max_vision,
+            summary_only=summary_only,
+        )
+
+        _update_batch_progress(
+            owner_id=history_owner_id,
+            task_id=task_id,
+            current=_get_completed_count(),
+            current_file=filepath.name,
+            stage="prepare",
+            message=f"正在准备处理: {filepath.name}",
+        )
+
+        def _batch_progress_callback(stage: str, message: str, *, _name=filepath.name) -> None:
+            _update_batch_progress(
+                owner_id=history_owner_id,
+                task_id=task_id,
+                current=_get_completed_count(),
+                current_file=_name,
+                stage=stage,
+                message=message,
             )
-            (
+
+        try:
+            steps, md_content, output_dir, output_pdf, has_steps, result_meta = process_video(
+                filepath,
+                api_key,
+                whisper_model,
+                model_name,
+                model_base_url,
                 effective_use_video,
                 effective_web_search,
                 effective_max_vision,
-                effective_summary_only,
-                segment_guardrails,
-            ) = _apply_video_segment_processing_guardrails(
-                segment_policy,
-                use_video=use_video,
-                web_search=web_search,
-                max_vision=max_vision,
-                summary_only=summary_only,
+                fps,
+                summary_only=effective_summary_only,
+                history_owner_id=history_owner_id,
+                progress_callback=_batch_progress_callback,
             )
+            result_meta["segment_policy"] = segment_policy
+            if segment_guardrails:
+                result_meta["segment_guardrails"] = segment_guardrails
 
-            _update_batch_progress(
-                current=idx,
-                current_file=filepath.name,
-                stage="prepare",
-                message=f"\u6b63\u5728\u51c6\u5907\u5904\u7406: {filepath.name}",
-            )
-
-            def _batch_progress_callback(stage: str, message: str, *, _idx=idx, _name=filepath.name):
-                _update_batch_progress(
-                    current=_idx,
-                    current_file=_name,
-                    stage=stage,
-                    message=message,
-                )
-
-            try:
-                steps, md_content, output_dir, output_pdf, has_steps, result_meta = process_video(
-                    filepath,
-                    api_key,
-                    whisper_model,
-                    model_name,
-                    model_base_url,
-                    effective_use_video,
-                    effective_web_search,
-                    effective_max_vision,
-                    fps,
-                    summary_only=effective_summary_only,
-                    history_owner_id=history_owner_id,
-                    progress_callback=_batch_progress_callback,
-                )
-                result_meta["segment_policy"] = segment_policy
-                if segment_guardrails:
-                    result_meta["segment_guardrails"] = segment_guardrails
-
-                if not has_steps:
-                    _update_batch_progress(
-                        current=idx,
-                        current_file=filepath.name,
-                        stage="failed",
-                        message="\u672a\u80fd\u8bc6\u522b\u5230\u64cd\u4f5c\u6b65\u9aa4",
-                    )
-                    results.append(
-                        {
-                            "index": idx,
-                            "filename": filepath.name,
-                            "success": False,
-                            "error": "未生成有效分析内容",
-                            "result_mode": str(result_meta.get("result_mode", "empty")),
-                            "fallback_used": bool(result_meta.get("fallback_used", False)),
-                            "analysis_note": str(result_meta.get("analysis_note", "")).strip(),
-                            "quality_score": _safe_float(result_meta.get("quality_score", 0.0), 0.0, 0.0, 1.0),
-                            "degrade_reason": str(result_meta.get("degrade_reason", "")).strip(),
-                            "content_title": str(result_meta.get("content_title", "")).strip(),
-                            "key_points": result_meta.get("key_points", []),
-                            "timeline_points": result_meta.get("timeline_points", []),
-                            "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
-                            "segment_policy": segment_policy,
-                            "segment_guardrails": segment_guardrails,
-                            "effective_options": {
-                                "use_video": effective_use_video,
-                                "web_search": effective_web_search,
-                                "max_vision": effective_max_vision,
-                                "summary_only": effective_summary_only,
-                            },
-                        }
-                    )
-                    continue
-
-                results.append(
+            if not has_steps:
+                return (
+                    idx,
                     {
                         "index": idx,
                         "filename": filepath.name,
-                        "success": True,
-                        "steps_count": len(steps) if steps else 0,
-                        "output_dir": output_dir,
-                        "pdf_path": output_pdf,
-                        "markdown": md_content,
-                        "steps": steps,
-                        "result_mode": str(result_meta.get("result_mode", "steps")),
+                        "success": False,
+                        "error": "未生成有效分析内容",
+                        "result_mode": str(result_meta.get("result_mode", "empty")),
                         "fallback_used": bool(result_meta.get("fallback_used", False)),
                         "analysis_note": str(result_meta.get("analysis_note", "")).strip(),
                         "quality_score": _safe_float(result_meta.get("quality_score", 0.0), 0.0, 0.0, 1.0),
@@ -5888,66 +6045,125 @@ def analyze_batch():
                             "max_vision": effective_max_vision,
                             "summary_only": effective_summary_only,
                         },
-                    }
+                    },
+                    "failed",
+                    "未能识别到操作步骤",
                 )
-                _update_batch_progress(
-                    current=idx,
-                    current_file=filepath.name,
-                    stage="done",
-                    message=(
-                        f"{filepath.name} \u5206\u6790\u5b8c\u6210\uff08\u5019\u9009\u5185\u5bb9\uff09"
-                        if result_meta.get("fallback_used")
-                        else f"{filepath.name} \u5206\u6790\u5b8c\u6210"
-                    ),
-                )
-            except ContentPolicyBlockedError as exc:
-                _update_batch_progress(
-                    current=idx,
-                    current_file=filepath.name,
-                    stage="moderation",
-                    message=str(exc),
-                )
-                blocked_notice = _build_blocked_notice_payload(exc.risk)
-                results.append(
-                    {
-                        "index": idx,
-                        "filename": filepath.name,
-                        "success": False,
-                        "error": str(exc),
-                        "code": "content_policy_violation",
-                        "risk": exc.risk,
-                        "result_mode": "blocked_notice",
-                        "quality_score": 0.0,
-                        "degrade_reason": "content_policy_blocked",
-                        "blocked_notice": blocked_notice,
-                        "segment_policy": segment_policy,
-                    }
-                )
-            except Exception as exc:
-                error_msg, _, _ = _normalize_provider_error(exc, default_status=500)
-                _update_batch_progress(
-                    current=idx,
-                    current_file=filepath.name,
-                    stage="failed",
-                    message=error_msg,
-                )
-                results.append(
-                    {
+
+            return (
+                idx,
+                {
+                    "index": idx,
+                    "filename": filepath.name,
+                    "success": True,
+                    "steps_count": len(steps) if steps else 0,
+                    "output_dir": output_dir,
+                    "pdf_path": output_pdf,
+                    "markdown": md_content,
+                    "steps": steps,
+                    "result_mode": str(result_meta.get("result_mode", "steps")),
+                    "fallback_used": bool(result_meta.get("fallback_used", False)),
+                    "analysis_note": str(result_meta.get("analysis_note", "")).strip(),
+                    "quality_score": _safe_float(result_meta.get("quality_score", 0.0), 0.0, 0.0, 1.0),
+                    "degrade_reason": str(result_meta.get("degrade_reason", "")).strip(),
+                    "content_title": str(result_meta.get("content_title", "")).strip(),
+                    "key_points": result_meta.get("key_points", []),
+                    "timeline_points": result_meta.get("timeline_points", []),
+                    "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                    "segment_policy": segment_policy,
+                    "segment_guardrails": segment_guardrails,
+                    "effective_options": {
+                        "use_video": effective_use_video,
+                        "web_search": effective_web_search,
+                        "max_vision": effective_max_vision,
+                        "summary_only": effective_summary_only,
+                    },
+                },
+                "done",
+                (
+                    f"{filepath.name} 分析完成（候选内容）"
+                    if result_meta.get("fallback_used")
+                    else f"{filepath.name} 分析完成"
+                ),
+            )
+        except ContentPolicyBlockedError as exc:
+            blocked_notice = _build_blocked_notice_payload(exc.risk)
+            return (
+                idx,
+                {
+                    "index": idx,
+                    "filename": filepath.name,
+                    "success": False,
+                    "error": str(exc),
+                    "code": "content_policy_violation",
+                    "risk": exc.risk,
+                    "result_mode": "blocked_notice",
+                    "quality_score": 0.0,
+                    "degrade_reason": "content_policy_blocked",
+                    "blocked_notice": blocked_notice,
+                    "segment_policy": segment_policy,
+                },
+                "moderation",
+                str(exc),
+            )
+        except Exception as exc:
+            error_msg, _, _ = _normalize_provider_error(exc, default_status=500)
+            return (
+                idx,
+                {
+                    "index": idx,
+                    "filename": filepath.name,
+                    "success": False,
+                    "error": error_msg,
+                    "segment_policy": segment_policy,
+                },
+                "failed",
+                error_msg,
+            )
+
+    try:
+        with ThreadPoolExecutor(max_workers=batch_workers) as executor:
+            future_map = {
+                executor.submit(_analyze_single_batch_file, idx, filepath): (idx, filepath)
+                for idx, filepath in enumerate(filepaths, start=1)
+            }
+            for future in as_completed(future_map):
+                idx, filepath = future_map[future]
+                try:
+                    result_idx, result_payload, final_stage, final_message = future.result()
+                except Exception as exc:
+                    error_msg, _, _ = _normalize_provider_error(exc, default_status=500)
+                    result_idx = idx
+                    result_payload = {
                         "index": idx,
                         "filename": filepath.name,
                         "success": False,
                         "error": error_msg,
-                        "segment_policy": segment_policy,
                     }
+                    final_stage = "failed"
+                    final_message = error_msg
+
+                results_by_index[result_idx] = result_payload
+                completed_count = _mark_task_completed()
+                _update_batch_progress(
+                    owner_id=history_owner_id,
+                    task_id=task_id,
+                    current=completed_count,
+                    current_file=filepath.name,
+                    stage=final_stage,
+                    message=f"已完成 {completed_count}/{total_files}：{final_message}",
                 )
     finally:
         _update_batch_progress(
+            owner_id=history_owner_id,
+            task_id=task_id,
             status="completed",
             current_file="",
             stage="done",
             message="\u6279\u91cf\u5206\u6790\u5df2\u5b8c\u6210",
         )
 
+    results = [results_by_index[idx] for idx in sorted(results_by_index)]
     success_count = sum(1 for r in results if r.get("success"))
     return jsonify(
         {
@@ -5955,6 +6171,8 @@ def analyze_batch():
             "results": results,
             "batch_segment_policy": batch_segment_eval,
             "batch_policy_warnings": batch_policy_warnings,
+            "batch_parallel_workers": batch_workers,
+            "task_id": task_id,
             "summary": {
                 "total": len(filepaths),
                 "success": success_count,
