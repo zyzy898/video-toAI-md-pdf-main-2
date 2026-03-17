@@ -6004,8 +6004,32 @@ def download_batch_zip():
 
 if __name__ == "__main__":
     debug_mode = os.getenv("FLASK_DEBUG", "").strip().lower() in {"1", "true", "yes"}
+    host = str(os.getenv("HOST", "127.0.0.1")).strip() or "127.0.0.1"
+    port = _safe_int(os.getenv("PORT"), 5000, 1, 65535)
     if (not debug_mode) or os.getenv("WERKZEUG_RUN_MAIN", "").strip().lower() in {"1", "true"}:
         _start_upload_video_auto_cleanup()
         _start_history_retention_cleanup()
-    app.run(debug=debug_mode, port=5000)
+    if debug_mode:
+        app.run(debug=True, host=host, port=port)
+    else:
+        from waitress import serve
+
+        waitress_threads = _safe_int(os.getenv("WAITRESS_THREADS"), 4, 1, 64)
+        waitress_connection_limit = _safe_int(
+            os.getenv("WAITRESS_CONNECTION_LIMIT"), 100, 1, 10000
+        )
+        logger.info(
+            "Starting production server with Waitress: host=%s port=%s threads=%s connection_limit=%s",
+            host,
+            port,
+            waitress_threads,
+            waitress_connection_limit,
+        )
+        serve(
+            app,
+            host=host,
+            port=port,
+            threads=waitress_threads,
+            connection_limit=waitress_connection_limit,
+        )
 
