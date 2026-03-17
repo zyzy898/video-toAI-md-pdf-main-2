@@ -14,7 +14,6 @@ import zipfile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor
 from threading import Lock, RLock, Thread
 from typing import Any, Callable, Dict, List, Tuple
 from uuid import uuid4
@@ -38,6 +37,35 @@ UPLOAD_SESSION_ROOT = (UPLOAD_ROOT / ".upload_sessions").resolve()
 app.config["MAX_CONTENT_LENGTH"] = 500 * 1024 * 1024
 app.config["UPLOAD_FOLDER"] = str(UPLOAD_ROOT)
 app.config["OUTPUT_FOLDER"] = str(OUTPUT_ROOT)
+
+
+def _env_int(name: str, default: int) -> int:
+    raw_value = str(os.getenv(name, "")).strip()
+    if not raw_value:
+        return int(default)
+    try:
+        return int(raw_value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _env_text(names: Tuple[str, ...], default: str = "") -> str:
+    for name in names:
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            continue
+        text = str(raw_value).strip()
+        if text:
+            return text
+    return str(default)
+
+
+def _env_bool(names: Tuple[str, ...], default: bool = False) -> bool:
+    raw_value = _env_text(names, "")
+    if not raw_value:
+        return bool(default)
+    return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
 
 ALLOWED_EXTENSIONS = {
     "mp4",
@@ -66,9 +94,9 @@ UPLOAD_IN_MEMORY_MAX_TOTAL_BYTES = 256 * 1024 * 1024
 DEFAULT_MODEL_NAME = "doubao-seed-2-0-pro-260215"
 DEFAULT_MODEL_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_content_plugin"
-RISK_MAX_FRAMES = 6
-RISK_MIN_FRAMES = 3
-RISK_DYNAMIC_MAX_FRAMES = 15
+RISK_MAX_FRAMES = max(1, _env_int("RISK_MAX_FRAMES", 4))
+RISK_MIN_FRAMES = max(1, min(3, RISK_MAX_FRAMES))
+RISK_DYNAMIC_MAX_FRAMES = max(RISK_MAX_FRAMES, _env_int("RISK_DYNAMIC_MAX_FRAMES", 8))
 RISK_FRAME_GROWTH_START_SECONDS = 20
 RISK_FRAME_GROWTH_EVERY_SECONDS = 45
 RISK_BLOCK_THRESHOLD = 0.8
@@ -2802,7 +2830,7 @@ def _build_env_visual_fallback_agent(primary_agent: VideoAnalyzerAgent) -> Video
     try:
         return VideoAnalyzerAgent(
             api_key=api_key,
-            whisper_model="base",
+            whisper_model="tiny",
             model_name=model_name,
             model_base_url=normalized_base_url,
         )
@@ -3149,134 +3177,81 @@ def _run_video_risk_gate(
         fallback["frame_count"] = 0
         return fallback, frame_dir
 
-    secondary_text_executor: ThreadPoolExecutor | None = None
-    secondary_text_future = None
-    prefetched_secondary_text_risk: Dict[str, Any] | None = None
-    prefetched_secondary_loaded = False
-
-    def _get_prefetched_secondary_text_risk() -> Dict[str, Any] | None:
-        nonlocal prefetched_secondary_loaded, prefetched_secondary_text_risk
-        if prefetched_secondary_loaded:
-            return prefetched_secondary_text_risk
-        prefetched_secondary_loaded = True
-        if secondary_text_future is None:
-            return None
-        try:
-            candidate = secondary_text_future.result()
-            if isinstance(candidate, dict):
-                prefetched_secondary_text_risk = dict(candidate)
-        except Exception as exc:
-            logger.warning("Secondary text fallback precompute failed, fallback to sync mode: %s", exc)
-            prefetched_secondary_text_risk = None
-        return prefetched_secondary_text_risk
-
     try:
-        secondary_text_executor = ThreadPoolExecutor(max_workers=1)
-        secondary_text_future = secondary_text_executor.submit(
-            _run_text_fallback_risk_gate,
-            agent,
-            video_path,
-            output_dir,
-            strict_on_insufficient_signal=False,
-            fallback_mode="subtitle_keyword_secondary_gate",
-            subtitle_cache_identity=subtitle_cache_identity,
+        raw = _run_async(_request_risk_decision(agent, frame_paths))
+        normalized = _normalize_risk_result(
+            raw if isinstance(raw, dict) else {}, frame_count=len(frame_paths)
+        )
+        return normalized, frame_dir
+    except Exception as exc:
+        provider_status: int | None = None
+        provider_error = ""
+        reason_code = "TEXT_RISK_MODEL_FALLBACK"
+        reason_suffix = (
+            "视觉风控服务暂不可用，已优先尝试系统级视觉兜底模型，"
+            "兜底模型不可用后自动启用字幕关键词风控兜底。"
         )
 
-        try:
-            raw = _run_async(_request_risk_decision(agent, frame_paths))
-            normalized = _normalize_risk_result(
-                raw if isinstance(raw, dict) else {}, frame_count=len(frame_paths)
+        if _is_image_input_not_supported_error(exc):
+            logger.warning(
+                "Risk gate model does not support image input, trying system env visual fallback first: %s",
+                exc,
             )
-            normalized = _apply_text_secondary_risk_gate_when_visual_available(
-                primary_risk=normalized,
-                agent=agent,
-                video_path=video_path,
-                output_dir=output_dir,
-                text_risk=_get_prefetched_secondary_text_risk(),
-                subtitle_cache_identity=subtitle_cache_identity,
-            )
-            return normalized, frame_dir
-        except Exception as exc:
-            provider_status: int | None = None
-            provider_error = ""
-            reason_code = "TEXT_RISK_MODEL_FALLBACK"
+            provider_error = str(exc or "").strip() or "visual_input_not_supported"
+            reason_code = "TEXT_RISK_FALLBACK"
             reason_suffix = (
-                "视觉风控服务暂不可用，已优先尝试系统级视觉兜底模型，"
+                "主视觉风控模型不支持图片输入，已优先尝试系统级视觉兜底模型，"
                 "兜底模型不可用后自动启用字幕关键词风控兜底。"
             )
-
-            if _is_image_input_not_supported_error(exc):
-                logger.warning(
-                    "Risk gate model does not support image input, trying system env visual fallback first: %s",
-                    exc,
-                )
-                provider_error = str(exc or "").strip() or "visual_input_not_supported"
-                reason_code = "TEXT_RISK_FALLBACK"
+        else:
+            error_message, status_code, _ = _normalize_provider_error(
+                exc, default_status=500
+            )
+            provider_status = status_code
+            provider_error = error_message
+            logger.warning(
+                "Risk gate visual check unavailable, trying system env visual fallback first: status=%s error=%s",
+                status_code,
+                error_message,
+            )
+            if status_code in {400, 401, 403}:
+                reason_code = "TEXT_RISK_VISUAL_MODEL_UNAVAILABLE"
                 reason_suffix = (
-                    "主视觉风控模型不支持图片输入，已优先尝试系统级视觉兜底模型，"
+                    "主视觉风控模型当前不可用（鉴权/配置受限），已优先尝试系统级视觉兜底模型，"
                     "兜底模型不可用后自动启用字幕关键词风控兜底。"
                 )
-            else:
-                error_message, status_code, _ = _normalize_provider_error(
-                    exc, default_status=500
-                )
-                provider_status = status_code
-                provider_error = error_message
-                logger.warning(
-                    "Risk gate visual check unavailable, trying system env visual fallback first: status=%s error=%s",
-                    status_code,
-                    error_message,
-                )
-                if status_code in {400, 401, 403}:
-                    reason_code = "TEXT_RISK_VISUAL_MODEL_UNAVAILABLE"
-                    reason_suffix = (
-                        "主视觉风控模型当前不可用（鉴权/配置受限），已优先尝试系统级视觉兜底模型，"
-                        "兜底模型不可用后自动启用字幕关键词风控兜底。"
-                    )
 
-            env_visual_result, env_visual_error = _try_env_visual_risk_fallback(agent, frame_paths)
-            if env_visual_result is not None:
-                base_reason = str(env_visual_result.get("reason", "")).strip()
-                env_visual_result["reason"] = (
-                    f"{base_reason}（主视觉风控不可用，已自动切换到系统级视觉兜底模型）"
-                    if base_reason
-                    else "主视觉风控不可用，已自动切换到系统级视觉兜底模型。"
-                )
-                env_visual_result["visual_fallback_attempted"] = True
-                if provider_status is not None:
-                    env_visual_result["provider_status"] = provider_status
-                if provider_error:
-                    env_visual_result["provider_error"] = provider_error
-                env_visual_result = _apply_text_secondary_risk_gate_when_visual_available(
-                    primary_risk=env_visual_result,
-                    agent=agent,
-                    video_path=video_path,
-                    output_dir=output_dir,
-                    text_risk=_get_prefetched_secondary_text_risk(),
-                    subtitle_cache_identity=subtitle_cache_identity,
-                )
-                return env_visual_result, frame_dir
+        env_visual_result, env_visual_error = _try_env_visual_risk_fallback(agent, frame_paths)
+        if env_visual_result is not None:
+            base_reason = str(env_visual_result.get("reason", "")).strip()
+            env_visual_result["reason"] = (
+                f"{base_reason}（主视觉风控不可用，已自动切换到系统级视觉兜底模型）"
+                if base_reason
+                else "主视觉风控不可用，已自动切换到系统级视觉兜底模型。"
+            )
+            env_visual_result["visual_fallback_attempted"] = True
+            if provider_status is not None:
+                env_visual_result["provider_status"] = provider_status
+            if provider_error:
+                env_visual_result["provider_error"] = provider_error
+            return env_visual_result, frame_dir
 
-            logger.warning(
-                "System env visual fallback unavailable, switch to subtitle keyword risk fallback: %s",
-                env_visual_error,
-            )
-            fallback = _run_text_fallback_after_visual_unavailable(
-                agent=agent,
-                video_path=video_path,
-                output_dir=output_dir,
-                reason_code=reason_code,
-                reason_suffix=reason_suffix,
-                provider_status=provider_status,
-                provider_error=provider_error,
-                env_visual_error=env_visual_error,
-                prefetched_text_risk=_get_prefetched_secondary_text_risk(),
-                subtitle_cache_identity=subtitle_cache_identity,
-            )
-            return fallback, frame_dir
-    finally:
-        if secondary_text_executor is not None:
-            secondary_text_executor.shutdown(wait=False, cancel_futures=True)
+        logger.warning(
+            "System env visual fallback unavailable, switch to subtitle keyword risk fallback: %s",
+            env_visual_error,
+        )
+        fallback = _run_text_fallback_after_visual_unavailable(
+            agent=agent,
+            video_path=video_path,
+            output_dir=output_dir,
+            reason_code=reason_code,
+            reason_suffix=reason_suffix,
+            provider_status=provider_status,
+            provider_error=provider_error,
+            env_visual_error=env_visual_error,
+            subtitle_cache_identity=subtitle_cache_identity,
+        )
+        return fallback, frame_dir
 
 
 def _reason_code_slug(reason_code: str) -> str:
@@ -3376,7 +3351,7 @@ class UploadRiskService:
         )
         return VideoAnalyzerAgent(
             api_key=risk_api_key,
-            whisper_model="base",
+            whisper_model="tiny",
             model_name=risk_model_name,
             model_base_url=risk_model_base_url,
         )
@@ -3591,13 +3566,31 @@ def _run_upload_pre_risk_check(
 
 
 def _normalize_processing_options(data: Dict[str, Any]) -> Tuple[str, bool, bool, int, float]:
-    whisper_model = str(data.get("whisper_model", "base")).strip().lower() or "base"
+    env_whisper_model = _env_text(("WHISPER_MODE", "whisper_mode"), "base").strip().lower() or "base"
+    if env_whisper_model not in ALLOWED_WHISPER_MODELS:
+        env_whisper_model = "base"
+    raw_whisper_model = str(data.get("whisper_model", data.get("whisper_mode", ""))).strip().lower()
+    whisper_model = raw_whisper_model or env_whisper_model
     if whisper_model not in ALLOWED_WHISPER_MODELS:
-        whisper_model = "base"
+        whisper_model = env_whisper_model
+
+    env_web_search = _env_bool(("WEB_SEARCH", "web_search"), False)
+    env_max_vision = _safe_int(
+        _env_text(("MAX_VISION", "max_vision"), "10"),
+        10,
+        0,
+        MAX_VISION_CALLS,
+    )
 
     use_video = _as_bool(data.get("use_video", False))
-    web_search = _as_bool(data.get("web_search", False))
-    max_vision = _safe_int(data.get("max_vision", 10), 10, 0, MAX_VISION_CALLS)
+    raw_web_search = data.get("web_search")
+    web_search = _as_bool(raw_web_search) if raw_web_search is not None else env_web_search
+    raw_max_vision = data.get("max_vision")
+    max_vision = (
+        _safe_int(raw_max_vision, env_max_vision, 0, MAX_VISION_CALLS)
+        if raw_max_vision not in (None, "")
+        else env_max_vision
+    )
     fps = _safe_float(data.get("fps", 1.0), 1.0, FPS_MIN, FPS_MAX)
     return whisper_model, use_video, web_search, max_vision, fps
 
@@ -4363,8 +4356,14 @@ class VideoProcessingService:
                 cached_risk["hash_sha256"] = video_fingerprint
             risk = cached_risk
         else:
+            risk_agent = VideoAnalyzerAgent(
+                api_key if api_key else None,
+                "tiny",
+                model_name=model_name,
+                model_base_url=model_base_url,
+            )
             risk, risk_frame_dir = _run_video_risk_gate(
-                agent,
+                risk_agent,
                 video_path,
                 output_dir,
                 subtitle_cache_identity=video_fingerprint,
@@ -5474,7 +5473,12 @@ def regenerate_document():
     except FileNotFoundError:
         return jsonify({"error": "输出目录不存在"}), 400
 
-    web_search = _as_bool(data.get("web_search", False))
+    raw_web_search = data.get("web_search")
+    web_search = (
+        _as_bool(raw_web_search)
+        if raw_web_search is not None
+        else _env_bool(("WEB_SEARCH", "web_search"), False)
+    )
     model_name, model_base_url = _normalize_model_options(data)
 
     try:

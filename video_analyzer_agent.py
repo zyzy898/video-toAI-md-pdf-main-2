@@ -719,7 +719,16 @@ class VideoAnalyzerAgent:
             return []
 
         if max_workers is None:
-            max_workers = min(4, os.cpu_count() or 2)
+            raw_screenshot_workers = str(os.getenv("SCREENSHOT_MAX_WORKERS", "")).strip()
+            default_screenshot_workers = 2
+            if raw_screenshot_workers:
+                try:
+                    parsed_workers = int(raw_screenshot_workers)
+                except (TypeError, ValueError):
+                    parsed_workers = default_screenshot_workers
+            else:
+                parsed_workers = default_screenshot_workers
+            max_workers = max(1, min(parsed_workers, os.cpu_count() or 2))
         max_workers = max(1, min(max_workers, len(screenshot_tasks)))
 
         screenshot_paths: List[Path] = []

@@ -1,5 +1,57 @@
 ﻿# updata.md
 
+## v2.0.8 (2026-03-17)
+
+### 本版本目标
+- 降低 4 核 CPU / 8G 内存场景下的风控链路 CPU 峰值。
+- 将关键处理参数统一外置到 `.env`，并明确“请求体优先、缺省回退环境变量”策略。
+- 保持主分析能力不降级，同时优化风控与截图阶段的资源占用。
+
+### 已修改功能
+1. 风控链路取消“默认并行预跑字幕兜底”
+- `_run_video_risk_gate(...)` 移除默认 `ThreadPoolExecutor` 预跑文本兜底逻辑。
+- 当前策略：主视觉风控成功则直接返回；仅当视觉风控失败/不可用且系统视觉兜底也不可用时，才触发文本兜底。
+- 结果：减少一次高概率的额外 Whisper 调用，降低风控阶段 CPU 峰值。
+
+2. 截图并发默认降至 2，并支持 `.env` 控制
+- `generate_screenshots_from_steps(...)` 新增 `SCREENSHOT_MAX_WORKERS` 读取逻辑。
+- 默认并发由原先固定上限策略调整为默认 `2`，非法值自动回退 `2`。
+- 仍保留安全边界：并发值会被限制在 `[1, CPU 核心数]` 且不超过任务数。
+
+3. 风控抽帧数默认调整为 4/8，并支持 `.env` 控制
+- `RISK_MAX_FRAMES` 改为环境变量读取，默认值 `4`。
+- `RISK_DYNAMIC_MAX_FRAMES` 改为环境变量读取，默认值 `8`，且不低于基础抽帧数。
+- 保留 `RISK_MIN_FRAMES` 约束，保证风控抽帧下限与稳定性。
+
+4. 风控链路 Whisper 模型改为 `tiny`，主分析保留 `base`
+- 上传风控 agent 与系统级视觉兜底风控 agent 的 `whisper_model` 改为 `tiny`。
+- 主分析流程仍按分析参数 `whisper_model` 运行（当前默认 `base`），不影响主结果质量预期。
+
+5. 参数外置 `.env` 并统一优先级规则
+- 新增/统一维护以下环境变量：
+  - `WHISPER_THREADS`
+  - `LONG_VIDEO_PREPROCESS_ENABLED`
+  - `WHISPER_MODE`
+  - `MAX_VISION`
+  - `WEB_SEARCH`
+- 解析策略更新为：请求体优先；请求体未传时回退到 `.env`。
+- `regenerate` 接口的 `web_search` 同步采用同一优先级规则。
+
+### `.env` 当前项目值（本次更新后）
+- `WHISPER_THREADS=4`
+- `LONG_VIDEO_PREPROCESS_ENABLED=1`
+- `WHISPER_MODE=base`
+- `MAX_VISION=10`
+- `WEB_SEARCH=0`
+- `SCREENSHOT_MAX_WORKERS=2`
+- `RISK_MAX_FRAMES=4`
+- `RISK_DYNAMIC_MAX_FRAMES=8`
+
+### 验收结果
+- `.env` 必需参数存在性检查通过。
+- 参数优先级验证通过：请求体传参时覆盖环境变量；未传时按 `.env` 回退。
+- Python 语法校验通过：`python -m py_compile app.py video_analyzer_agent.py`。
+
 ## v2.0.7 (2026-03-16)
 
 ### 本版本目标
@@ -495,6 +547,9 @@
 - 内存模式在服务进程重启后不可恢复会话，需重新上传（会返回会话过期提示）。
 - 若风控模型不可用，后端按“默认安全优先”策略拒绝上传/分析请求。
 - 后续如需更严格策略，可调整 `restrict` 是否直接阻断及风险阈值。
+
+
+
 
 
 

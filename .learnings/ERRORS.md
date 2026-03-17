@@ -31,6 +31,40 @@ Run commands separately, or use `;` in PowerShell.
 
 ---
 
+## [ERR-20260317-001] rg-pattern-leading-dash
+
+**Logged**: 2026-03-17T14:20:00+08:00
+**Priority**: low
+**Status**: resolved
+**Area**: backend
+
+### Summary
+`rg` 查询模式包含 `--fp16`/`--threads`，未使用 `--` 终止参数解析，导致 `rg` 将模式误判为命令行 flag。
+
+### Error
+```text
+rg: unrecognized flag --fp16|--threads|whisper_model\)|def generate_subtitles|default_threads
+```
+
+### Context
+- Command attempted: 在 `video_analyzer_agent.py` 中一次性检索 Whisper 参数行号。
+- Shell: PowerShell.
+
+### Suggested Fix
+包含以 `-` 开头的模式时，使用 `rg -- \"pattern\" file`，或改为普通关键字拆分查询。
+
+### Metadata
+- Reproducible: yes
+- Related Files: video_analyzer_agent.py
+- See Also: ERR-20260313-002
+
+### Resolution
+- **Resolved**: 2026-03-17T14:21:00+08:00
+- **Commit/PR**: N/A
+- **Notes**: 改为拆分查询并继续完成代码定位。
+
+---
+
 ## [ERR-20260316-001] python-ast-bom-parse
 
 **Logged**: 2026-03-16T15:44:00+08:00
