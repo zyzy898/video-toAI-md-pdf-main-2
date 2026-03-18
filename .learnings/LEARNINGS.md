@@ -228,3 +228,95 @@ In strict regenerate mode, verify generated markdown includes edited step titles
 - **Notes**: Added strict alignment validator and fallback markdown builder in `generate_step_document` when `respect_step_content=True`.
 
 ---
+
+## [LRN-20260318-001] best_practice
+
+**Logged**: 2026-03-18T01:05:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+For Scrapling integration, use `StealthySession` session management in an OOP reader class, not ad-hoc function calls.
+
+### Details
+Recent Douyin URL parsing failures showed that simple one-off fetcher calls are unstable under anti-bot pressure.
+Moving to a structured `ScraplingPageReader` + session manager allows stable retries, session reuse, and clearer fallback orchestration.
+
+### Suggested Action
+Keep scraping orchestration in dedicated modules (`main/*.py`) and inject runtime settings from app config/env via a provider function.
+
+### Metadata
+- Source: conversation
+- Related Files: app.py, main/scrapling_page_reader.py
+- Tags: scrapling, stealthy-session, oop
+
+---
+
+## [LRN-20260318-002] correction
+
+**Logged**: 2026-03-18T10:33:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+User explicitly requires `import scrapling` package-style imports, not custom import names.
+
+### Details
+In this task, the user clarified that integration style matters: use `import scrapling` and call via package namespace (e.g., `scrapling.Fetcher`, `scrapling.fetchers.StealthySession`).
+Avoid `from scrapling import ...` or renamed import styles for this code path.
+
+### Suggested Action
+Treat this as a coding convention for scraping modules in this project; keep imports package-qualified unless user asks otherwise.
+
+### Metadata
+- Source: user_feedback
+- Related Files: main/scrapling_page_reader.py
+- Tags: correction, import-style, scrapling
+
+---
+## [LRN-20260318-003] correction
+
+**Logged**: 2026-03-18T18:20:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+When user asks to "直接使用现有代码", do not add unrelated restoration modules; integrate through the existing downloader files directly.
+
+### Details
+During this integration task, user explicitly corrected scope: avoid补回/重建 extra modules and focus on wiring the provided files (`bilibili_downloader_llm.py`, `douyin_downloader_llm.py`, `xiaohongshu_downloader_llm.py`) into the URL analysis path.
+
+### Suggested Action
+For similar requests, implement a thin adapter that only orchestrates existing modules and keep non-requested restoration work out of scope.
+
+### Metadata
+- Source: user_feedback
+- Related Files: app.py, main/platform_link_downloader.py
+- Tags: correction, scope-control, integration
+
+---
+## [LRN-20260318-004] correction
+
+**Logged**: 2026-03-18T19:08:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+Shared downloader LLM config must use `.env` keys directly and allow `.env` values to globally override process config.
+
+### Details
+User requested that editing `.env` should be sufficient for global coverage. Previous implementation used multi-key fallbacks and one-time loading, which could allow non-`.env` values to win in some cases.
+
+### Suggested Action
+Make `shared_llm_config` read `.env` on each request for `LLM_API_KEY/LLM_BASE_URL/LLM_MODEL`, sync these to `os.environ`, and keep all downloader injection paths on this shared function.
+
+### Metadata
+- Source: user_feedback
+- Related Files: main/shared_llm_config.py, main/platform_link_downloader.py
+- Tags: correction, env-config, llm
+
+---

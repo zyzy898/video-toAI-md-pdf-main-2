@@ -456,6 +456,7 @@ type SingleResultData = {
   steps: StepItem[];
   markdown: string;
   output_dir: string;
+  output_dir_name?: string;
   pdf_path?: string;
   has_steps?: boolean;
   result_mode?: string;
@@ -472,6 +473,12 @@ type SingleResultData = {
   segment_policy?: SegmentPolicy;
   segment_guardrails?: string[];
   effective_options?: EffectiveOptions;
+  video_preview_url?: string;
+  subtitle_available?: boolean;
+  subtitle_file_name?: string;
+  subtitle_line_count?: number;
+  subtitle_exports?: Record<string, string>;
+  subtitle_workbench_url?: string;
 };
 
 type BatchResultItem = {
@@ -480,6 +487,7 @@ type BatchResultItem = {
   success: boolean;
   steps_count?: number;
   output_dir?: string;
+  output_dir_name?: string;
   error?: string;
   code?: string;
   risk?: RiskResult;
@@ -496,6 +504,12 @@ type BatchResultItem = {
   segment_policy?: SegmentPolicy;
   segment_guardrails?: string[];
   effective_options?: EffectiveOptions;
+  video_preview_url?: string;
+  subtitle_available?: boolean;
+  subtitle_file_name?: string;
+  subtitle_line_count?: number;
+  subtitle_exports?: Record<string, string>;
+  subtitle_workbench_url?: string;
 };
 
 type BatchResultData = {
@@ -600,6 +614,24 @@ type NavigatorWithConnection = Navigator & {
   };
 };
 
+type SubtitleLine = {
+  index?: number;
+  start_time?: string;
+  end_time?: string;
+  start_seconds?: number;
+  end_seconds?: number;
+  text?: string;
+};
+
+type SubtitleWorkbenchData = {
+  subtitle_file?: string;
+  subtitle_available?: boolean;
+  line_count?: number;
+  lines?: SubtitleLine[];
+  video_preview_url?: string;
+  subtitle_exports?: Record<string, string>;
+};
+
 const shouldEnableMobilePerfMode = () => {
   if (typeof window === "undefined") return false;
   const coarseMobile = window.matchMedia(MOBILE_PERF_MEDIA_QUERY).matches;
@@ -611,6 +643,57 @@ const shouldEnableMobilePerfMode = () => {
 const isValidVideo = (filename: string) => {
   const ext = String(filename || "").split(".").pop()?.toLowerCase() || "";
   return VALID_VIDEO_EXTENSIONS.has(ext);
+};
+
+const parseSourceUrls = (raw: string) => {
+  const input = String(raw || "");
+  if (!input.trim()) return [];
+
+  const candidates: string[] = [];
+
+  const directMatches = input.match(/https?:\/\/[^\s"'<>]+/giu) || [];
+  candidates.push(...directMatches);
+
+  const schemeLessPatterns = [
+    /v\.douyin\.com\/[A-Za-z0-9/_-]+/giu,
+    /(?:www\.)?douyin\.com\/[^\s"'<>]+/giu,
+    /b23\.tv\/[^\s"'<>]+/giu,
+    /(?:www\.)?bilibili\.com\/[^\s"'<>]+/giu,
+    /xhslink\.com\/[A-Za-z0-9/_-]+/giu,
+    /(?:www\.)?xiaohongshu\.com\/[^\s"'<>]+/giu,
+  ];
+  for (const pattern of schemeLessPatterns) {
+    const matched = input.match(pattern) || [];
+    candidates.push(...matched);
+  }
+
+  const normalized: string[] = [];
+  for (const rawCandidate of candidates) {
+    let url = String(rawCandidate || "").trim();
+    if (!url) continue;
+
+    url = url
+      .replace(/^[<(\[{"'“‘]+/u, "")
+      .replace(/[>)\]}”’"']+$/u, "")
+      .replace(/[，。！？；：、,.;!?]+$/u, "")
+      .trim();
+    if (!url) continue;
+
+    if (!/^https?:\/\//iu.test(url)) {
+      url = `https://${url}`;
+    }
+    try {
+      const parsed = new URL(url);
+      if (!/^https?:$/iu.test(parsed.protocol)) continue;
+      const canonical = parsed.toString();
+      if (canonical && !normalized.includes(canonical)) {
+        normalized.push(canonical);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return normalized;
 };
 
 const basename = (value: string | undefined | null) =>
@@ -1053,6 +1136,8 @@ export default function App() {
   const [webSearch, setWebSearch] = useState(false);
   const [fps, setFps] = useState(1);
   const [summaryOnly, setSummaryOnly] = useState(false);
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [importingUrl, setImportingUrl] = useState(false);
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
@@ -1072,6 +1157,10 @@ export default function App() {
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
   const [batchResultData, setBatchResultData] = useState<BatchResultData | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [subtitleWorkbench, setSubtitleWorkbench] = useState<SubtitleWorkbenchData | null>(null);
+  const [subtitleLoading, setSubtitleLoading] = useState(false);
+  const [subtitleKeyword, setSubtitleKeyword] = useState("");
+  const [subtitleLoadError, setSubtitleLoadError] = useState("");
 
   const [isEditMode, setIsEditMode] = useState(false);
   const [editedSteps, setEditedSteps] = useState<StepItem[]>([]);
@@ -1091,6 +1180,7 @@ export default function App() {
   const [mobilePerfMode, setMobilePerfMode] = useState<boolean>(() => shouldEnableMobilePerfMode());
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const sourceUrlInputRef = useRef<HTMLInputElement | null>(null);
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
   const modelBaseUrlInputRef = useRef<HTMLInputElement | null>(null);
   const modelNameInputRef = useRef<HTMLInputElement | null>(null);
@@ -1111,6 +1201,7 @@ export default function App() {
   const verifiedModelConfigSignatureRef = useRef("");
   const userSettingsStorageKeyRef = useRef("");
   const [userSettingsLoaded, setUserSettingsLoaded] = useState(false);
+  const subtitleVideoRef = useRef<HTMLVideoElement | null>(null);
   const progressPollIntervalMs = mobilePerfMode
     ? PROGRESS_POLL_INTERVAL_MOBILE_MS
     : PROGRESS_POLL_INTERVAL_DESKTOP_MS;
@@ -1928,10 +2019,7 @@ export default function App() {
       verifyModelConnectionForUpload,
     ],
   );
-  const analyzeSingle = useCallback(async () => {
-    const analyzableFiles = getAnalyzableBatchFiles();
-    if (analyzableFiles.length !== 1) return;
-    const file = analyzableFiles[0];
+  const analyzeByUploadedFile = useCallback(async (file: BatchFileItem) => {
     setBatchFiles((prev) =>
       prev.map((item) =>
         item.filepath ? { ...item, status: item.filepath === file.filepath ? "pending" : item.status, error: "" } : item,
@@ -2069,13 +2157,144 @@ export default function App() {
     startSinglePolling,
     stopBatchPolling,
     stopSinglePolling,
-    updateProgressBoard,
+    summaryOnly,
     uiScrollBehavior,
+    updateProgressBoard,
     useVideo,
     webSearch,
     whisperModel,
-    getAnalyzableBatchFiles,
-    summaryOnly,
+  ]);
+
+  const analyzeSingle = useCallback(async () => {
+    const analyzableFiles = getAnalyzableBatchFiles();
+    if (analyzableFiles.length !== 1) return;
+    await analyzeByUploadedFile(analyzableFiles[0]);
+  }, [analyzeByUploadedFile, getAnalyzableBatchFiles]);
+
+  const uploadBySourceUrl = useCallback(async (targetUrl: string) => {
+    const uploaded = await fetchJson<{ filename: string; filepath: string; download_title?: string }>("/upload_url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: targetUrl,
+        api_key: apiKey,
+        model_name: modelName,
+        model_base_url: modelBaseUrl,
+      }),
+    });
+    const uploadedPath = String(uploaded.filepath || "").trim();
+    if (!uploadedPath) throw new Error("链接导入失败：未返回可分析文件");
+
+    const uploadedName =
+      String(uploaded.download_title || uploaded.filename || "").trim() ||
+      basename(uploadedPath) ||
+      "链接视频";
+    return {
+      filename: uploadedName,
+      filepath: uploadedPath,
+      status: "pending",
+      error: "",
+    } satisfies BatchFileItem;
+  }, [apiKey, fetchJson, modelBaseUrl, modelName]);
+
+  const importSourceUrlOnly = useCallback(async () => {
+    const urls = parseSourceUrls(sourceUrl);
+    if (urls.length === 0) {
+      showError("请输入有效的视频链接（http/https）");
+      sourceUrlInputRef.current?.focus();
+      return;
+    }
+    const readyForUpload = await verifyModelConnectionForUpload();
+    if (!readyForUpload) return;
+
+    setImportingUrl(true);
+    showProgress("链接导入中", "正在下载链接视频并执行安全检测...");
+    updateProgressBoard({ mode: "upload", stage: "prepare", total: 1, percent: 0, current: 0 });
+
+    try {
+      const uploadedItem = await uploadBySourceUrl(urls[0]);
+      setBatchFiles((prev) => [uploadedItem, ...prev]);
+      setSourceUrl("");
+      updateProgressBoard({
+        mode: "upload",
+        stage: "done",
+        total: 1,
+        current: 1,
+        success: 1,
+        failed: 0,
+        percent: 100,
+        currentFile: uploadedItem.filename,
+      });
+      showSuccess("链接导入成功，可直接开始分析。");
+    } catch (error) {
+      showError(`链接导入失败: ${String((error as Error).message || error)}`);
+    } finally {
+      hideProgress();
+      setImportingUrl(false);
+    }
+  }, [
+    hideProgress,
+    showError,
+    showProgress,
+    showSuccess,
+    sourceUrl,
+    updateProgressBoard,
+    uploadBySourceUrl,
+    verifyModelConnectionForUpload,
+  ]);
+
+  const analyzeBySourceUrl = useCallback(async () => {
+    const urls = parseSourceUrls(sourceUrl);
+    if (urls.length === 0) {
+      showError("请输入有效的视频链接（http/https）");
+      sourceUrlInputRef.current?.focus();
+      return;
+    }
+    const readyForUpload = await verifyModelConnectionForUpload();
+    if (!readyForUpload) return;
+
+    setImportingUrl(true);
+    stopBatchPolling();
+    stopSinglePolling();
+    setIsAnalyzing(true);
+    showProgress("链接处理中", "正在下载链接视频并执行安全检测...");
+    updateProgressBoard({ mode: "upload", stage: "prepare", total: 1, percent: 0, current: 0 });
+
+    try {
+      const uploadedItem = await uploadBySourceUrl(urls[0]);
+      setBatchFiles((prev) => [uploadedItem, ...prev]);
+      setSourceUrl("");
+      updateProgressBoard({
+        mode: "upload",
+        stage: "done",
+        total: 1,
+        current: 1,
+        success: 1,
+        failed: 0,
+        percent: 100,
+        currentFile: uploadedItem.filename,
+      });
+      setProgressTextIfChanged("链接视频导入完成，正在启动分析...");
+      await analyzeByUploadedFile(uploadedItem);
+    } catch (error) {
+      showError(`链接分析失败: ${String((error as Error).message || error)}`);
+      hideProgress();
+      setIsAnalyzing(false);
+    } finally {
+      setImportingUrl(false);
+    }
+  }, [
+    analyzeByUploadedFile,
+    hideProgress,
+    setProgressTextIfChanged,
+    showError,
+    showProgress,
+    sourceUrl,
+    stopBatchPolling,
+    stopSinglePolling,
+    updateProgressBoard,
+    uploadBySourceUrl,
+    verifyModelConnectionForUpload,
   ]);
 
   const analyzeBatch = useCallback(async () => {
@@ -2197,8 +2416,12 @@ export default function App() {
       showError("没有可分析的视频，请查看失败原因后重试上传。");
       return;
     }
+    if (parseSourceUrls(sourceUrl).length > 0) {
+      await analyzeBySourceUrl();
+      return;
+    }
     showError("请先上传视频文件");
-  }, [analyzeBatch, analyzeSingle, apiKey, getAnalyzableBatchFiles, showError, validateModelConfig]);
+  }, [analyzeBatch, analyzeBySourceUrl, analyzeSingle, apiKey, getAnalyzableBatchFiles, showError, sourceUrl, validateModelConfig]);
 
   const openHistoryRecord = useCallback(
     async (recordId: string) => {
@@ -2212,6 +2435,7 @@ export default function App() {
           steps: Array.isArray(record.steps) ? record.steps : [],
           markdown: record.markdown || "",
           output_dir: record.output_dir || "",
+          output_dir_name: record.output_dir_name || "",
           pdf_path: record.pdf_path || "",
           has_steps: Boolean(record.steps && Array.isArray(record.steps) && record.steps.length > 0),
           result_mode: String(record.result_mode || ""),
@@ -2221,6 +2445,15 @@ export default function App() {
           degrade_reason: String(record.degrade_reason || ""),
           content_title: String(record.content_title || ""),
           confidence_note: String(record.confidence_note || ""),
+          video_preview_url: String(record.video_preview_url || ""),
+          subtitle_available: Boolean(record.subtitle_available),
+          subtitle_file_name: String(record.subtitle_file_name || ""),
+          subtitle_line_count: Number(record.subtitle_line_count || 0),
+          subtitle_exports:
+            record.subtitle_exports && typeof record.subtitle_exports === "object"
+              ? (record.subtitle_exports as Record<string, string>)
+              : {},
+          subtitle_workbench_url: String(record.subtitle_workbench_url || ""),
         });
         setBatchResultData(null);
         if (resultsRef.current) {
@@ -2398,6 +2631,120 @@ export default function App() {
     }
   }, [batchResultData?.results, fetchBlob, showError, triggerDownload]);
 
+  const loadSubtitleWorkbench = useCallback(
+    async (outputDir: string) => {
+      const outputDirName = basename(outputDir);
+      if (!outputDirName) {
+        setSubtitleWorkbench(null);
+        setSubtitleLoadError("");
+        return;
+      }
+      setSubtitleLoading(true);
+      setSubtitleLoadError("");
+      try {
+        const data = await fetchJson<SubtitleWorkbenchData>(
+          `/subtitle_workbench?output_dir=${encodeURIComponent(outputDirName)}&limit=12000`,
+        );
+        setSubtitleWorkbench(data);
+        setSubtitleLoadError("");
+      } catch (error) {
+        setSubtitleWorkbench(null);
+        setSubtitleLoadError(String((error as Error).message || error || "字幕加载失败"));
+      } finally {
+        setSubtitleLoading(false);
+      }
+    },
+    [fetchJson],
+  );
+
+  useEffect(() => {
+    const outputDir = String(resultData?.output_dir || "").trim();
+    const blockedMode = String(resultData?.result_mode || "").trim().toLowerCase() === "blocked_notice";
+    if (!outputDir || blockedMode) {
+      setSubtitleWorkbench(null);
+      setSubtitleLoading(false);
+      setSubtitleLoadError("");
+      return;
+    }
+    let cancelled = false;
+    setSubtitleLoading(true);
+    setSubtitleLoadError("");
+    void loadSubtitleWorkbench(outputDir)
+      .catch(() => {
+        if (!cancelled) setSubtitleWorkbench(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSubtitleLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSubtitleWorkbench, resultData?.output_dir, resultData?.result_mode]);
+
+  useEffect(() => {
+    setSubtitleKeyword("");
+  }, [resultData?.output_dir]);
+
+  const downloadSubtitleFile = useCallback(
+    async (format: "srt" | "vtt" | "txt") => {
+      const outputDirName = basename(resultData?.output_dir);
+      if (!outputDirName) {
+        showError("没有可下载字幕的结果");
+        return;
+      }
+      try {
+        const blob = await fetchBlob(
+          `/download_subtitle/${encodeURIComponent(outputDirName)}?format=${encodeURIComponent(format)}`,
+        );
+        triggerDownload(blob, `${outputDirName}_subtitle.${format}`);
+      } catch (error) {
+        showError(`字幕下载失败: ${String((error as Error).message || error)}`);
+      }
+    },
+    [fetchBlob, resultData?.output_dir, showError, triggerDownload],
+  );
+
+  const seekVideoTo = useCallback((seconds: number) => {
+    const videoEl = subtitleVideoRef.current;
+    if (!videoEl) return;
+    const targetSeconds = Math.max(0, Number(seconds) || 0);
+    videoEl.currentTime = targetSeconds;
+    void videoEl.play().catch(() => undefined);
+  }, []);
+
+  const subtitleLines = useMemo(() => (Array.isArray(subtitleWorkbench?.lines) ? subtitleWorkbench?.lines || [] : []), [subtitleWorkbench?.lines]);
+  const subtitleAssetAvailable = useMemo(() => {
+    const exportsObj =
+      resultData?.subtitle_exports && typeof resultData.subtitle_exports === "object"
+        ? (resultData.subtitle_exports as Record<string, string>)
+        : {};
+    return Boolean(
+      String(subtitleWorkbench?.subtitle_file || "").trim() ||
+        String(resultData?.subtitle_file_name || "").trim() ||
+        Boolean(subtitleWorkbench?.subtitle_available) ||
+        Boolean(resultData?.subtitle_available) ||
+        Number(resultData?.subtitle_line_count || 0) > 0 ||
+        Object.keys(exportsObj).length > 0,
+    );
+  }, [
+    resultData?.subtitle_available,
+    resultData?.subtitle_exports,
+    resultData?.subtitle_file_name,
+    resultData?.subtitle_line_count,
+    subtitleWorkbench?.subtitle_available,
+    subtitleWorkbench?.subtitle_file,
+  ]);
+  const filteredSubtitleLines = useMemo(() => {
+    const keyword = String(subtitleKeyword || "").trim().toLowerCase();
+    if (!keyword) return subtitleLines;
+    return subtitleLines.filter((line) => {
+      const text = String(line.text || "").toLowerCase();
+      const start = String(line.start_time || "").toLowerCase();
+      const end = String(line.end_time || "").toLowerCase();
+      return text.includes(keyword) || start.includes(keyword) || end.includes(keyword);
+    });
+  }, [subtitleKeyword, subtitleLines]);
+
   const renderedMarkdown = useMemo(() => {
     if (!resultData?.markdown) return "";
     const outputDirName = basename(resultData.output_dir);
@@ -2486,14 +2833,19 @@ export default function App() {
     () => batchFiles.filter((item) => Boolean(String(item.filepath || "").trim())).length,
     [batchFiles],
   );
-  const canAnalyze = !isAnalyzing && analyzableBatchCount > 0;
+  const hasSourceUrlInput = useMemo(() => parseSourceUrls(sourceUrl).length > 0, [sourceUrl]);
+  const canAnalyze = !isAnalyzing && (analyzableBatchCount > 0 || hasSourceUrlInput);
   const analyzeButtonText = isAnalyzing
     ? analyzableBatchCount === 1
       ? "单文件处理中..."
       : "批量处理中..."
     : analyzableBatchCount === 1
       ? "开始单文件分析"
-      : "开始分析";
+      : analyzableBatchCount > 1
+        ? "开始分析"
+        : hasSourceUrlInput
+          ? "开始链接分析"
+          : "开始分析";
   const hasSingleResult = Boolean(resultData);
   const hasBatchResult = Boolean(batchResultData);
   const hasAnyResult = hasSingleResult || hasBatchResult;
@@ -2663,6 +3015,41 @@ export default function App() {
               <div className="mb-2 flex items-center gap-2">
                 <UploadIcon className="h-4 w-4 text-neutral-300" />
                 <h2 className="text-base font-semibold">上传视频</h2>
+              </div>
+              <div className="mb-3 rounded-lg border border-sky-400/30 bg-sky-500/8 p-3">
+                <p className="text-xs font-semibold tracking-wide text-sky-100/95">视频链接直达分析</p>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    ref={sourceUrlInputRef}
+                    type="url"
+                    placeholder="粘贴视频链接（http/https）"
+                    className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500"
+                    value={sourceUrl}
+                    disabled={isAnalyzing || importingUrl}
+                    onChange={(e) => setSourceUrl(e.target.value)}
+                  />
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      type="button"
+                      className="rounded border border-neutral-700 px-3 py-1.5 text-xs text-neutral-200 transition-colors hover:border-sky-400/60 hover:text-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isAnalyzing || importingUrl}
+                      onClick={() => void importSourceUrlOnly()}
+                    >
+                      {importingUrl ? "导入中..." : "导入链接"}
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded border border-teal-400/50 bg-teal-500/12 px-3 py-1.5 text-xs text-teal-100 transition-colors hover:border-teal-300 hover:bg-teal-500/18 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isAnalyzing || importingUrl}
+                      onClick={() => void analyzeBySourceUrl()}
+                    >
+                      {importingUrl ? "处理中..." : "链接直达分析"}
+                    </button>
+                  </div>
+                </div>
+                <p className="mt-1 text-[11px] text-sky-100/85">
+                  只需提供链接即可下载并分析；平台播放页链接建议安装 `yt-dlp` 以提升兼容性。
+                </p>
               </div>
               <input
                 ref={fileInputRef}
@@ -3233,6 +3620,120 @@ export default function App() {
                         summaryOnly ? "summary-only-markdown-content" : "standard-markdown-content"
                       }
                     />
+                  </section>
+                ) : null}
+
+                {hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.output_dir) ? (
+                  <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <StepsIcon className="h-4 w-4 text-neutral-300" />
+                        <h2 className="text-base font-semibold">字幕工作台</h2>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={subtitleLoading}
+                          onClick={() => void loadSubtitleWorkbench(String(resultData?.output_dir || ""))}
+                        >
+                          {subtitleLoading ? "加载中..." : "刷新字幕"}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={subtitleLoading}
+                          onClick={() => void downloadSubtitleFile("srt")}
+                        >
+                          导出 SRT
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={subtitleLoading}
+                          onClick={() => void downloadSubtitleFile("vtt")}
+                        >
+                          导出 VTT
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={subtitleLoading}
+                          onClick={() => void downloadSubtitleFile("txt")}
+                        >
+                          导出 TXT
+                        </button>
+                      </div>
+                    </div>
+
+                    {String(subtitleWorkbench?.video_preview_url || resultData?.video_preview_url || "").trim() ? (
+                      <div className="mb-2 overflow-hidden rounded border border-neutral-800 bg-black/40">
+                        <video
+                          ref={subtitleVideoRef}
+                          controls
+                          preload="metadata"
+                          className="max-h-[300px] w-full bg-black"
+                          src={String(subtitleWorkbench?.video_preview_url || resultData?.video_preview_url || "")}
+                        />
+                      </div>
+                    ) : null}
+
+                    {subtitleLoading ? (
+                      <p className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-300">
+                        正在加载字幕...
+                      </p>
+                    ) : subtitleLines.length > 0 ? (
+                      <>
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <input
+                            type="text"
+                            className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500 sm:max-w-xs"
+                            placeholder="搜索字幕内容或时间点"
+                            value={subtitleKeyword}
+                            onChange={(e) => setSubtitleKeyword(e.target.value)}
+                          />
+                          <p className="text-xs text-neutral-400">
+                            共 {subtitleLines.length} 行，匹配 {filteredSubtitleLines.length} 行
+                          </p>
+                        </div>
+                        <div className="history-scroll max-h-[340px] space-y-1 overflow-auto pr-1">
+                          {filteredSubtitleLines.slice(0, 1200).map((line, idx) => (
+                            <button
+                              type="button"
+                              key={`sub-line-${line.index || idx}-${line.start_time || ""}`}
+                              className="w-full rounded border border-neutral-800 bg-neutral-950/60 px-2 py-1.5 text-left text-xs transition-colors hover:border-teal-400/60 hover:bg-teal-500/10"
+                              onClick={() => seekVideoTo(Number(line.start_seconds || 0))}
+                            >
+                              <p className="font-semibold text-teal-200/95">
+                                {String(line.start_time || "00:00:00,000")} - {String(line.end_time || "00:00:00,000")}
+                              </p>
+                              <p className="mt-0.5 whitespace-pre-wrap text-neutral-200">{String(line.text || "")}</p>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    ) : subtitleAssetAvailable ? (
+                      <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                        <p>
+                          已检测到字幕文件，但当前未加载到字幕行。你可以点击“刷新字幕”，或直接导出 SRT/VTT/TXT。
+                        </p>
+                        {String(subtitleWorkbench?.subtitle_file || resultData?.subtitle_file_name || "").trim() ? (
+                          <p className="mt-1 text-xs text-amber-200/90">
+                            字幕文件：{String(subtitleWorkbench?.subtitle_file || resultData?.subtitle_file_name || "")}
+                            {Number(resultData?.subtitle_line_count || 0) > 0
+                              ? `（约 ${Number(resultData?.subtitle_line_count || 0)} 行）`
+                              : ""}
+                          </p>
+                        ) : null}
+                        {subtitleLoadError ? (
+                          <p className="mt-1 text-xs text-amber-200/90">加载原因：{subtitleLoadError}</p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-300">
+                        当前结果未检测到可用字幕。你可以切换字幕模式重新分析，或检查音频质量后重试。
+                      </p>
+                    )}
                   </section>
                 ) : null}
               </div>

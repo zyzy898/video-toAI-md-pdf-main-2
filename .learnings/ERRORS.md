@@ -232,3 +232,31 @@ Use separate commands or `;` as separator when running in PowerShell.
 - **Notes**: Switched to `multi_tool_use.parallel` and separate commands.
 
 ---
+
+## [ERR-20260318-001] scrapling-network-check
+
+**Logged**: 2026-03-18T10:22:00+08:00
+**Priority**: medium
+**Status**: pending
+**Area**: infra
+
+### Summary
+Runtime fetch smoke test timed out due DNS resolution failure in sandbox.
+
+### Error
+```
+curl: (6) Could not resolve host: example.com
+```
+
+### Context
+- Command/operation attempted: `SCRAPLING_PAGE_READER.fetch_attempts('https://example.com')`
+- Environment: sandbox network restricted
+
+### Suggested Fix
+Run end-to-end verification on a host with outbound DNS/network access.
+
+### Metadata
+- Reproducible: yes
+- Related Files: app.py, main/scrapling_page_reader.py
+
+---

@@ -20,6 +20,8 @@ volcengine-python-sdk[ark]>=1.0.0
 # =========================
 ffmpeg-python>=0.2.0
 imageio-ffmpeg>=0.5.1
+yt-dlp>=2025.1.0
+scrapling[fetchers]>=0.4.0
 
 # =========================
 # Speech-to-text
@@ -31,4 +33,3 @@ openai-whisper>=20231117
 # =========================
 markdown>=3.5.0
 fpdf2>=2.7.0
-

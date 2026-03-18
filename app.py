@@ -1,8 +1,10 @@
 ﻿import asyncio
 import base64
+import html
 import hashlib
 import json
 import logging
+import mimetypes
 import os
 import random
 import re
@@ -17,11 +19,34 @@ from io import BytesIO
 from pathlib import Path
 from threading import Lock, RLock, Thread
 from typing import Any, Callable, Dict, List, Tuple
+from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 from dotenv import load_dotenv
 from flask import Flask, g, jsonify, request, send_file, send_from_directory
 from werkzeug.utils import secure_filename
+
+from main.platform_link_downloader import PlatformLinkDownloader
+SCRAPLING_READER_AVAILABLE = True
+try:
+    from main.scrapling_page_reader import ScraplingPageReader, ScraplingReaderSettings
+except Exception:
+    SCRAPLING_READER_AVAILABLE = False
+
+    class ScraplingReaderSettings:  # type: ignore[override]
+        def __init__(self, **kwargs: Any) -> None:
+            for key, value in kwargs.items():
+                setattr(self, key, value)
+
+    class ScraplingPageReader:  # type: ignore[override]
+        def __init__(self, *, logger_obj: Any, settings_provider: Callable[[], Any]) -> None:
+            self._logger = logger_obj
+            self._settings_provider = settings_provider
+
+        def fetch_attempts(self, raw_url: str) -> List[Any]:
+            return []
 
 from video_analyzer_agent import VideoAnalyzerAgent
 
@@ -191,6 +216,67 @@ VIDEO_SEGMENT_BATCH_STANDARD_RECOMMENDED_MAX_FILES = 5
 VIDEO_SEGMENT_BATCH_STANDARD_RECOMMENDED_MAX_TOTAL_DURATION_SECONDS = 60 * 60
 VIDEO_SEGMENT_BATCH_LONG_MAX_FILES = 2
 BATCH_ANALYZE_MAX_WORKERS = max(1, min(16, _env_int("BATCH_ANALYZE_MAX_WORKERS", 2)))
+SCRAPE_FETCH_MODE = _env_text(("SCRAPE_FETCH_MODE", "scrape_fetch_mode"), "auto").strip().lower()
+if SCRAPE_FETCH_MODE not in {"auto", "static", "dynamic"}:
+    SCRAPE_FETCH_MODE = "auto"
+SCRAPE_TIMEOUT_SECONDS = max(5, min(120, _env_int("SCRAPE_TIMEOUT_SECONDS", 45)))
+SCRAPE_RETRIES = max(0, min(5, _env_int("SCRAPE_RETRIES", 3)))
+SCRAPE_RETRY_DELAY_SECONDS = max(0, min(20, _env_int("SCRAPE_RETRY_DELAY_SECONDS", 2)))
+SCRAPE_DYNAMIC_WAIT_SECONDS = max(0, min(20, _env_int("SCRAPE_DYNAMIC_WAIT_SECONDS", 4)))
+SCRAPE_DYNAMIC_HEADLESS = _env_bool(("SCRAPE_DYNAMIC_HEADLESS", "scrape_dynamic_headless"), True)
+SCRAPE_DYNAMIC_DISABLE_RESOURCES = _env_bool(
+    ("SCRAPE_DYNAMIC_DISABLE_RESOURCES", "scrape_dynamic_disable_resources"), False
+)
+SCRAPE_DYNAMIC_NETWORK_IDLE = _env_bool(
+    ("SCRAPE_DYNAMIC_NETWORK_IDLE", "scrape_dynamic_network_idle"), True
+)
+SCRAPE_IMPERSONATE = _env_text(("SCRAPE_IMPERSONATE", "scrape_impersonate"), "chrome")
+SCRAPE_PROXY_URL = _env_text(("SCRAPE_PROXY_URL", "scrape_proxy_url"), "")
+SCRAPE_USER_AGENT = _env_text(("SCRAPE_USER_AGENT", "scrape_user_agent"), "")
+SCRAPE_EXTRA_HEADERS_JSON = _env_text(
+    ("SCRAPE_EXTRA_HEADERS_JSON", "scrape_extra_headers_json"), ""
+)
+SCRAPE_COOKIES_JSON = _env_text(("SCRAPE_COOKIES_JSON", "scrape_cookies_json"), "")
+SCRAPE_MODEL_PARSE_ENABLED = _env_bool(
+    ("SCRAPE_MODEL_PARSE_ENABLED", "scrape_model_parse_enabled"), True
+)
+SCRAPE_MODEL_HTML_MAX_CHARS = max(4000, min(120000, _env_int("SCRAPE_MODEL_HTML_MAX_CHARS", 32000)))
+SCRAPE_STRICT_MEDIA_ID_MATCH = _env_bool(
+    ("SCRAPE_STRICT_MEDIA_ID_MATCH", "scrape_strict_media_id_match"), True
+)
+SCRAPE_STEALTH_SESSION_MAX_PAGES = max(
+    1, min(8, _env_int("SCRAPE_STEALTH_SESSION_MAX_PAGES", 2))
+)
+SCRAPE_STEALTH_SESSION_MAX_REQUESTS = max(
+    1, min(500, _env_int("SCRAPE_STEALTH_SESSION_MAX_REQUESTS", 60))
+)
+SCRAPE_STEALTH_SESSION_IDLE_TTL_SECONDS = max(
+    30, min(3600, _env_int("SCRAPE_STEALTH_SESSION_IDLE_TTL_SECONDS", 300))
+)
+SCRAPE_STEALTH_REAL_CHROME = _env_bool(
+    ("SCRAPE_STEALTH_REAL_CHROME", "scrape_stealth_real_chrome"), False
+)
+SCRAPE_STEALTH_BLOCK_WEBRTC = _env_bool(
+    ("SCRAPE_STEALTH_BLOCK_WEBRTC", "scrape_stealth_block_webrtc"), True
+)
+SCRAPE_STEALTH_SOLVE_CLOUDFLARE = _env_bool(
+    ("SCRAPE_STEALTH_SOLVE_CLOUDFLARE", "scrape_stealth_solve_cloudflare"), False
+)
+SCRAPE_STEALTH_LOCALE = _env_text(("SCRAPE_STEALTH_LOCALE", "scrape_stealth_locale"), "")
+SCRAPE_STEALTH_TIMEZONE_ID = _env_text(
+    ("SCRAPE_STEALTH_TIMEZONE_ID", "scrape_stealth_timezone_id"), ""
+)
+YTDLP_PREFER_BROWSER_COOKIES = _env_bool(
+    ("YTDLP_PREFER_BROWSER_COOKIES", "ytdlp_prefer_browser_cookies"), True
+)
+YTDLP_COOKIES_FROM_BROWSER = _env_text(
+    ("YTDLP_COOKIES_FROM_BROWSER", "ytdlp_cookies_from_browser"), ""
+)
+YTDLP_BROWSER_FALLBACKS = _env_text(
+    ("YTDLP_BROWSER_FALLBACKS", "ytdlp_browser_fallbacks"), "chrome,edge"
+)
+YTDLP_COOKIES_FILE = _env_text(("YTDLP_COOKIES_FILE", "ytdlp_cookies_file"), "")
+YTDLP_COOKIE_HEADER = _env_text(("YTDLP_COOKIE_HEADER", "ytdlp_cookie_header"), "")
 
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
@@ -498,6 +584,1279 @@ def _update_single_progress(owner_id: str, task_id: str, **kwargs: Any) -> None:
 
 def allowed_file(filename: str) -> bool:
     return "." in filename and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+def _normalize_source_url(raw_url: Any) -> str:
+    url_text = str(raw_url or "").strip()
+    if not url_text:
+        raise ValueError("请输入视频链接")
+    if len(url_text) > 1500:
+        raise ValueError("链接长度超出限制，请精简后重试")
+
+    if not re.match(r"^https?://", url_text, flags=re.IGNORECASE):
+        match = re.search(r"https?://[^\s\"'<>]+", url_text, flags=re.IGNORECASE)
+        if match:
+            url_text = match.group(0).strip()
+        else:
+            share_link_patterns = (
+                r"v\.douyin\.com/[A-Za-z0-9/_-]+",
+                r"(?:www\.)?douyin\.com/[^\s\"'<>]+",
+                r"(?:www\.)?iesdouyin\.com/[^\s\"'<>]+",
+                r"xhslink\.com/[A-Za-z0-9/_-]+",
+                r"(?:www\.)?xiaohongshu\.com/[^\s\"'<>]+",
+                r"b23\.tv/[^\s\"'<>]+",
+                r"(?:www\.)?bilibili\.com/[^\s\"'<>]+",
+            )
+            extracted = ""
+            for pattern in share_link_patterns:
+                candidate_match = re.search(pattern, url_text, flags=re.IGNORECASE)
+                if candidate_match:
+                    extracted = str(candidate_match.group(0) or "").strip()
+                    break
+            if extracted:
+                url_text = f"https://{extracted.lstrip('/')}"
+
+    url_text = url_text.lstrip(" \t\r\n<([{\"'“‘")
+    url_text = url_text.rstrip(" \t\r\n'\"),.;!?，。！？；：】）》」")
+    parsed = urlparse(url_text)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("仅支持 http/https 视频链接")
+    return url_text
+
+
+def _extract_numeric_media_id(raw_value: Any) -> str:
+    text = str(raw_value or "").strip()
+    if not text:
+        return ""
+    digits = re.sub(r"[^\d]", "", text)
+    if len(digits) < 8:
+        return ""
+    return digits
+
+
+def _build_source_url_candidates(raw_url: Any) -> List[str]:
+    normalized = _normalize_source_url(raw_url)
+    candidates: List[str] = [normalized]
+    parsed = urlparse(normalized)
+    host = str(parsed.netloc or "").lower()
+    path = str(parsed.path or "")
+    query_map = parse_qs(str(parsed.query or ""), keep_blank_values=False)
+
+    def _append_candidate(url_text: str) -> None:
+        text = str(url_text or "").strip()
+        if text and text not in candidates:
+            candidates.append(text)
+
+    if "douyin.com" in host or "iesdouyin.com" in host:
+        media_id = ""
+        for key in ("modal_id", "aweme_id", "video_id", "item_id"):
+            values = query_map.get(key) or []
+            if not values:
+                continue
+            candidate_id = _extract_numeric_media_id(values[0])
+            if candidate_id:
+                media_id = candidate_id
+                break
+        if not media_id:
+            fallback_match = re.search(
+                r"(?:modal_id|aweme_id|video_id|item_id)=([0-9]{8,25})",
+                normalized,
+            )
+            if fallback_match:
+                media_id = fallback_match.group(1)
+        if not media_id:
+            path_match = re.search(r"/(?:video|note|share/video)/(\d{8,25})", path)
+            if path_match:
+                media_id = path_match.group(1)
+
+        if media_id:
+            _append_candidate(f"https://www.douyin.com/video/{media_id}")
+            _append_candidate(f"https://www.iesdouyin.com/share/video/{media_id}/")
+
+    return candidates
+
+
+def _append_unique_url_candidate(
+    candidates: List[str],
+    candidate_url: Any,
+    *,
+    base_url: str = "",
+) -> None:
+    text = html.unescape(str(candidate_url or "").strip())
+    if not text:
+        return
+    text = (
+        text.replace("\\/", "/")
+        .replace("\\u002F", "/")
+        .replace("\\u002f", "/")
+        .rstrip(" \t\r\n'\"),.;!?，。！？；：】）")
+    )
+    if not text:
+        return
+    if text.startswith("//"):
+        text = f"https:{text}"
+    if text.startswith("/") and base_url:
+        text = urljoin(base_url, text)
+    parsed = urlparse(text)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return
+    if text not in candidates:
+        candidates.append(text)
+
+
+def _extract_media_ids_from_text(raw_text: Any) -> List[str]:
+    text = str(raw_text or "")
+    if not text:
+        return []
+
+    patterns = (
+        r"(?:modal_id|aweme_id|video_id|item_id)\D{0,24}([0-9]{8,25})",
+        r"/(?:video|note|share/video)/([0-9]{8,25})",
+    )
+    ids: List[str] = []
+    for pattern in patterns:
+        for match in re.findall(pattern, text):
+            media_id = _extract_numeric_media_id(match)
+            if media_id and media_id not in ids:
+                ids.append(media_id)
+    return ids
+
+
+def _extract_media_ids_from_url(raw_url: Any) -> List[str]:
+    url_text = str(raw_url or "").strip()
+    if not url_text:
+        return []
+    parsed = urlparse(url_text)
+    host = str(parsed.netloc or "").lower()
+    query_map = parse_qs(str(parsed.query or ""), keep_blank_values=False)
+
+    ids: List[str] = []
+    for key in ("modal_id", "aweme_id", "video_id", "item_id"):
+        values = query_map.get(key) or []
+        for value in values:
+            media_id = _extract_numeric_media_id(value)
+            if media_id and media_id not in ids:
+                ids.append(media_id)
+
+    path = str(parsed.path or "")
+    path_match = re.search(r"/(?:video|note|share/video)/([0-9]{8,25})", path)
+    if path_match:
+        media_id = _extract_numeric_media_id(path_match.group(1))
+        if media_id and media_id not in ids:
+            ids.append(media_id)
+
+    if not ids and ("douyin.com" in host or "iesdouyin.com" in host):
+        ids = _extract_media_ids_from_text(url_text)
+    return ids[:8]
+
+
+def _url_contains_media_id(raw_url: Any, media_id: str) -> bool:
+    target = _extract_numeric_media_id(media_id)
+    if not target:
+        return False
+    text = str(raw_url or "")
+    if target in text:
+        return True
+    for item in _extract_media_ids_from_url(raw_url):
+        if item == target:
+            return True
+    return False
+
+
+def _looks_like_video_candidate_url(raw_url: Any) -> bool:
+    text = str(raw_url or "").strip().lower()
+    if not text:
+        return False
+    if re.search(r"\.(mp4|m3u8|mov|webm)(?:$|[?#])", text):
+        return True
+    if any(token in text for token in ("/video/", "/share/video/", "/note/")):
+        return True
+    if any(token in text for token in ("modal_id=", "aweme_id=", "video_id=", "item_id=")):
+        return True
+    return False
+
+
+def _extract_video_urls_from_json_payload(
+    payload: Any,
+    collected: List[str],
+    *,
+    base_url: str = "",
+    key_hint: str = "",
+) -> None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            _extract_video_urls_from_json_payload(
+                value,
+                collected,
+                base_url=base_url,
+                key_hint=str(key or "").strip().lower(),
+            )
+        return
+    if isinstance(payload, list):
+        for value in payload:
+            _extract_video_urls_from_json_payload(
+                value, collected, base_url=base_url, key_hint=key_hint
+            )
+        return
+    if not isinstance(payload, str):
+        return
+
+    normalized = html.unescape(payload).strip()
+    if not normalized:
+        return
+
+    likely_video_key = key_hint in {
+        "contenturl",
+        "embedurl",
+        "url",
+        "src",
+        "playaddr",
+        "play_addr",
+        "playurl",
+        "play_url",
+        "downloadurl",
+        "download_url",
+    }
+    if likely_video_key or _looks_like_video_candidate_url(normalized):
+        _append_unique_url_candidate(collected, normalized, base_url=base_url)
+
+
+def _parse_env_mapping(raw_value: str) -> Dict[str, str]:
+    text = str(raw_value or "").strip()
+    if not text:
+        return {}
+
+    parsed: Dict[str, Any] = {}
+    try:
+        data = json.loads(text)
+    except Exception:
+        data = None
+    if isinstance(data, dict):
+        parsed = data
+    else:
+        parsed = {}
+        for token in re.split(r"[;\n]+", text):
+            part = str(token or "").strip()
+            if not part or "=" not in part:
+                continue
+            key, value = part.split("=", 1)
+            key_text = str(key or "").strip()
+            value_text = str(value or "").strip()
+            if key_text:
+                parsed[key_text] = value_text
+
+    normalized: Dict[str, str] = {}
+    for key, value in parsed.items():
+        key_text = str(key or "").strip()
+        value_text = str(value or "").strip()
+        if key_text and value_text:
+            normalized[key_text] = value_text
+    return normalized
+
+
+def _build_scrapling_reader_settings() -> ScraplingReaderSettings:
+    return ScraplingReaderSettings(
+        fetch_mode=SCRAPE_FETCH_MODE,
+        timeout_seconds=SCRAPE_TIMEOUT_SECONDS,
+        retries=SCRAPE_RETRIES,
+        retry_delay_seconds=SCRAPE_RETRY_DELAY_SECONDS,
+        dynamic_wait_seconds=SCRAPE_DYNAMIC_WAIT_SECONDS,
+        dynamic_headless=SCRAPE_DYNAMIC_HEADLESS,
+        dynamic_disable_resources=SCRAPE_DYNAMIC_DISABLE_RESOURCES,
+        dynamic_network_idle=SCRAPE_DYNAMIC_NETWORK_IDLE,
+        impersonate=SCRAPE_IMPERSONATE,
+        proxy_url=SCRAPE_PROXY_URL,
+        user_agent=SCRAPE_USER_AGENT,
+        extra_headers=_parse_env_mapping(SCRAPE_EXTRA_HEADERS_JSON),
+        cookies=_parse_env_mapping(SCRAPE_COOKIES_JSON),
+        session_max_pages=SCRAPE_STEALTH_SESSION_MAX_PAGES,
+        session_max_requests=SCRAPE_STEALTH_SESSION_MAX_REQUESTS,
+        session_idle_ttl_seconds=SCRAPE_STEALTH_SESSION_IDLE_TTL_SECONDS,
+        session_real_chrome=SCRAPE_STEALTH_REAL_CHROME,
+        session_block_webrtc=SCRAPE_STEALTH_BLOCK_WEBRTC,
+        session_solve_cloudflare=SCRAPE_STEALTH_SOLVE_CLOUDFLARE,
+        session_locale=SCRAPE_STEALTH_LOCALE,
+        session_timezone_id=SCRAPE_STEALTH_TIMEZONE_ID,
+    )
+
+
+SCRAPLING_PAGE_READER = ScraplingPageReader(
+    logger_obj=logger,
+    settings_provider=_build_scrapling_reader_settings,
+)
+PLATFORM_LINK_DOWNLOADER = PlatformLinkDownloader(logger_obj=logger, use_llm=True)
+
+
+def _detect_human_verification_signals(
+    status_code: int,
+    final_url: str,
+    html_text: str,
+) -> List[str]:
+    signals: List[str] = []
+    if status_code in {403, 429, 503}:
+        signals.append(f"http_{status_code}")
+
+    final_url_lower = str(final_url or "").strip().lower()
+    if any(token in final_url_lower for token in ("captcha", "challenge", "verify", "security")):
+        signals.append("url_challenge_hint")
+
+    snapshot = str(html_text or "").lower()[:120000]
+    pattern_map = {
+        "captcha": r"\bcaptcha\b",
+        "turnstile": r"\bturnstile\b",
+        "cf_challenge": r"cf[-_]?challenge|cloudflare",
+        "human_check_en": r"verify you are human|security check|access denied",
+        "human_check_zh": r"人机验证|安全验证|请完成验证|滑块验证|行为验证|风控校验",
+    }
+    for label, pattern in pattern_map.items():
+        if re.search(pattern, snapshot, flags=re.IGNORECASE):
+            signals.append(label)
+
+    unique: List[str] = []
+    for item in signals:
+        text = str(item or "").strip()
+        if text and text not in unique:
+            unique.append(text)
+    return unique[:8]
+
+
+def _read_scrape_env_model_options() -> Tuple[str, str, str]:
+    api_key = _env_text(
+        (
+            "SCRAPE_MODEL_API_KEY",
+            "MODEL_API_KEY",
+            "ARK_API_KEY",
+            "OPENAI_API_KEY",
+            "RISK_FALLBACK_API_KEY",
+        ),
+        "",
+    )
+    model_name = _env_text(
+        ("SCRAPE_MODEL_NAME", "MODEL_NAME", "RISK_FALLBACK_MODEL_NAME"),
+        DEFAULT_MODEL_NAME,
+    )
+    model_base_url = _env_text(
+        ("SCRAPE_MODEL_BASE_URL", "MODEL_BASE_URL", "RISK_FALLBACK_MODEL_BASE_URL"),
+        DEFAULT_MODEL_BASE_URL,
+    )
+    return api_key, model_name or DEFAULT_MODEL_NAME, model_base_url or DEFAULT_MODEL_BASE_URL
+
+
+def _extract_video_candidates_with_env_model(
+    page_url: str,
+    html_text: str,
+    page_title: str = "",
+) -> Dict[str, Any]:
+    if not SCRAPE_MODEL_PARSE_ENABLED:
+        return {}
+
+    api_key, model_name, model_base_url = _read_scrape_env_model_options()
+    if not api_key:
+        return {}
+
+    snapshot = str(html_text or "").strip()
+    if not snapshot:
+        return {}
+    snapshot = snapshot[:SCRAPE_MODEL_HTML_MAX_CHARS]
+
+    agent = VideoAnalyzerAgent(
+        api_key=api_key,
+        whisper_model="tiny",
+        model_name=model_name,
+        model_base_url=model_base_url,
+    )
+    prompt_schema = {
+        "candidate_urls": ["https://example.com/video.mp4"],
+        "media_ids": ["1234567890"],
+        "confidence_note": "short reasoning",
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You extract playable video URLs and video IDs from HTML text. "
+                "Return JSON only."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Page URL: {page_url}\n"
+                f"Page title: {page_title}\n"
+                f"Return strict JSON with schema: {json.dumps(prompt_schema, ensure_ascii=False)}\n"
+                "Rules: candidate_urls must be absolute http/https URLs; "
+                "media_ids should only contain digits.\n"
+                f"HTML snapshot:\n{snapshot}"
+            ),
+        },
+    ]
+
+    raw_result = _run_async(agent._chat_completion_text(messages, temperature=0.0))
+    parsed = agent._parse_json_object_response(raw_result)
+    if not isinstance(parsed, dict):
+        return {}
+
+    candidate_urls: List[str] = []
+    for item in parsed.get("candidate_urls", []) or []:
+        text = str(item or "").strip()
+        if text:
+            candidate_urls.append(text)
+
+    media_ids: List[str] = []
+    for item in parsed.get("media_ids", []) or []:
+        media_id = _extract_numeric_media_id(item)
+        if media_id and media_id not in media_ids:
+            media_ids.append(media_id)
+
+    return {
+        "candidate_urls": candidate_urls[:24],
+        "media_ids": media_ids[:24],
+        "confidence_note": str(parsed.get("confidence_note", "")).strip(),
+        "model_name": model_name,
+    }
+
+
+def _parse_csv_text(raw_value: Any) -> List[str]:
+    text = str(raw_value or "").strip()
+    if not text:
+        return []
+    items: List[str] = []
+    for token in re.split(r"[,\n;]+", text):
+        candidate = str(token or "").strip()
+        if candidate and candidate not in items:
+            items.append(candidate)
+    return items
+
+
+def _parse_yt_dlp_browser_spec(raw_spec: Any) -> Tuple[Any, ...] | None:
+    spec = str(raw_spec or "").strip()
+    if not spec:
+        return None
+    parts = [part.strip() for part in spec.split(":")]
+    browser = str(parts[0] or "").strip().lower()
+    if not browser:
+        return None
+
+    # Supported browsers in yt-dlp cookies module.
+    supported = {
+        "chrome",
+        "edge",
+        "firefox",
+        "safari",
+        "opera",
+        "brave",
+        "chromium",
+        "vivaldi",
+        "whale",
+    }
+    if browser not in supported:
+        return None
+
+    profile = parts[1] if len(parts) > 1 and parts[1] else None
+    keyring = parts[2] if len(parts) > 2 and parts[2] else None
+    container = parts[3] if len(parts) > 3 and parts[3] else None
+    return (browser, profile, keyring, container)
+
+
+def _write_ytdlp_cookiefile_from_header(cookie_header: str, host: str) -> Path | None:
+    header_text = str(cookie_header or "").strip()
+    host_text = str(host or "").strip().lower()
+    if not header_text or not host_text:
+        return None
+    host_text = host_text.split(":", 1)[0]
+    if not host_text:
+        return None
+
+    cookie_items: List[Tuple[str, str]] = []
+    for segment in header_text.split(";"):
+        pair = str(segment or "").strip()
+        if not pair or "=" not in pair:
+            continue
+        key, value = pair.split("=", 1)
+        key_text = str(key or "").strip()
+        value_text = str(value or "").strip()
+        if not key_text:
+            continue
+        cookie_items.append((key_text, value_text))
+    if not cookie_items:
+        return None
+
+    cache_dir = (UPLOAD_STAGING_ROOT / ".yt_dlp_cookie_cache").resolve()
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache_key = hashlib.sha256(f"{host_text}|{header_text}".encode("utf-8")).hexdigest()[:16]
+    cookie_file = cache_dir / f"{host_text}_{cache_key}.cookies.txt"
+    lines = ["# Netscape HTTP Cookie File", ""]
+    cookie_domain = host_text
+    if host_text.endswith(".douyin.com"):
+        cookie_domain = ".douyin.com"
+    elif host_text.endswith(".iesdouyin.com"):
+        cookie_domain = ".iesdouyin.com"
+    elif host_text.startswith("."):
+        cookie_domain = host_text
+    else:
+        cookie_domain = f".{host_text}"
+    for key_text, value_text in cookie_items:
+        lines.append(f"{cookie_domain}\tTRUE\t/\tTRUE\t0\t{key_text}\t{value_text}")
+    cookie_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return cookie_file
+
+
+def _build_yt_dlp_cookie_sources(raw_url: str = "") -> List[Dict[str, Any]]:
+    sources: List[Dict[str, Any]] = []
+    seen: set[Tuple[str, str]] = set()
+
+    def _add_source(label: str, opts: Dict[str, Any]) -> None:
+        normalized_label = str(label or "").strip() or "unknown"
+        if "cookiefile" in opts:
+            key = ("file", str(opts.get("cookiefile", "")).strip().lower())
+        elif "cookiesfrombrowser" in opts:
+            browser_tuple = tuple(opts.get("cookiesfrombrowser") or ())
+            key = ("browser", "|".join(str(item or "") for item in browser_tuple).lower())
+        else:
+            key = ("none", "none")
+        if key in seen:
+            return
+        seen.add(key)
+        payload = dict(opts)
+        payload["label"] = normalized_label
+        sources.append(payload)
+
+    parsed = urlparse(str(raw_url or "").strip())
+    host = str(parsed.netloc or "").strip()
+    if YTDLP_COOKIE_HEADER and host:
+        generated_cookie_file = _write_ytdlp_cookiefile_from_header(
+            YTDLP_COOKIE_HEADER, host
+        )
+        if generated_cookie_file is not None and generated_cookie_file.exists():
+            _add_source(
+                f"cookieheader:{generated_cookie_file.name}",
+                {"cookiefile": str(generated_cookie_file)},
+            )
+
+    cookies_file = str(YTDLP_COOKIES_FILE or "").strip()
+    if cookies_file:
+        cookie_path = Path(cookies_file).expanduser().resolve(strict=False)
+        if cookie_path.exists() and cookie_path.is_file():
+            _add_source(
+                f"cookiefile:{cookie_path.name}",
+                {"cookiefile": str(cookie_path)},
+            )
+        else:
+            logger.warning("YTDLP_COOKIES_FILE 不存在或不可读: %s", cookie_path)
+
+    for browser_spec in _parse_csv_text(YTDLP_COOKIES_FROM_BROWSER):
+        parsed = _parse_yt_dlp_browser_spec(browser_spec)
+        if parsed is not None:
+            _add_source(
+                f"browser:{parsed[0]}",
+                {"cookiesfrombrowser": parsed},
+            )
+
+    if YTDLP_PREFER_BROWSER_COOKIES:
+        for browser_spec in _parse_csv_text(YTDLP_BROWSER_FALLBACKS):
+            parsed = _parse_yt_dlp_browser_spec(browser_spec)
+            if parsed is not None:
+                _add_source(
+                    f"browser:{parsed[0]}",
+                    {"cookiesfrombrowser": parsed},
+                )
+
+    _add_source("no_cookies", {})
+    return sources
+
+
+def _scrape_page_info_with_scrapling(raw_url: str) -> Dict[str, Any]:
+    attempts = SCRAPLING_PAGE_READER.fetch_attempts(raw_url)
+
+    def _extract_from_response(response_obj: Any, method_tag: str) -> Dict[str, Any]:
+        status_code = _safe_int(getattr(response_obj, "status", 0), 0, 0)
+        final_url = str(getattr(response_obj, "url", "")).strip() or raw_url
+        base_url = final_url or raw_url
+
+        def _css_values(selector: str) -> List[str]:
+            try:
+                selected = response_obj.css(selector)
+            except Exception:
+                return []
+            try:
+                values = selected.getall()
+            except Exception:
+                try:
+                    single = selected.get()
+                except Exception:
+                    single = ""
+                values = [single] if single else []
+            results: List[str] = []
+            for value in values:
+                text = str(value or "").strip()
+                if text:
+                    results.append(text)
+            return results
+
+        discovered_urls: List[str] = []
+        _append_unique_url_candidate(discovered_urls, final_url, base_url=base_url)
+
+        title_candidates = (
+            _css_values("meta[property='og:title']::attr(content)")
+            + _css_values("meta[name='twitter:title']::attr(content)")
+            + _css_values("title::text")
+        )
+        page_title = str(title_candidates[0]).strip() if title_candidates else ""
+
+        canonical_candidates = _css_values("link[rel='canonical']::attr(href)") + _css_values(
+            "meta[property='og:url']::attr(content)"
+        )
+        canonical_url = ""
+        for candidate in canonical_candidates:
+            before_len = len(discovered_urls)
+            _append_unique_url_candidate(discovered_urls, candidate, base_url=base_url)
+            if len(discovered_urls) > before_len and not canonical_url:
+                canonical_url = discovered_urls[-1]
+
+        for selector in (
+            "meta[property='og:video']::attr(content)",
+            "meta[property='og:video:url']::attr(content)",
+            "meta[property='og:video:secure_url']::attr(content)",
+            "meta[name='twitter:player:stream']::attr(content)",
+            "video::attr(src)",
+            "video source::attr(src)",
+        ):
+            for candidate in _css_values(selector):
+                _append_unique_url_candidate(discovered_urls, candidate, base_url=base_url)
+
+        html_content = str(getattr(response_obj, "html_content", "") or "")
+        if not html_content:
+            body = getattr(response_obj, "body", b"")
+            if isinstance(body, bytes):
+                html_content = body.decode("utf-8", errors="ignore")
+            else:
+                html_content = str(body or "")
+        if not html_content:
+            html_content = str(getattr(response_obj, "text", "") or "")
+
+        for pattern in (
+            r"https?://[^\s\"'<>\\]+(?:\.mp4|\.m3u8)(?:\?[^\s\"'<>\\]*)?",
+            r"https?://[^\s\"'<>\\]+/(?:video|note|share/video)/\d{8,25}[^\s\"'<>\\]*",
+            r"https?://[^\s\"'<>\\]+(?:modal_id|aweme_id|video_id|item_id)=\d{8,25}[^\s\"'<>\\]*",
+        ):
+            for found_url in re.findall(pattern, html_content, flags=re.IGNORECASE):
+                _append_unique_url_candidate(discovered_urls, found_url, base_url=base_url)
+
+        script_json_blocks = _css_values("script[type='application/ld+json']::text")
+        for script_text in script_json_blocks:
+            script_text_clean = str(script_text or "").strip()
+            if not script_text_clean:
+                continue
+            try:
+                payload = json.loads(script_text_clean)
+            except Exception:
+                for found_url in re.findall(
+                    r"https?://[^\s\"'<>\\]+", script_text_clean, flags=re.IGNORECASE
+                ):
+                    if _looks_like_video_candidate_url(found_url):
+                        _append_unique_url_candidate(
+                            discovered_urls, found_url, base_url=base_url
+                        )
+                continue
+            _extract_video_urls_from_json_payload(
+                payload, discovered_urls, base_url=base_url, key_hint=""
+            )
+
+        media_ids = _extract_media_ids_from_text(
+            "\n".join([raw_url, final_url, canonical_url, html_content[:600000]])
+        )
+        for media_id in media_ids:
+            _append_unique_url_candidate(
+                discovered_urls, f"https://www.douyin.com/video/{media_id}"
+            )
+            _append_unique_url_candidate(
+                discovered_urls, f"https://www.iesdouyin.com/share/video/{media_id}/"
+            )
+
+        model_assist: Dict[str, Any] = {}
+        if SCRAPE_MODEL_PARSE_ENABLED and html_content and len(discovered_urls) <= 2:
+            try:
+                model_assist = _extract_video_candidates_with_env_model(
+                    final_url, html_content, page_title=page_title
+                )
+            except Exception as exc:
+                model_assist = {"error": str(exc)}
+            if isinstance(model_assist, dict):
+                for found_url in model_assist.get("candidate_urls", []):
+                    _append_unique_url_candidate(discovered_urls, found_url, base_url=base_url)
+                for media_id in model_assist.get("media_ids", []):
+                    media_id_text = _extract_numeric_media_id(media_id)
+                    if not media_id_text:
+                        continue
+                    _append_unique_url_candidate(
+                        discovered_urls, f"https://www.douyin.com/video/{media_id_text}"
+                    )
+                    _append_unique_url_candidate(
+                        discovered_urls,
+                        f"https://www.iesdouyin.com/share/video/{media_id_text}/",
+                    )
+
+        challenge_signals = _detect_human_verification_signals(
+            status_code, final_url, html_content
+        )
+        return {
+            "scraper": "scrapling_fetcher",
+            "fetch_method": method_tag,
+            "status_code": status_code,
+            "final_url": final_url,
+            "canonical_url": canonical_url,
+            "page_title": page_title,
+            "media_ids": media_ids[:12],
+            "discovered_urls": discovered_urls[:60],
+            "challenge_detected": bool(challenge_signals),
+            "challenge_signals": challenge_signals,
+            "model_assist_used": bool(model_assist),
+            "model_assist_note": str(model_assist.get("confidence_note", "")).strip()
+            if isinstance(model_assist, dict)
+            else "",
+        }
+
+    fetch_errors: List[str] = []
+    result_candidates: List[Dict[str, Any]] = []
+    for attempt in attempts:
+        method_tag = str(getattr(attempt, "method", "") or "").strip() or "unknown"
+        response_obj = getattr(attempt, "response", None)
+        error_text = str(getattr(attempt, "error", "") or "").strip()
+        if response_obj is None:
+            if error_text:
+                fetch_errors.append(f"{method_tag}: {error_text}")
+            continue
+        try:
+            parsed = _extract_from_response(response_obj, method_tag)
+            result_candidates.append(parsed)
+        except Exception as exc:
+            fetch_errors.append(f"{method_tag}: {exc}")
+
+    if not result_candidates:
+        detail = "；".join(fetch_errors[:4]).strip() or "未知抓取错误"
+        raise RuntimeError(f"scrapling 页面抓取失败：{detail}")
+
+    def _score(item: Dict[str, Any]) -> Tuple[int, int, int]:
+        discovered_count = len(item.get("discovered_urls", []) or [])
+        challenge_flag = 0 if bool(item.get("challenge_detected", False)) else 1
+        stealth_flag = 1 if str(item.get("fetch_method", "")).strip() == "stealth_session" else 0
+        return challenge_flag, discovered_count, stealth_flag
+
+    best = sorted(result_candidates, key=_score, reverse=True)[0]
+    if fetch_errors:
+        best["fetch_errors"] = fetch_errors[:4]
+    return best
+
+
+def _safe_video_filename(raw_name: str, fallback_stem: str = "url_video") -> str:
+    safe_name = secure_filename(str(raw_name or "").strip())
+    fallback = secure_filename(fallback_stem) or "url_video"
+    stem = secure_filename(Path(safe_name).stem) if safe_name else fallback
+    if not stem:
+        stem = fallback
+    suffix = Path(safe_name).suffix.lower() if safe_name else ""
+    if not suffix or suffix.lstrip(".") not in ALLOWED_EXTENSIONS:
+        suffix = ".mp4"
+    return f"{stem}{suffix}"
+
+
+def _extract_filename_from_content_disposition(header_value: str) -> str:
+    text = str(header_value or "").strip()
+    if not text:
+        return ""
+
+    match_ext = re.search(r"filename\*\s*=\s*([^;]+)", text, flags=re.IGNORECASE)
+    if match_ext:
+        value = match_ext.group(1).strip().strip('"')
+        if "''" in value:
+            value = value.split("''", 1)[1]
+        return unquote(value).strip()
+
+    match_plain = re.search(r'filename\s*=\s*"?([^";]+)"?', text, flags=re.IGNORECASE)
+    if match_plain:
+        return unquote(match_plain.group(1)).strip()
+    return ""
+
+
+def _guess_video_filename_from_url(
+    raw_url: str,
+    content_disposition: str = "",
+    content_type: str = "",
+    fallback: str = "url_video.mp4",
+) -> str:
+    candidate = _extract_filename_from_content_disposition(content_disposition)
+    if not candidate:
+        parsed = urlparse(raw_url)
+        candidate = unquote(Path(parsed.path).name)
+
+    safe_candidate = secure_filename(candidate)
+    stem = secure_filename(Path(safe_candidate).stem) if safe_candidate else ""
+    suffix = Path(safe_candidate).suffix.lower() if safe_candidate else ""
+    if stem and suffix and suffix.lstrip(".") in ALLOWED_EXTENSIONS:
+        return f"{stem}{suffix}"
+
+    content_type_value = str(content_type or "").split(";")[0].strip().lower()
+    guessed_ext = mimetypes.guess_extension(content_type_value) or ""
+    guessed_ext = guessed_ext.lower()
+    if guessed_ext.startswith(".") and guessed_ext[1:] in ALLOWED_EXTENSIONS:
+        if not stem:
+            stem = secure_filename(Path(fallback).stem) or "url_video"
+        return f"{stem}{guessed_ext}"
+
+    fallback_stem = stem or secure_filename(Path(fallback).stem) or "url_video"
+    return _safe_video_filename(fallback, fallback_stem=fallback_stem)
+
+
+def _looks_like_html_payload(prefix: bytes) -> bool:
+    snippet = bytes(prefix or b"").lstrip().lower()[:180]
+    if not snippet:
+        return False
+    return (
+        snippet.startswith(b"<!doctype html")
+        or snippet.startswith(b"<html")
+        or b"<html" in snippet
+        or snippet.startswith(b"<?xml")
+    )
+
+
+def _download_video_with_http(
+    raw_url: str, target_path: Path, max_bytes: int
+) -> Tuple[Path, Dict[str, Any]]:
+    request_obj = Request(
+        raw_url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/124.0.0.0 Safari/537.36"
+            )
+        },
+    )
+
+    resolved_path = target_path
+    try:
+        with urlopen(request_obj, timeout=45) as resp:
+            content_type = str(resp.headers.get("Content-Type", "")).strip()
+            content_disposition = str(resp.headers.get("Content-Disposition", "")).strip()
+            if "text/html" in content_type.lower():
+                raise RuntimeError("链接返回的是网页内容，请提供视频直链")
+
+            guessed_name = _guess_video_filename_from_url(
+                raw_url,
+                content_disposition=content_disposition,
+                content_type=content_type,
+                fallback=target_path.name,
+            )
+            resolved_path = target_path.with_name(
+                _safe_video_filename(guessed_name, fallback_stem=target_path.stem)
+            )
+
+            first_chunk = b""
+            total_bytes = 0
+            with open(resolved_path, "wb") as output_file:
+                while True:
+                    chunk = resp.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    if not first_chunk:
+                        first_chunk = chunk[:256]
+                    total_bytes += len(chunk)
+                    if total_bytes > max_bytes:
+                        raise ValueError(
+                            f"远程视频大小超过限制（>{max_bytes / (1024 * 1024):.1f}MB）"
+                        )
+                    output_file.write(chunk)
+
+            if total_bytes <= 0:
+                raise RuntimeError("未获取到可用的视频内容")
+            if _looks_like_html_payload(first_chunk):
+                raise RuntimeError("链接返回的是网页内容，请确认视频链接有效")
+
+            return resolved_path, {
+                "download_source": "http_direct",
+                "content_type": content_type,
+                "bytes": total_bytes,
+            }
+    except HTTPError as exc:
+        raise RuntimeError(f"链接下载失败（HTTP {exc.code}）") from exc
+    except URLError as exc:
+        reason = str(getattr(exc, "reason", "") or exc)
+        raise RuntimeError(f"链接下载失败：{reason}") from exc
+    except Exception:
+        _safe_remove_file(resolved_path)
+        raise
+
+
+def _download_video_with_yt_dlp(
+    raw_url: str, target_path: Path, max_bytes: int
+) -> Tuple[Path, Dict[str, Any]]:
+    try:
+        import yt_dlp  # type: ignore
+    except Exception as exc:
+        raise RuntimeError("未检测到 yt-dlp，无法解析平台视频页链接") from exc
+
+    target_stem = target_path.with_suffix("")
+    outtmpl = str(target_stem) + ".%(ext)s"
+    base_headers: Dict[str, str] = {
+        "Referer": raw_url,
+    }
+    if SCRAPE_USER_AGENT:
+        base_headers["User-Agent"] = SCRAPE_USER_AGENT
+
+    base_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "format": "mp4/best[ext=mp4]/best",
+        "merge_output_format": "mp4",
+        "outtmpl": outtmpl,
+        "socket_timeout": 45,
+        "http_headers": base_headers,
+    }
+    cookie_sources = _build_yt_dlp_cookie_sources(raw_url)
+    source_errors: List[str] = []
+
+    def _cleanup_temp_files() -> None:
+        for path in target_stem.parent.glob(f"{target_stem.name}.*"):
+            resolved = path.resolve(strict=False)
+            if not resolved.exists() or not resolved.is_file():
+                continue
+            suffix = resolved.suffix.lower()
+            if suffix in {".part", ".ytdl", ".tmp", ".temp"}:
+                _safe_remove_file(resolved)
+
+    for cookie_source in cookie_sources:
+        ydl_opts = dict(base_opts)
+        source_label = str(cookie_source.get("label", "no_cookies")).strip() or "no_cookies"
+        cookie_file = str(cookie_source.get("cookiefile", "")).strip()
+        browser_tuple = cookie_source.get("cookiesfrombrowser")
+        if cookie_file:
+            ydl_opts["cookiefile"] = cookie_file
+        if browser_tuple:
+            ydl_opts["cookiesfrombrowser"] = browser_tuple
+
+        info: Dict[str, Any] = {}
+        candidate_paths: List[Path] = []
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                raw_info = ydl.extract_info(raw_url, download=True)
+                if isinstance(raw_info, dict):
+                    info = raw_info
+                    requested_downloads = raw_info.get("requested_downloads")
+                    if isinstance(requested_downloads, list):
+                        for item in requested_downloads:
+                            if not isinstance(item, dict):
+                                continue
+                            filepath = str(
+                                item.get("filepath") or item.get("_filename") or ""
+                            ).strip()
+                            if filepath:
+                                candidate_paths.append(Path(filepath))
+                    for key in ("filepath", "_filename"):
+                        filepath = str(raw_info.get(key) or "").strip()
+                        if filepath:
+                            candidate_paths.append(Path(filepath))
+                    prepared = str(ydl.prepare_filename(raw_info) or "").strip()
+                    if prepared:
+                        candidate_paths.append(Path(prepared))
+
+            downloaded_path: Path | None = None
+            for path in candidate_paths:
+                resolved = path.resolve(strict=False)
+                if resolved.exists() and resolved.is_file():
+                    downloaded_path = resolved
+                    break
+
+            if downloaded_path is None:
+                for path in target_stem.parent.glob(f"{target_stem.name}.*"):
+                    resolved = path.resolve(strict=False)
+                    if resolved.exists() and resolved.is_file():
+                        downloaded_path = resolved
+                        break
+
+            if downloaded_path is None:
+                raise RuntimeError("yt-dlp 下载完成但未找到输出文件")
+
+            final_name = _safe_video_filename(downloaded_path.name, fallback_stem=target_path.stem)
+            final_path = target_path.with_name(final_name)
+            if downloaded_path.resolve(strict=False) != final_path.resolve(strict=False):
+                _safe_remove_file(final_path)
+                shutil.move(str(downloaded_path), str(final_path))
+
+            file_size = final_path.stat().st_size if final_path.exists() else 0
+            if file_size <= 0:
+                _safe_remove_file(final_path)
+                raise RuntimeError("yt-dlp 下载结果为空")
+            if file_size > max_bytes:
+                _safe_remove_file(final_path)
+                raise ValueError(f"远程视频大小超过限制（>{max_bytes / (1024 * 1024):.1f}MB）")
+
+            return final_path, {
+                "download_source": "yt_dlp",
+                "yt_dlp_cookie_source": source_label,
+                "bytes": file_size,
+                "title": str(info.get("title", "")).strip(),
+                "extractor": str(info.get("extractor", "")).strip(),
+                "video_id": str(info.get("id", "")).strip(),
+                "webpage_url": str(info.get("webpage_url", "")).strip(),
+                "original_url": str(info.get("original_url", "")).strip(),
+            }
+        except Exception as exc:
+            source_errors.append(f"{source_label}: {str(exc)}")
+            logger.info("yt-dlp 下载失败（%s）: %s", source_label, exc)
+            _cleanup_temp_files()
+
+    detail = "；".join(source_errors[:6]).strip()
+    if len(source_errors) > 6:
+        detail = f"{detail}；...共{len(source_errors)}项"
+    if not detail:
+        detail = "未知错误"
+    raise RuntimeError(f"yt-dlp 下载失败：{detail}")
+
+
+def _download_video_from_url(
+    raw_url: Any,
+    target_path: Path,
+) -> Tuple[Path, Dict[str, Any]]:
+    normalized_url = _normalize_source_url(raw_url)
+    url_candidates = _build_source_url_candidates(normalized_url)
+    max_bytes = _safe_int(app.config.get("MAX_CONTENT_LENGTH"), 500 * 1024 * 1024, 1)
+    errors: List[str] = []
+    scraped_info: Dict[str, Any] = {}
+    challenge_detected = False
+    challenge_signals: List[str] = []
+
+    platform_name = PLATFORM_LINK_DOWNLOADER.detect_platform(normalized_url)
+    if platform_name:
+        try:
+            platform_result = PLATFORM_LINK_DOWNLOADER.maybe_download(
+                normalized_url,
+                target_path,
+                max_bytes=max_bytes,
+            )
+            if platform_result is not None:
+                downloaded_path, platform_meta = platform_result
+                normalized_meta = dict(platform_meta or {})
+                normalized_meta.setdefault("source_url", normalized_url)
+                normalized_meta.setdefault("resolved_source_url", normalized_url)
+                normalized_meta.setdefault("expected_media_ids", _extract_media_ids_from_url(normalized_url)[:8])
+                normalized_meta.setdefault("candidate_batch", "platform_llm_downloader")
+                return downloaded_path, normalized_meta
+        except Exception as exc:
+            errors.append(
+                f"platform<{_compact_text(normalized_url, 120)}>: {_compact_text(str(exc), 220)}"
+            )
+            logger.info(
+                "URL 下载：平台下载器失败，回退通用链路（%s / %s）: %s",
+                platform_name,
+                normalized_url,
+                exc,
+            )
+
+    try:
+        scraped_info = _scrape_page_info_with_scrapling(normalized_url)
+        if isinstance(scraped_info, dict):
+            base_url = str(scraped_info.get("final_url", "")).strip() or normalized_url
+            _append_unique_url_candidate(
+                url_candidates, scraped_info.get("final_url", ""), base_url=base_url
+            )
+            _append_unique_url_candidate(
+                url_candidates, scraped_info.get("canonical_url", ""), base_url=base_url
+            )
+            for found_url in scraped_info.get("discovered_urls", []):
+                _append_unique_url_candidate(url_candidates, found_url, base_url=base_url)
+            for media_id in scraped_info.get("media_ids", []):
+                media_id_text = _extract_numeric_media_id(media_id)
+                if not media_id_text:
+                    continue
+                _append_unique_url_candidate(
+                    url_candidates, f"https://www.douyin.com/video/{media_id_text}"
+                )
+                _append_unique_url_candidate(
+                    url_candidates, f"https://www.iesdouyin.com/share/video/{media_id_text}/"
+                )
+            challenge_detected = bool(scraped_info.get("challenge_detected", False))
+            challenge_signals = [
+                str(item or "").strip()
+                for item in (scraped_info.get("challenge_signals", []) or [])
+                if str(item or "").strip()
+            ]
+            logger.info(
+                "URL 页面抓取（scrapling）成功：%s，补充候选 %s 条",
+                normalized_url,
+                max(0, len(url_candidates) - 1),
+            )
+            if challenge_detected:
+                logger.warning(
+                    "URL 页面疑似触发验证（%s）: %s",
+                    normalized_url,
+                    ", ".join(challenge_signals) or "unknown",
+                )
+    except Exception as exc:
+        logger.info("URL 页面抓取（scrapling）失败（%s）: %s", normalized_url, exc)
+        errors.append(f"scrapling<{_compact_text(normalized_url, 120)}>: {_compact_text(str(exc), 220)}")
+
+    source_host = str(urlparse(normalized_url).netloc or "").lower()
+    expected_media_ids = _extract_media_ids_from_url(normalized_url)
+    is_douyin_source = "douyin.com" in source_host or "iesdouyin.com" in source_host
+    strict_media_scope = bool(
+        SCRAPE_STRICT_MEDIA_ID_MATCH and is_douyin_source and expected_media_ids
+    )
+
+    def _candidate_matches_expected_media(candidate_url: str) -> bool:
+        if not expected_media_ids:
+            return False
+        return any(_url_contains_media_id(candidate_url, media_id) for media_id in expected_media_ids)
+
+    if expected_media_ids and is_douyin_source:
+        for media_id in expected_media_ids:
+            _append_unique_url_candidate(url_candidates, f"https://www.douyin.com/video/{media_id}")
+            _append_unique_url_candidate(
+                url_candidates, f"https://www.iesdouyin.com/share/video/{media_id}/"
+            )
+
+    ordered_candidates: List[str] = []
+
+    def _push_candidate(url_text: str) -> None:
+        text = str(url_text or "").strip()
+        if text and text not in ordered_candidates:
+            ordered_candidates.append(text)
+
+    for media_id in expected_media_ids:
+        _push_candidate(f"https://www.douyin.com/video/{media_id}")
+        _push_candidate(f"https://www.iesdouyin.com/share/video/{media_id}/")
+
+    for candidate in url_candidates:
+        if _candidate_matches_expected_media(str(candidate)):
+            _push_candidate(str(candidate))
+    for candidate in url_candidates:
+        _push_candidate(str(candidate))
+    url_candidates = ordered_candidates[:32]
+
+    strict_candidates = [
+        item for item in url_candidates if _candidate_matches_expected_media(str(item))
+    ]
+    if strict_media_scope and not strict_candidates:
+        raise RuntimeError("链接解析失败：未找到与原始视频 ID 匹配的候选地址")
+
+    if strict_media_scope and strict_candidates:
+        candidate_batches: List[Tuple[str, List[str]]] = [("strict_media_id", strict_candidates[:24])]
+    else:
+        direct_stream_candidates = [
+            item
+            for item in url_candidates
+            if re.search(r"\.(mp4|m3u8|mov|webm)(?:$|[?#])", str(item).lower())
+        ]
+        page_candidates = [item for item in url_candidates if item not in direct_stream_candidates]
+        candidate_batches = [("normal", (direct_stream_candidates + page_candidates)[:32])]
+
+    def _record_error(method: str, candidate_url: str, exc_obj: Exception) -> None:
+        short_url = _compact_text(candidate_url, 120)
+        short_err = _compact_text(str(exc_obj), 220)
+        errors.append(f"{method}<{short_url}>: {short_err}")
+
+    def _attach_common_meta(meta: Dict[str, Any], candidate_url: str, batch_name: str) -> Dict[str, Any]:
+        normalized_meta = dict(meta or {})
+        normalized_meta["source_url"] = normalized_url
+        normalized_meta["resolved_source_url"] = candidate_url
+        normalized_meta["expected_media_ids"] = expected_media_ids[:8]
+        normalized_meta["candidate_batch"] = batch_name
+        if isinstance(scraped_info, dict):
+            normalized_meta["scraped_final_url"] = str(scraped_info.get("final_url", "")).strip()
+            normalized_meta["scraped_canonical_url"] = str(
+                scraped_info.get("canonical_url", "")
+            ).strip()
+            normalized_meta["scraped_page_title"] = str(scraped_info.get("page_title", "")).strip()
+            normalized_meta["scrape_fetch_method"] = str(scraped_info.get("fetch_method", "")).strip()
+            normalized_meta["scrape_challenge_detected"] = bool(
+                scraped_info.get("challenge_detected", False)
+            )
+            normalized_meta["scrape_challenge_signals"] = challenge_signals[:8]
+        return normalized_meta
+
+    def _extract_resolved_media_ids(meta: Dict[str, Any], candidate_url: str) -> List[str]:
+        ids: List[str] = []
+        if not isinstance(meta, dict):
+            meta = {}
+        video_id = _extract_numeric_media_id(meta.get("video_id"))
+        if video_id and video_id not in ids:
+            ids.append(video_id)
+        for key in ("webpage_url", "original_url"):
+            for media_id in _extract_media_ids_from_url(meta.get(key)):
+                if media_id not in ids:
+                    ids.append(media_id)
+        for media_id in _extract_media_ids_from_url(candidate_url):
+            if media_id not in ids:
+                ids.append(media_id)
+        return ids[:8]
+
+    def _mismatch_error_text(actual_ids: List[str]) -> str:
+        expected_text = ",".join(expected_media_ids[:4])
+        actual_text = ",".join(actual_ids[:4]) if actual_ids else "unknown"
+        return f"提取视频 ID 不匹配，期望 {expected_text}，实际 {actual_text}"
+
+    for batch_name, batch_candidates in candidate_batches:
+        for candidate_url in batch_candidates:
+            try:
+                downloaded_path, meta = _download_video_with_yt_dlp(
+                    candidate_url, target_path, max_bytes
+                )
+                if not isinstance(meta, dict):
+                    meta = {}
+                if strict_media_scope:
+                    actual_media_ids = _extract_resolved_media_ids(meta, candidate_url)
+                    if actual_media_ids and not any(
+                        item in expected_media_ids for item in actual_media_ids
+                    ):
+                        _safe_remove_file(downloaded_path)
+                        raise RuntimeError(_mismatch_error_text(actual_media_ids))
+                return downloaded_path, _attach_common_meta(meta, candidate_url, batch_name)
+            except Exception as exc:
+                _record_error("yt-dlp", candidate_url, exc)
+                logger.info("URL 下载：yt-dlp 失败（%s）: %s", candidate_url, exc)
+
+            if strict_media_scope:
+                _record_error("http", candidate_url, RuntimeError("严格 ID 模式已禁用 HTTP 直链回退"))
+                continue
+
+            if strict_media_scope and not _candidate_matches_expected_media(candidate_url):
+                _record_error("http", candidate_url, RuntimeError("严格 ID 模式已跳过非目标候选"))
+                continue
+
+            try:
+                downloaded_path, meta = _download_video_with_http(
+                    candidate_url, target_path, max_bytes
+                )
+                if not isinstance(meta, dict):
+                    meta = {}
+                if strict_media_scope:
+                    actual_media_ids = _extract_resolved_media_ids(meta, candidate_url)
+                    if actual_media_ids and not any(
+                        item in expected_media_ids for item in actual_media_ids
+                    ):
+                        _safe_remove_file(downloaded_path)
+                        raise RuntimeError(_mismatch_error_text(actual_media_ids))
+                return downloaded_path, _attach_common_meta(meta, candidate_url, batch_name)
+            except Exception as exc:
+                _record_error("http", candidate_url, exc)
+                logger.info("URL 下载：HTTP 直链失败（%s）: %s", candidate_url, exc)
+
+    detail_items = [item for item in errors if str(item or "").strip()]
+    detail = "；".join(detail_items[:6]).strip()
+    if len(detail_items) > 6:
+        detail = f"{detail}；...共{len(detail_items)}项错误"
+    if not detail:
+        detail = "未获取到可用的视频流"
+    challenge_hint = ""
+    if challenge_detected:
+        challenge_tag = "、".join(challenge_signals[:4]).strip() or "未知验证类型"
+        challenge_hint = (
+            " 当前页面疑似触发人机验证，"
+            f"标记：{challenge_tag}。请先在浏览器完成验证，或配置可用 cookies/proxy 后重试。"
+        )
+    raise RuntimeError(
+        f"链接下载失败：{detail}。如为平台播放页链接，请安装并更新 yt-dlp 后重试。{challenge_hint}"
+    )
 
 
 def _safe_int(
@@ -3796,6 +5155,267 @@ def _format_seconds_to_mmss(value: Any) -> str:
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
+def _format_seconds_to_vtt_timestamp(value: Any) -> str:
+    seconds = max(0.0, _safe_float(value, 0.0, 0.0))
+    whole = int(seconds)
+    milli = int(round((seconds - whole) * 1000))
+    if milli >= 1000:
+        whole += 1
+        milli = 0
+    hh = whole // 3600
+    mm = (whole % 3600) // 60
+    ss = whole % 60
+    return f"{hh:02d}:{mm:02d}:{ss:02d}.{milli:03d}"
+
+
+def _parse_srt_timestamp_to_seconds(value: Any) -> float | None:
+    text = str(value or "").strip()
+    match = re.match(r"^(\d{1,2}):(\d{2}):(\d{2})(?:[,.](\d{1,3}))?$", text)
+    if not match:
+        return None
+    hh = int(match.group(1))
+    mm = int(match.group(2))
+    ss = int(match.group(3))
+    ms_raw = str(match.group(4) or "0")
+    ms_text = ms_raw.ljust(3, "0")[:3]
+    ms = int(ms_text)
+    return float(hh * 3600 + mm * 60 + ss) + float(ms) / 1000.0
+
+
+def _parse_srt_file_entries(srt_path: Path) -> List[Dict[str, Any]]:
+    if not srt_path.exists() or not srt_path.is_file():
+        return []
+
+    try:
+        content = srt_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return []
+
+    blocks = re.split(r"\n{2,}", content.strip())
+    entries: List[Dict[str, Any]] = []
+    for block in blocks:
+        lines = [line.strip("\ufeff").rstrip() for line in block.splitlines() if line.strip()]
+        if not lines:
+            continue
+
+        time_line_index = -1
+        for idx, line in enumerate(lines):
+            if "-->" in line:
+                time_line_index = idx
+                break
+        if time_line_index < 0:
+            continue
+
+        timing_line = lines[time_line_index]
+        timing_parts = [part.strip() for part in timing_line.split("-->", 1)]
+        if len(timing_parts) != 2:
+            continue
+
+        start_text = timing_parts[0]
+        end_text = timing_parts[1]
+        start_seconds = _parse_srt_timestamp_to_seconds(start_text)
+        end_seconds = _parse_srt_timestamp_to_seconds(end_text)
+        if start_seconds is None or end_seconds is None:
+            continue
+
+        text_lines = lines[time_line_index + 1 :]
+        text = "\n".join(text_lines).strip()
+        entries.append(
+            {
+                "index": len(entries) + 1,
+                "start_time": start_text.replace(".", ","),
+                "end_time": end_text.replace(".", ","),
+                "start_seconds": start_seconds,
+                "end_seconds": end_seconds,
+                "text": text,
+            }
+        )
+
+    return entries
+
+
+def _find_output_subtitle_file(output_dir: Path) -> Path | None:
+    candidates: List[Tuple[float, Path]] = []
+    for path in output_dir.glob("*.srt"):
+        resolved = path.resolve(strict=False)
+        if resolved.is_symlink() or not resolved.is_file():
+            continue
+        try:
+            mtime = resolved.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        candidates.append((mtime, resolved))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _find_output_video_file(output_dir: Path, preferred_video_name: str = "") -> Path | None:
+    preferred_name = secure_filename(str(preferred_video_name or "").strip())
+    if preferred_name:
+        preferred_path = (output_dir / preferred_name).resolve(strict=False)
+        if (
+            preferred_path.exists()
+            and preferred_path.is_file()
+            and not preferred_path.is_symlink()
+            and allowed_file(preferred_path.name)
+        ):
+            return preferred_path
+
+    candidates: List[Tuple[float, Path]] = []
+    for ext in ALLOWED_EXTENSIONS:
+        for path in output_dir.glob(f"*.{ext}"):
+            resolved = path.resolve(strict=False)
+            if resolved.is_symlink() or not resolved.is_file():
+                continue
+            try:
+                mtime = resolved.stat().st_mtime
+            except OSError:
+                mtime = 0.0
+            candidates.append((mtime, resolved))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    return candidates[0][1]
+
+
+def _should_refresh_export_file(target_path: Path, source_path: Path) -> bool:
+    if not target_path.exists():
+        return True
+    try:
+        return target_path.stat().st_mtime < source_path.stat().st_mtime
+    except OSError:
+        return True
+
+
+def _render_vtt_from_entries(entries: List[Dict[str, Any]]) -> str:
+    lines = ["WEBVTT", ""]
+    for item in entries:
+        start_ts = _format_seconds_to_vtt_timestamp(item.get("start_seconds", 0.0))
+        end_ts = _format_seconds_to_vtt_timestamp(item.get("end_seconds", 0.0))
+        text = str(item.get("text", "")).strip()
+        lines.append(str(item.get("index", "")))
+        lines.append(f"{start_ts} --> {end_ts}")
+        lines.extend(text.splitlines() if text else [""])
+        lines.append("")
+    return "\n".join(lines).strip() + "\n"
+
+
+def _render_txt_from_entries(entries: List[Dict[str, Any]]) -> str:
+    lines: List[str] = []
+    for item in entries:
+        text = str(item.get("text", "")).strip()
+        if not text:
+            continue
+        lines.append(f"[{_format_seconds_to_mmss(item.get('start_seconds', 0.0))}] {text}")
+    return "\n".join(lines).strip() + ("\n" if lines else "")
+
+
+def _ensure_subtitle_exports(output_dir: Path, srt_path: Path) -> Dict[str, Path]:
+    output_dir_resolved = output_dir.resolve(strict=False)
+    srt_resolved = srt_path.resolve(strict=False)
+    _assert_within(output_dir_resolved, OUTPUT_ROOT, "output_dir")
+    _assert_within(srt_resolved, output_dir_resolved, "subtitle_file")
+
+    entries = _parse_srt_file_entries(srt_resolved)
+    vtt_path = srt_resolved.with_suffix(".vtt")
+    txt_path = srt_resolved.with_suffix(".txt")
+
+    if _should_refresh_export_file(vtt_path, srt_resolved):
+        vtt_path.write_text(_render_vtt_from_entries(entries), encoding="utf-8")
+    if _should_refresh_export_file(txt_path, srt_resolved):
+        txt_path.write_text(_render_txt_from_entries(entries), encoding="utf-8")
+
+    return {"srt": srt_resolved, "vtt": vtt_path, "txt": txt_path}
+
+
+def _build_output_media_bundle(
+    output_dir: Path,
+    preferred_video_name: str = "",
+    preferred_srt_path: str = "",
+) -> Dict[str, Any]:
+    output_dir_resolved = output_dir.resolve(strict=False)
+    _assert_within(output_dir_resolved, OUTPUT_ROOT, "output_dir")
+
+    bundle: Dict[str, Any] = {
+        "output_dir_name": output_dir_resolved.name,
+        "subtitle_available": False,
+        "subtitle_line_count": 0,
+    }
+    output_dir_name_encoded = quote(output_dir_resolved.name)
+
+    video_file = _find_output_video_file(
+        output_dir_resolved, preferred_video_name=preferred_video_name
+    )
+    if video_file is not None:
+        bundle["video_file_name"] = video_file.name
+        bundle["video_preview_url"] = (
+            f"/output/{output_dir_name_encoded}/{quote(video_file.name)}"
+        )
+
+    preferred_srt = str(preferred_srt_path or "").strip()
+    subtitle_file: Path | None = None
+    if preferred_srt:
+        candidate = Path(preferred_srt).resolve(strict=False)
+        if (
+            candidate.exists()
+            and candidate.is_file()
+            and not candidate.is_symlink()
+            and candidate.suffix.lower() == ".srt"
+        ):
+            try:
+                _assert_within(candidate, output_dir_resolved, "subtitle_file")
+                subtitle_file = candidate
+            except ValueError:
+                subtitle_file = None
+    if subtitle_file is None:
+        subtitle_file = _find_output_subtitle_file(output_dir_resolved)
+
+    if subtitle_file is None:
+        return bundle
+
+    exports = _ensure_subtitle_exports(output_dir_resolved, subtitle_file)
+    entries = _parse_srt_file_entries(exports["srt"])
+    export_urls = {
+        fmt: f"/download_subtitle/{output_dir_name_encoded}?format={fmt}"
+        for fmt in exports.keys()
+    }
+    bundle.update(
+        {
+            "subtitle_available": True,
+            "subtitle_file_name": subtitle_file.name,
+            "subtitle_line_count": len(entries),
+            "subtitle_exports": export_urls,
+            "subtitle_workbench_url": f"/subtitle_workbench?output_dir={output_dir_name_encoded}",
+        }
+    )
+    return bundle
+
+
+def _append_output_bundle_to_zip(
+    zf: zipfile.ZipFile, output_path: Path, prefix: str = ""
+) -> None:
+    md_file = output_path / "operation_guide.md"
+    pdf_file = output_path / "operation_guide.pdf"
+    images_dir = output_path / "images"
+
+    if md_file.exists():
+        zf.write(md_file, f"{prefix}operation_guide.md")
+    if pdf_file.exists():
+        zf.write(pdf_file, f"{prefix}operation_guide.pdf")
+    if images_dir.exists():
+        for pattern in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
+            for img_file in images_dir.glob(pattern):
+                zf.write(img_file, f"{prefix}images/{img_file.name}")
+
+    subtitle_file = _find_output_subtitle_file(output_path)
+    if subtitle_file is not None:
+        subtitle_exports = _ensure_subtitle_exports(output_path, subtitle_file)
+        for fmt, export_path in subtitle_exports.items():
+            zf.write(export_path, f"{prefix}subtitle.{fmt}")
+
+
 def _compact_text(value: Any, limit: int = 120) -> str:
     text = re.sub(r"\s+", " ", str(value or "")).strip()
     if len(text) <= max(1, int(limit)):
@@ -4751,6 +6371,11 @@ class VideoProcessingService:
         report("pdf", "\u6b63\u5728\u751f\u6210 PDF...")
         agent.generate_pdf(str(output_md), str(output_pdf))
         agent.save_results(steps, str(output_dir / "steps.json"))
+        output_media = _build_output_media_bundle(
+            output_dir,
+            preferred_video_name=video_path.name,
+            preferred_srt_path=srt_path or "",
+        )
         report("done", "\u5f53\u524d\u89c6\u9891\u5206\u6790\u5b8c\u6210")
 
         has_steps = len(steps) > 0
@@ -4765,6 +6390,8 @@ class VideoProcessingService:
         if isinstance(result_meta, dict):
             normalized_meta.update({k: v for k, v in result_meta.items() if v not in (None, "")})
         result_meta = normalized_meta
+        if output_media:
+            result_meta["output_media"] = output_media
         if isinstance(analysis_preprocess_meta, dict):
             result_meta["analysis_preprocess"] = {
                 k: v for k, v in analysis_preprocess_meta.items() if v not in ("", None)
@@ -4968,6 +6595,125 @@ def upload_file():
     except Exception as exc:
         _safe_remove_file(staged_path)
         return jsonify({"error": f"上传失败: {str(exc)}"}), 500
+
+
+@app.route("/upload_url", methods=["POST"])
+def upload_from_url():
+    data = _json_payload()
+    try:
+        source_url = _normalize_source_url(data.get("url", ""))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    upload_api_key, upload_model_name, upload_model_base_url = _normalize_upload_model_options(
+        data
+    )
+    requested_name = _safe_video_filename(
+        str(data.get("filename", "")).strip()
+        or _guess_video_filename_from_url(source_url, fallback="url_video.mp4"),
+        fallback_stem="url_video",
+    )
+    staged_path = _build_upload_staging_path(requested_name)
+
+    download_meta: Dict[str, Any] = {}
+    try:
+        downloaded_path, download_meta = _download_video_from_url(source_url, staged_path)
+        staged_path = downloaded_path
+        resolved_filename = _safe_video_filename(staged_path.name, fallback_stem="url_video")
+
+        segment_policy = _build_video_segment_policy(staged_path)
+        if bool(segment_policy.get("requires_trim")):
+            _safe_remove_file(staged_path)
+            return (
+                jsonify(
+                    _build_segment_policy_reject_payload(
+                        segment_policy,
+                        code="video_segment_trim_required",
+                        error_message=(
+                            "当前视频属于裁剪优先区（超长或超大文件），"
+                            "请先裁剪后再上传。"
+                        ),
+                    )
+                ),
+                400,
+            )
+
+        blacklist_risk, file_fingerprint = _check_upload_blacklist_precheck(
+            staged_video_path=staged_path,
+            source="upload_url",
+        )
+        if blacklist_risk is not None:
+            _safe_remove_file(staged_path)
+            return jsonify(_risk_reject_payload(blacklist_risk)), 403
+
+        risk_agent = _build_risk_agent_for_upload(
+            upload_api_key, upload_model_name, upload_model_base_url
+        )
+        risk, file_fingerprint, _ = _run_upload_pre_risk_check(
+            staged_video_path=staged_path,
+            risk_agent=risk_agent,
+            source="upload_url",
+            file_fingerprint=file_fingerprint,
+            skip_blacklist=True,
+        )
+        if _is_risk_infra_failure(risk):
+            _safe_remove_file(staged_path)
+            logger.warning("上传风控服务异常（url upload）: %s", risk)
+            payload, status_code = _build_upload_risk_failure_response(risk)
+            return jsonify(payload), status_code
+        if _should_block_by_risk(str(risk.get("decision", ""))):
+            blocked_hash = (
+                _register_blocked_video_fingerprint_by_hash(
+                    file_fingerprint, risk, source="upload_url_risk_block"
+                )
+                if file_fingerprint
+                else _register_blocked_video_fingerprint(
+                    staged_path, risk, source="upload_url_risk_block"
+                )
+            )
+            if blocked_hash:
+                risk["hash_sha256"] = blocked_hash
+            _safe_remove_file(staged_path)
+            return jsonify(_risk_reject_payload(risk)), 403
+
+        save_path = _build_unique_upload_path(resolved_filename)
+        shutil.move(str(staged_path), str(save_path))
+        _mark_uploaded_video_loaded_now(save_path)
+        return jsonify(
+            {
+                "success": True,
+                "filename": save_path.name,
+                "filepath": str(save_path),
+                "segment_policy": segment_policy,
+                "source_url": source_url,
+                "resolved_source_url": str(download_meta.get("resolved_source_url", "")).strip(),
+                "download_source": str(download_meta.get("download_source", "")).strip(),
+                "yt_dlp_cookie_source": str(
+                    download_meta.get("yt_dlp_cookie_source", "")
+                ).strip(),
+                "download_title": str(download_meta.get("title", "")).strip(),
+                "scraped_page_title": str(download_meta.get("scraped_page_title", "")).strip(),
+                "scraped_final_url": str(download_meta.get("scraped_final_url", "")).strip(),
+                "scraped_canonical_url": str(
+                    download_meta.get("scraped_canonical_url", "")
+                ).strip(),
+                "expected_media_ids": download_meta.get("expected_media_ids", []),
+                "resolved_video_id": str(download_meta.get("video_id", "")).strip(),
+                "candidate_batch": str(download_meta.get("candidate_batch", "")).strip(),
+                "scrape_fetch_method": str(download_meta.get("scrape_fetch_method", "")).strip(),
+                "scrape_challenge_detected": bool(
+                    download_meta.get("scrape_challenge_detected", False)
+                ),
+                "scrape_challenge_signals": download_meta.get("scrape_challenge_signals", []),
+            }
+        )
+    except ValueError as exc:
+        _safe_remove_file(staged_path)
+        logger.warning("上传风控不可用（url upload）: %s", exc)
+        return jsonify(_upload_risk_unavailable_payload()), 503
+    except Exception as exc:
+        _safe_remove_file(staged_path)
+        return jsonify({"error": f"链接上传失败: {str(exc)}"}), 500
 
 
 @app.route("/upload_chunk_init", methods=["POST"])
@@ -5468,12 +7214,19 @@ def analyze():
                 else "\u89c6\u9891\u5206\u6790\u5df2\u5b8c\u6210"
             ),
         )
+        output_media = (
+            result_meta.get("output_media", {})
+            if isinstance(result_meta.get("output_media", {}), dict)
+            else {}
+        )
         return jsonify(
             {
                 "success": True,
                 "steps": steps,
                 "markdown": md_content,
                 "output_dir": output_dir,
+                "output_dir_name": str(output_media.get("output_dir_name", "")).strip()
+                or Path(output_dir).name,
                 "pdf_path": output_pdf,
                 "has_steps": has_steps,
                 "result_mode": result_meta.get("result_mode", "steps"),
@@ -5488,6 +7241,16 @@ def analyze():
                 "task_id": task_id,
                 "segment_policy": segment_policy,
                 "segment_guardrails": segment_guardrails,
+                "video_preview_url": str(output_media.get("video_preview_url", "")).strip(),
+                "subtitle_available": bool(output_media.get("subtitle_available", False)),
+                "subtitle_file_name": str(output_media.get("subtitle_file_name", "")).strip(),
+                "subtitle_line_count": _safe_int(
+                    output_media.get("subtitle_line_count"), 0, 0
+                ),
+                "subtitle_exports": output_media.get("subtitle_exports", {}),
+                "subtitle_workbench_url": str(
+                    output_media.get("subtitle_workbench_url", "")
+                ).strip(),
                 "effective_options": {
                     "use_video": effective_use_video,
                     "web_search": effective_web_search,
@@ -5592,21 +7355,12 @@ def download_zip(output_dir):
         return jsonify({"error": "文件不存在"}), 404
 
     md_file = output_path / "operation_guide.md"
-    pdf_file = output_path / "operation_guide.pdf"
-    images_dir = output_path / "images"
-
     if not md_file.exists():
         return jsonify({"error": "文件不存在"}), 404
 
     memory_file = BytesIO()
     with zipfile.ZipFile(memory_file, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.write(md_file, "operation_guide.md")
-        if pdf_file.exists():
-            zf.write(pdf_file, "operation_guide.pdf")
-        if images_dir.exists():
-            for pattern in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
-                for img_file in images_dir.glob(pattern):
-                    zf.write(img_file, f"images/{img_file.name}")
+        _append_output_bundle_to_zip(zf, output_path, prefix="")
 
     memory_file.seek(0)
     return send_file(
@@ -5620,6 +7374,81 @@ def download_zip(output_dir):
 @app.route("/output/<path:filename>")
 def serve_output_file(filename):
     return send_from_directory(app.config["OUTPUT_FOLDER"], filename)
+
+
+@app.route("/subtitle_workbench", methods=["GET"])
+def subtitle_workbench():
+    raw_output_dir = str(request.args.get("output_dir", "")).strip()
+    if not raw_output_dir:
+        return jsonify({"error": "缺少输出目录"}), 400
+
+    try:
+        output_path = _resolve_output_dir(raw_output_dir, must_exist=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "输出目录不存在"}), 404
+
+    subtitle_file = _find_output_subtitle_file(output_path)
+    if subtitle_file is None:
+        return jsonify({"error": "未找到字幕文件"}), 404
+
+    entries = _parse_srt_file_entries(subtitle_file)
+    limit = _safe_int(request.args.get("limit"), 12000, 1, 50000)
+    output_media = _build_output_media_bundle(
+        output_path,
+        preferred_srt_path=str(subtitle_file),
+    )
+    return jsonify(
+        {
+            "success": True,
+            "output_dir": str(output_path),
+            "output_dir_name": output_path.name,
+            "subtitle_file": subtitle_file.name,
+            "line_count": len(entries),
+            "truncated": len(entries) > limit,
+            "lines": entries[:limit],
+            "video_preview_url": str(output_media.get("video_preview_url", "")).strip(),
+            "subtitle_available": bool(output_media.get("subtitle_available", False)),
+            "subtitle_exports": output_media.get("subtitle_exports", {}),
+        }
+    )
+
+
+@app.route("/download_subtitle/<output_dir>")
+def download_subtitle(output_dir):
+    subtitle_format = str(request.args.get("format", "srt")).strip().lower()
+    if subtitle_format not in {"srt", "vtt", "txt"}:
+        return jsonify({"error": "不支持的字幕格式"}), 400
+
+    try:
+        output_path = _resolve_output_dir(output_dir, must_exist=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "输出目录不存在"}), 404
+
+    subtitle_file = _find_output_subtitle_file(output_path)
+    if subtitle_file is None:
+        return jsonify({"error": "未找到字幕文件"}), 404
+
+    subtitle_exports = _ensure_subtitle_exports(output_path, subtitle_file)
+    export_path = subtitle_exports.get(subtitle_format)
+    if export_path is None or not export_path.exists():
+        return jsonify({"error": "字幕导出失败"}), 500
+
+    mimetype_map = {
+        "srt": "application/x-subrip",
+        "vtt": "text/vtt",
+        "txt": "text/plain; charset=utf-8",
+    }
+    download_name = f"{output_path.name}_subtitle.{subtitle_format}"
+    return send_file(
+        export_path,
+        mimetype=mimetype_map.get(subtitle_format, "application/octet-stream"),
+        as_attachment=True,
+        download_name=download_name,
+    )
 
 
 @app.route("/regenerate", methods=["POST"])
@@ -5669,6 +7498,7 @@ def regenerate_document():
         output_pdf = output_dir / "operation_guide.pdf"
         agent.generate_pdf(str(output_path), str(output_pdf))
         agent.save_results(steps, str(output_dir / "steps.json"))
+        output_media = _build_output_media_bundle(output_dir)
 
         with open(output_path, "r", encoding="utf-8") as f:
             md_content = f.read()
@@ -5679,7 +7509,19 @@ def regenerate_document():
                 "steps": steps,
                 "markdown": md_content,
                 "output_dir": str(output_dir),
+                "output_dir_name": str(output_media.get("output_dir_name", "")).strip()
+                or output_dir.name,
                 "pdf_path": str(output_pdf),
+                "video_preview_url": str(output_media.get("video_preview_url", "")).strip(),
+                "subtitle_available": bool(output_media.get("subtitle_available", False)),
+                "subtitle_file_name": str(output_media.get("subtitle_file_name", "")).strip(),
+                "subtitle_line_count": _safe_int(
+                    output_media.get("subtitle_line_count"), 0, 0
+                ),
+                "subtitle_exports": output_media.get("subtitle_exports", {}),
+                "subtitle_workbench_url": str(
+                    output_media.get("subtitle_workbench_url", "")
+                ).strip(),
             }
         )
     except Exception as exc:
@@ -5753,6 +7595,29 @@ def get_history_record(record_id):
                 if md_path.exists():
                     with open(md_path, "r", encoding="utf-8") as f:
                         record["markdown"] = f.read()
+                output_media = _build_output_media_bundle(
+                    output_dir,
+                    preferred_video_name=str(record.get("video_name", "")).strip(),
+                )
+                record["output_dir_name"] = str(
+                    output_media.get("output_dir_name", "")
+                ).strip() or output_dir.name
+                record["video_preview_url"] = str(
+                    output_media.get("video_preview_url", "")
+                ).strip()
+                record["subtitle_available"] = bool(
+                    output_media.get("subtitle_available", False)
+                )
+                record["subtitle_file_name"] = str(
+                    output_media.get("subtitle_file_name", "")
+                ).strip()
+                record["subtitle_line_count"] = _safe_int(
+                    output_media.get("subtitle_line_count"), 0, 0
+                )
+                record["subtitle_exports"] = output_media.get("subtitle_exports", {})
+                record["subtitle_workbench_url"] = str(
+                    output_media.get("subtitle_workbench_url", "")
+                ).strip()
 
         return jsonify({"record": record})
 
@@ -6019,6 +7884,11 @@ def analyze_batch():
             result_meta["segment_policy"] = segment_policy
             if segment_guardrails:
                 result_meta["segment_guardrails"] = segment_guardrails
+            output_media = (
+                result_meta.get("output_media", {})
+                if isinstance(result_meta.get("output_media", {}), dict)
+                else {}
+            )
 
             if not has_steps:
                 return (
@@ -6039,6 +7909,26 @@ def analyze_batch():
                         "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
                         "segment_policy": segment_policy,
                         "segment_guardrails": segment_guardrails,
+                        "output_dir_name": str(
+                            output_media.get("output_dir_name", "")
+                        ).strip()
+                        or Path(output_dir).name,
+                        "video_preview_url": str(
+                            output_media.get("video_preview_url", "")
+                        ).strip(),
+                        "subtitle_available": bool(
+                            output_media.get("subtitle_available", False)
+                        ),
+                        "subtitle_file_name": str(
+                            output_media.get("subtitle_file_name", "")
+                        ).strip(),
+                        "subtitle_line_count": _safe_int(
+                            output_media.get("subtitle_line_count"), 0, 0
+                        ),
+                        "subtitle_exports": output_media.get("subtitle_exports", {}),
+                        "subtitle_workbench_url": str(
+                            output_media.get("subtitle_workbench_url", "")
+                        ).strip(),
                         "effective_options": {
                             "use_video": effective_use_video,
                             "web_search": effective_web_search,
@@ -6058,6 +7948,8 @@ def analyze_batch():
                     "success": True,
                     "steps_count": len(steps) if steps else 0,
                     "output_dir": output_dir,
+                    "output_dir_name": str(output_media.get("output_dir_name", "")).strip()
+                    or Path(output_dir).name,
                     "pdf_path": output_pdf,
                     "markdown": md_content,
                     "steps": steps,
@@ -6072,6 +7964,22 @@ def analyze_batch():
                     "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
                     "segment_policy": segment_policy,
                     "segment_guardrails": segment_guardrails,
+                    "video_preview_url": str(
+                        output_media.get("video_preview_url", "")
+                    ).strip(),
+                    "subtitle_available": bool(
+                        output_media.get("subtitle_available", False)
+                    ),
+                    "subtitle_file_name": str(
+                        output_media.get("subtitle_file_name", "")
+                    ).strip(),
+                    "subtitle_line_count": _safe_int(
+                        output_media.get("subtitle_line_count"), 0, 0
+                    ),
+                    "subtitle_exports": output_media.get("subtitle_exports", {}),
+                    "subtitle_workbench_url": str(
+                        output_media.get("subtitle_workbench_url", "")
+                    ).strip(),
                     "effective_options": {
                         "use_video": effective_use_video,
                         "web_search": effective_web_search,
@@ -6198,18 +8106,7 @@ def download_batch_zip():
                 continue
 
             base_name = output_path.name
-            md_file = output_path / "operation_guide.md"
-            pdf_file = output_path / "operation_guide.pdf"
-            images_dir = output_path / "images"
-
-            if md_file.exists():
-                zf.write(md_file, f"{base_name}/operation_guide.md")
-            if pdf_file.exists():
-                zf.write(pdf_file, f"{base_name}/operation_guide.pdf")
-            if images_dir.exists():
-                for pattern in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
-                    for img_file in images_dir.glob(pattern):
-                        zf.write(img_file, f"{base_name}/images/{img_file.name}")
+            _append_output_bundle_to_zip(zf, output_path, prefix=f"{base_name}/")
 
     memory_file.seek(0)
     return send_file(
