@@ -28,10 +28,10 @@ from dotenv import load_dotenv
 from flask import Flask, g, jsonify, request, send_file, send_from_directory
 from werkzeug.utils import secure_filename
 
-from main.platform_link_downloader import PlatformLinkDownloader
+from Scrapling_download.platform_link_downloader import PlatformLinkDownloader
 SCRAPLING_READER_AVAILABLE = True
 try:
-    from main.scrapling_page_reader import ScraplingPageReader, ScraplingReaderSettings
+    from Scrapling_download.scrapling_page_reader import ScraplingPageReader, ScraplingReaderSettings
 except Exception:
     SCRAPLING_READER_AVAILABLE = False
 

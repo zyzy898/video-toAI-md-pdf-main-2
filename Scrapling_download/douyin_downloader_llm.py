@@ -29,7 +29,7 @@ from playwright.async_api import async_playwright
 import requests
 
 try:
-    from main.shared_llm_config import get_shared_llm_config
+    from Scrapling_download.shared_llm_config import get_shared_llm_config
 except Exception:
     from shared_llm_config import get_shared_llm_config
 

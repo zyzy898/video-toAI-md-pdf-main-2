@@ -7,7 +7,7 @@ from typing import Any, Callable, Dict, Tuple
 from urllib.parse import parse_qs, urlparse
 
 try:
-    from main.shared_llm_config import get_shared_llm_config
+    from Scrapling_download.shared_llm_config import get_shared_llm_config
 except Exception:
     from shared_llm_config import get_shared_llm_config
 
@@ -92,24 +92,24 @@ class PlatformLinkDownloader:
     ) -> bool:
         output_str = str(output_path)
         if platform == "bilibili":
-            import main.bilibili_downloader_llm
+            import Scrapling_download.bilibili_downloader_llm
 
-            self._apply_env_model_to_module(main.bilibili_downloader_llm)
-            downloader = main.bilibili_downloader_llm.BilibiliDownloader(use_llm=self.use_llm)
+            self._apply_env_model_to_module(Scrapling_download.bilibili_downloader_llm)
+            downloader = Scrapling_download.bilibili_downloader_llm.BilibiliDownloader(use_llm=self.use_llm)
             return bool(downloader.download(source_url, output_str))
 
         if platform == "xiaohongshu":
-            import main.xiaohongshu_downloader_llm
+            import Scrapling_download.xiaohongshu_downloader_llm
 
-            self._apply_env_model_to_module(main.xiaohongshu_downloader_llm)
-            downloader = main.xiaohongshu_downloader_llm.XiaoHongShuDownloader(use_llm=self.use_llm)
+            self._apply_env_model_to_module(Scrapling_download.xiaohongshu_downloader_llm)
+            downloader = Scrapling_download.xiaohongshu_downloader_llm.XiaoHongShuDownloader(use_llm=self.use_llm)
             return bool(downloader.download(source_url, output_str))
 
         if platform == "douyin":
-            import main.douyin_downloader_llm
+            import Scrapling_download.douyin_downloader_llm
 
-            self._apply_env_model_to_module(main.douyin_downloader_llm)
-            downloader = main.douyin_downloader_llm.DouyinDownloader(use_llm=self.use_llm)
+            self._apply_env_model_to_module(Scrapling_download.douyin_downloader_llm)
+            downloader = Scrapling_download.douyin_downloader_llm.DouyinDownloader(use_llm=self.use_llm)
             return bool(self._run_async_callable(lambda: downloader.download(source_url, output_str)))
 
         raise ValueError(f"unsupported platform: {platform}")

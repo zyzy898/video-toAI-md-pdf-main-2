@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bilibili Video Downloader - 哔哩哔哩视频下载器 (带LLM智能分析版)
-支持从哔哩哔哩视频页面自动提取并下载视频，当常规方法失败时自动调用LLM分析页面结构
+XiaoHongShu Video Downloader - 小红书视频下载器 (带LLM智能分析版)
+支持从小红书笔记页面自动提取并下载视频，当常规方法失败时自动调用LLM分析页面结构
 
 依赖安装:
     pip install yt-dlp playwright requests
     playwright install chromium
 
 使用方法:
-    python bilibili_downloader_llm.py <视频链接或分享文本> [输出文件名]
+    python xiaohongshu_downloader_llm.py <笔记链接或分享文本> [输出文件名]
     
 示例:
-    python bilibili_downloader_llm.py "https://www.bilibili.com/video/BV11XwuzRET8"
-    python bilibili_downloader_llm.py "【漂白鸡爪、量子长高、万能神药：今年315晚会，都曝光了啥？-哔哩哔哩】 https://b23.tv/FwARg66"
+    python xiaohongshu_downloader_llm.py "https://www.xiaohongshu.com/explore/699473ba000000001d02758e"
+    python xiaohongshu_downloader_llm.py "这种轻轻咬着嘬是啥意思？ http://xhslink.com/o/2BOIVJaEtms 复制后打开【小红书】查看笔记！"
 
 LLM配置:
     在 .env 中设置以下变量：
@@ -31,7 +31,7 @@ import requests
 from urllib.parse import unquote
 
 try:
-    from main.shared_llm_config import get_shared_llm_config
+    from Scrapling_download.shared_llm_config import get_shared_llm_config
 except Exception:
     from shared_llm_config import get_shared_llm_config
 
@@ -43,19 +43,19 @@ LLM_API_KEY, LLM_BASE_URL, LLM_MODEL = get_shared_llm_config()
 
 
 def extract_url_from_text(text):
-    """从分享文本中提取B站链接"""
-    # 匹配 b23.tv 短链接
-    match = re.search(r'https?://b23\.tv/[^\s"\'<>]+', text)
+    """从分享文本中提取小红书链接"""
+    # 匹配 xhslink.com 短链接
+    match = re.search(r'https?://xhslink\.com/[a-zA-Z0-9/]+', text)
     if match:
         return match.group(0)
-    # 匹配 www.bilibili.com 链接
-    match = re.search(r'https?://www\.bilibili\.com/video/[^\s]+', text)
+    # 匹配 www.xiaohongshu.com 链接
+    match = re.search(r'https?://www\.xiaohongshu\.com/explore/[^\s]+', text)
     if match:
         return match.group(0)
-    # 匹配 BV号直接构建链接
-    match = re.search(r'BV[a-zA-Z0-9]+', text)
+    # 匹配笔记ID直接构建链接
+    match = re.search(r'explore/([a-f0-9]+)', text)
     if match:
-        return f"https://www.bilibili.com/video/{match.group(0)}"
+        return f"https://www.xiaohongshu.com/explore/{match.group(1)}"
     return None
 
 
@@ -93,7 +93,7 @@ class LLMAnalyzer:
         if previous_attempts:
             previous_info = f"\n之前尝试过的方法（都失败了）：\n{json.dumps(previous_attempts, ensure_ascii=False, indent=2)}"
         
-        prompt = f"""你是一个网页数据提取专家。我需要从哔哩哔哩(B站)视频页面提取视频下载链接。
+        prompt = f"""你是一个网页数据提取专家。我需要从小红书(XiaoHongShu)笔记页面提取视频下载链接。
 
 页面URL: {page_url}
 
@@ -105,15 +105,16 @@ class LLMAnalyzer:
 
 请分析：
 1. 页面中是否包含视频下载链接？在哪里？
-2. 视频URL通常有哪些特征？（如包含 bilivideo.com、upos-sz-mirror.bilivideo.com 等）
+2. 视频URL通常有哪些特征？（如包含 xiaohongshu.com、video、mp4 等）
 3. 页面使用了什么反爬技术？（如动态加载、加密、验证等）
 4. 如何绕过这些反爬措施？
 5. 提供具体的Python代码建议来提取视频URL
 
-B站视频链接常见模式：
-- https://upos-sz-mirror.bilivideo.com/...
-- https://xy123x456x78x123xy.mcdn.bilivideo.cn/...
-- 在 script 标签中的 __playinfo__ 或 window.__INITIAL_STATE__
+小红书视频链接常见位置：
+- 在 script 标签中的 window.__INITIAL_STATE__
+- 在 script 标签中的 SSR 数据
+- 在 video 标签的 src 属性
+- 在 meta 标签的 content 属性
 
 请以JSON格式返回：
 {{
@@ -163,11 +164,11 @@ B站视频链接常见模式：
             return None
 
 
-class BilibiliDownloader:
+class XiaoHongShuDownloader:
     def __init__(self, use_llm=True):
         self.headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Referer': 'https://www.bilibili.com/',
+            'Referer': 'https://www.xiaohongshu.com/',
             'Accept': '*/*',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
         }
@@ -184,9 +185,9 @@ class BilibiliDownloader:
             print(f"解析短链接失败: {e}")
             return short_url
     
-    def extract_bvid(self, url):
-        """从 URL 中提取 BV 号"""
-        match = re.search(r'/video/(BV[\w]+)', url)
+    def extract_note_id(self, url):
+        """从 URL 中提取笔记 ID"""
+        match = re.search(r'/explore/([a-f0-9]+)', url)
         if match:
             return match.group(1)
         return None
@@ -204,10 +205,6 @@ class BilibiliDownloader:
                 'outtmpl': output_path,
                 'quiet': False,
                 'no_warnings': False,
-                'headers': {
-                    'Referer': 'https://www.bilibili.com/',
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -285,19 +282,19 @@ class BilibiliDownloader:
             print(f"提取到链接: {video_url}")
         
         # 处理短链接
-        if 'b23.tv' in video_url:
+        if 'xhslink.com' in video_url:
             print("检测到短链接，正在解析...")
             video_url = self.resolve_short_url(video_url)
             print(f"真实URL: {video_url}")
         
-        # 提取BV号
-        bvid = self.extract_bvid(video_url)
-        if bvid:
-            print(f"BV 号: {bvid}")
+        # 提取笔记ID
+        note_id = self.extract_note_id(video_url)
+        if note_id:
+            print(f"笔记 ID: {note_id}")
         
         # 设置输出文件名
         if output_path is None:
-            output_path = f"bilibili_{bvid or 'video'}.mp4"
+            output_path = f"xiaohongshu_{note_id or 'video'}.mp4"
         
         if not output_path.endswith('.mp4'):
             output_path += '.mp4'
@@ -332,15 +329,15 @@ class BilibiliDownloader:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='哔哩哔哩视频下载器 - LLM智能分析版')
-    parser.add_argument('url', help='B站视频URL或分享文本')
+    parser = argparse.ArgumentParser(description='小红书视频下载器 - LLM智能分析版')
+    parser.add_argument('url', help='小红书笔记URL或分享文本')
     parser.add_argument('output', nargs='?', help='输出文件名（可选）')
     parser.add_argument('--no-llm', action='store_true', help='禁用LLM智能分析')
     
     args = parser.parse_args()
     
     print("=" * 60)
-    print("哔哩哔哩视频下载器")
+    print("小红书视频下载器")
     print("=" * 60)
     print(f"输入: {args.url}")
     
@@ -352,7 +349,7 @@ def main():
     else:
         print("[INFO] LLM未配置，智能分析功能不可用")
     
-    downloader = BilibiliDownloader(use_llm=not args.no_llm)
+    downloader = XiaoHongShuDownloader(use_llm=not args.no_llm)
     success = downloader.download(args.url, args.output)
     
     if success:
@@ -363,8 +360,8 @@ def main():
         print("-" * 60)
         print("[FAIL] 下载失败")
         print("\n提示:")
-        print("1. 确保视频是公开的")
-        print("2. 某些视频可能需要登录（大会员）")
+        print("1. 确保笔记是公开的")
+        print("2. 某些视频可能需要登录")
         print("3. 尝试使用 --no-llm 禁用LLM分析")
         sys.exit(1)
 
