@@ -4826,17 +4826,13 @@ def _safe_remove_file(path: Path) -> None:
 
 class UploadRiskService:
     def resolve_upload_risk_api_key(self) -> str:
-        # Fallback chain when no upload-time key is provided by the caller.
-        for key_name in ("RISK_API_KEY", "MODEL_API_KEY", "ARK_API_KEY", "OPENAI_API_KEY"):
-            value = str(os.getenv(key_name, "")).strip()
-            if value:
-                return value
-        return ""
+        api_key, _, _ = _read_shared_backend_model_options(require_api_key=False)
+        return str(api_key or "").strip()
 
     def upload_risk_unavailable_message(self) -> str:
         return (
             "上传风控服务不可用，已拒绝上传。"
-            "请前往设置检查 API Key、模型名称与模型接口配置后重试上传。"
+            "请检查后端 .env 中的 MODEL_API_KEY / MODEL_NAME / MODEL_BASE_URL 配置后重试。"
         )
 
     def upload_risk_unavailable_payload(self) -> Dict[str, Any]:
@@ -4848,19 +4844,17 @@ class UploadRiskService:
     def build_risk_agent_for_upload(
         self, api_key: str = "", model_name: str = "", model_base_url: str = ""
     ) -> VideoAnalyzerAgent:
-        risk_api_key = str(api_key or "").strip() or self.resolve_upload_risk_api_key()
+        # 上传风控与主分析共用同一套后端模型配置，前端入参不参与覆盖。
+        shared_api_key, shared_model_name, shared_model_base_url = _read_shared_backend_model_options(
+            require_api_key=True
+        )
+        risk_api_key = str(shared_api_key or "").strip()
         if not risk_api_key:
             raise ValueError("上传风控模型 API Key 未配置")
 
-        risk_model_name = (
-            str(model_name or "").strip()
-            or str(os.getenv("RISK_MODEL_NAME", "")).strip()
-            or DEFAULT_MODEL_NAME
-        )
+        risk_model_name = str(shared_model_name or "").strip() or DEFAULT_MODEL_NAME
         risk_model_base_url = (
-            str(model_base_url or "").strip()
-            or str(os.getenv("RISK_MODEL_BASE_URL", "")).strip()
-            or DEFAULT_MODEL_BASE_URL
+            str(shared_model_base_url or "").strip() or DEFAULT_MODEL_BASE_URL
         )
         return VideoAnalyzerAgent(
             api_key=risk_api_key,
@@ -5078,15 +5072,74 @@ def _run_upload_pre_risk_check(
     return risk, fingerprint, "model"
 
 
+def _read_shared_backend_model_options(require_api_key: bool = True) -> Tuple[str, str, str]:
+    """
+    统一读取后端模型参数（风控与分析共用同一模型配置）。
+    仅管理员可通过 .env 修改，无需前端传参。
+    """
+    api_key = _env_text(
+        (
+            "MODEL_API_KEY",
+            "ARK_API_KEY",
+            "OPENAI_API_KEY",
+            "LLM_API_KEY",
+            "RISK_API_KEY",
+            "RISK_FALLBACK_API_KEY",
+        ),
+        "",
+    )
+    model_name = _env_text(
+        (
+            "MODEL_NAME",
+            "LLM_MODEL",
+            "RISK_MODEL_NAME",
+            "RISK_FALLBACK_MODEL_NAME",
+        ),
+        DEFAULT_MODEL_NAME,
+    )
+    model_base_url = _env_text(
+        (
+            "MODEL_BASE_URL",
+            "LLM_BASE_URL",
+            "RISK_MODEL_BASE_URL",
+            "RISK_FALLBACK_MODEL_BASE_URL",
+        ),
+        DEFAULT_MODEL_BASE_URL,
+    )
+
+    if require_api_key and not api_key:
+        raise ValueError(
+            "后端模型未配置：请在 .env 中设置 MODEL_API_KEY（或 ARK_API_KEY / OPENAI_API_KEY）。"
+        )
+
+    return (
+        str(api_key or "").strip(),
+        str(model_name or DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME,
+        str(model_base_url or DEFAULT_MODEL_BASE_URL).strip() or DEFAULT_MODEL_BASE_URL,
+    )
+
+
 def _normalize_processing_options(data: Dict[str, Any]) -> Tuple[str, bool, bool, int, float]:
-    env_whisper_model = _env_text(("WHISPER_MODE", "whisper_mode"), "base").strip().lower() or "base"
+    # 仅后端 .env 生效（管理员可调），前端不再覆盖：
+    # - WHISPER_MODE/WHISPER_MODEL: 字幕识别模型
+    # - ANALYZE_USE_VIDEO/USE_VIDEO: 视频上传分析模式开关（默认开启）
+    # - VIDEO_ANALYZE_FPS/ANALYZE_FPS/VIDEO_FPS: 视频模式抽帧频率
+    env_whisper_model = (
+        _env_text(("WHISPER_MODE", "WHISPER_MODEL", "whisper_mode"), "base")
+        .strip()
+        .lower()
+        or "base"
+    )
     if env_whisper_model not in ALLOWED_WHISPER_MODELS:
         env_whisper_model = "base"
-    raw_whisper_model = str(data.get("whisper_model", data.get("whisper_mode", ""))).strip().lower()
-    whisper_model = raw_whisper_model or env_whisper_model
-    if whisper_model not in ALLOWED_WHISPER_MODELS:
-        whisper_model = env_whisper_model
 
+    env_use_video = _env_bool(("ANALYZE_USE_VIDEO", "USE_VIDEO", "use_video"), True)
+    env_fps = _safe_float(
+        _env_text(("VIDEO_ANALYZE_FPS", "ANALYZE_FPS", "VIDEO_FPS", "fps"), "1.0"),
+        1.0,
+        FPS_MIN,
+        FPS_MAX,
+    )
     env_web_search = _env_bool(("WEB_SEARCH", "web_search"), False)
     env_max_vision = _safe_int(
         _env_text(("MAX_VISION", "max_vision"), "10"),
@@ -5095,7 +5148,6 @@ def _normalize_processing_options(data: Dict[str, Any]) -> Tuple[str, bool, bool
         MAX_VISION_CALLS,
     )
 
-    use_video = _as_bool(data.get("use_video", False))
     raw_web_search = data.get("web_search")
     web_search = _as_bool(raw_web_search) if raw_web_search is not None else env_web_search
     raw_max_vision = data.get("max_vision")
@@ -5104,19 +5156,16 @@ def _normalize_processing_options(data: Dict[str, Any]) -> Tuple[str, bool, bool
         if raw_max_vision not in (None, "")
         else env_max_vision
     )
-    fps = _safe_float(data.get("fps", 1.0), 1.0, FPS_MIN, FPS_MAX)
+
+    whisper_model = env_whisper_model
+    use_video = env_use_video
+    fps = env_fps
     return whisper_model, use_video, web_search, max_vision, fps
 
 
 def _normalize_model_options(data: Dict[str, Any]) -> Tuple[str, str]:
-    model_name = str(data.get("model_name", "")).strip() or DEFAULT_MODEL_NAME
-    model_base_url = str(data.get("model_base_url", "")).strip() or DEFAULT_MODEL_BASE_URL
-
-    if len(model_name) > 200:
-        model_name = model_name[:200]
-    if len(model_base_url) > 300:
-        model_base_url = model_base_url[:300]
-
+    _ = data
+    _, model_name, model_base_url = _read_shared_backend_model_options(require_api_key=False)
     return model_name, model_base_url
 
 
@@ -5125,28 +5174,12 @@ def _normalize_upload_model_options(
     require_api_key: bool = False,
     require_model_name: bool = False,
 ) -> Tuple[str, str, str]:
-    api_key = str(data.get("api_key", "")).strip()
-    model_name = str(data.get("model_name", "")).strip()
-    model_base_url = str(data.get("model_base_url", "")).strip()
-
-    if len(api_key) > 500:
-        api_key = api_key[:500]
-    if len(model_name) > 200:
-        model_name = model_name[:200]
-    if len(model_base_url) > 300:
-        model_base_url = model_base_url[:300]
-
-    if require_api_key and not api_key:
-        raise ValueError("请输入 API Key")
+    _ = data
+    api_key, model_name, model_base_url = _read_shared_backend_model_options(
+        require_api_key=require_api_key
+    )
     if require_model_name and not model_name:
-        raise ValueError("请填写模型名称")
-
-    if not model_name:
-        model_name = str(os.getenv("RISK_MODEL_NAME", "")).strip() or DEFAULT_MODEL_NAME
-    if not model_base_url:
-        model_base_url = (
-            str(os.getenv("RISK_MODEL_BASE_URL", "")).strip() or DEFAULT_MODEL_BASE_URL
-        )
+        raise ValueError("后端模型名称未配置，请在 .env 中设置 MODEL_NAME。")
     return api_key, model_name, model_base_url
 
 
@@ -6769,7 +6802,7 @@ def upload_chunk_init():
             )
         )
     except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
+        return jsonify({"error": str(exc), "code": "risk_service_unavailable"}), 503
 
     try:
         requested_upload_id = _normalize_upload_id(data.get("upload_id", ""))
@@ -7119,15 +7152,17 @@ def analyze():
     data = _json_payload()
     history_owner_id = _ensure_history_owner()
     task_id = _resolve_progress_task_id(data.get("task_id", data.get("progress_task_id", "")))
-    api_key = str(data.get("api_key", "")).strip()
-    if not api_key:
-        return jsonify({"error": "请输入 API Key", "task_id": task_id}), 400
+    try:
+        api_key, model_name, model_base_url = _read_shared_backend_model_options(
+            require_api_key=True
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "task_id": task_id}), 503
 
     whisper_model, use_video, web_search, max_vision, fps = _normalize_processing_options(
         data
     )
     summary_only = _as_bool(data.get("summary_only", False))
-    model_name, model_base_url = _normalize_model_options(data)
 
     try:
         video_path = _resolve_upload_filepath(data.get("filepath"))
@@ -7454,9 +7489,12 @@ def download_subtitle(output_dir):
 @app.route("/regenerate", methods=["POST"])
 def regenerate_document():
     data = _json_payload()
-    api_key = str(data.get("api_key", "")).strip()
-    if not api_key:
-        return jsonify({"error": "请输入 API Key"}), 400
+    try:
+        api_key, model_name, model_base_url = _read_shared_backend_model_options(
+            require_api_key=True
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 503
 
     steps = data.get("steps", [])
     if not isinstance(steps, list) or not steps:
@@ -7475,7 +7513,6 @@ def regenerate_document():
         if raw_web_search is not None
         else _env_bool(("WEB_SEARCH", "web_search"), False)
     )
-    model_name, model_base_url = _normalize_model_options(data)
 
     try:
         agent = VideoAnalyzerAgent(
@@ -7750,9 +7787,12 @@ def analyze_batch():
     data = _json_payload()
     history_owner_id = _ensure_history_owner()
     task_id = _resolve_progress_task_id(data.get("task_id", data.get("progress_task_id", "")))
-    api_key = str(data.get("api_key", "")).strip()
-    if not api_key:
-        return jsonify({"error": "请输入 API Key", "task_id": task_id}), 400
+    try:
+        api_key, model_name, model_base_url = _read_shared_backend_model_options(
+            require_api_key=True
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "task_id": task_id}), 503
 
     raw_filepaths = data.get("filepaths", [])
     if not isinstance(raw_filepaths, list) or not raw_filepaths:
@@ -7762,7 +7802,6 @@ def analyze_batch():
         data
     )
     summary_only = _as_bool(data.get("summary_only", False))
-    model_name, model_base_url = _normalize_model_options(data)
 
     filepaths: List[Path] = []
     for raw_path in raw_filepaths:

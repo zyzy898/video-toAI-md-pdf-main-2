@@ -1141,7 +1141,7 @@ export default function App() {
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
-  const [testingModel, setTestingModel] = useState(false);
+  const [, setTestingModel] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [deletingHistoryId, setDeletingHistoryId] = useState("");
@@ -1151,7 +1151,7 @@ export default function App() {
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const [apiKeyGuideActive, setApiKeyGuideActive] = useState(false);
   const [modelConfigGuideActive, setModelConfigGuideActive] = useState(false);
-  const [modelTestGuideActive, setModelTestGuideActive] = useState(false);
+  const [, setModelTestGuideActive] = useState(false);
 
   const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
@@ -1443,66 +1443,7 @@ export default function App() {
     setShowErrorToast(true);
     if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
     errorTimerRef.current = setTimeout(() => setShowErrorToast(false), ERROR_TOAST_DURATION_MS);
-
-    const isUploadRiskUnavailable =
-      rawMessage.includes("上传风控服务不可用") || rawMessage.includes("code=risk_service_unavailable");
-    const isApiKeyMissing =
-      rawMessage.includes("请输入 ARK API Key") ||
-      rawMessage.includes("请输入 API Key") ||
-      rawMessage.includes("code=risk_model_auth_failed");
-    const isModelConfigMissing =
-      rawMessage.includes("请填写模型名称") ||
-      rawMessage.includes("请填写模型接口 Base URL") ||
-      rawMessage.includes("模型连接失败：模型或接口不存在") ||
-      rawMessage.includes("code=risk_model_config_invalid");
-    const needApiGuide = isUploadRiskUnavailable || isApiKeyMissing;
-    const needModelGuide = isUploadRiskUnavailable || isModelConfigMissing;
-
-    if (needApiGuide || needModelGuide) {
-      setHistoryDrawerOpen(false);
-      setSettingsDrawerOpen(true);
-
-      if (needApiGuide) {
-        setApiKeyGuideActive(true);
-
-        if (apiKeyGuideTimerRef.current) clearTimeout(apiKeyGuideTimerRef.current);
-        apiKeyGuideTimerRef.current = setTimeout(
-          () => setApiKeyGuideActive(false),
-          ERROR_GUIDE_DURATION_MS,
-        );
-      }
-
-      if (needModelGuide) {
-        setModelConfigGuideActive(true);
-        if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
-        modelConfigGuideTimerRef.current = setTimeout(
-          () => setModelConfigGuideActive(false),
-          ERROR_GUIDE_DURATION_MS,
-        );
-      }
-
-      if (needApiGuide) {
-        if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
-        apiKeyGuideFocusTimerRef.current = setTimeout(() => {
-          apiKeyInputRef.current?.focus();
-          apiKeyInputRef.current?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
-        }, 220);
-      } else if (needModelGuide) {
-        if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
-        modelConfigGuideFocusTimerRef.current = setTimeout(() => {
-          const missingBaseUrl = modelPreset === "custom" && !String(modelBaseUrl || "").trim();
-          const missingModelName = !String(modelName || "").trim();
-          const target = missingBaseUrl
-            ? modelBaseUrlInputRef.current
-            : missingModelName
-              ? modelNameInputRef.current
-              : modelNameInputRef.current;
-          target?.focus();
-          target?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
-        }, 220);
-      }
-    }
-  }, [modelBaseUrl, modelName, modelPreset, uiScrollBehavior]);
+  }, []);
 
   const showSuccess = useCallback((message: string) => {
     const rawMessage = String(message || "").trim() || "操作成功";
@@ -1648,47 +1589,12 @@ export default function App() {
   }, []);
 
   const verifyModelConnectionForUpload = useCallback(async () => {
-    if (!apiKey) {
-      showError("请输入 API Key");
-      return false;
-    }
-    if (!validateModelConfig()) return false;
-    const currentSignature = buildModelConfigSignature(apiKey, modelPreset, modelName, modelBaseUrl);
-    if (verifiedModelConfigSignatureRef.current === currentSignature) return true;
-    if (!settingsDrawerOpen) triggerModelTestGuide();
-
-    setTestingModel(true);
-    try {
-      await fetchJson("/test_model", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          api_key: apiKey,
-          model_name: modelName,
-          model_base_url: modelBaseUrl,
-        }),
-      });
-      verifiedModelConfigSignatureRef.current = currentSignature;
-      return true;
-    } catch (error) {
-      const message = String((error as Error).message || error);
-      showError(`上传前模型校验失败：${pickUploadPrecheckError(message)}`);
-      return false;
-    } finally {
-      setTestingModel(false);
-    }
-  }, [
-    apiKey,
-    fetchJson,
-    modelBaseUrl,
-    modelName,
-    modelPreset,
-    pickUploadPrecheckError,
-    settingsDrawerOpen,
-    showError,
-    triggerModelTestGuide,
-    validateModelConfig,
-  ]);
+    // 模型连通校验已取消：统一由后端 .env 托管模型配置。
+    void pickUploadPrecheckError;
+    void triggerModelTestGuide;
+    void testModelConnection;
+    return true;
+  }, [pickUploadPrecheckError, testModelConnection, triggerModelTestGuide]);
 
   const setProgressTextIfChanged = useCallback((nextText: string) => {
     const normalized = String(nextText || "");
@@ -1889,9 +1795,6 @@ export default function App() {
           chunk_size: DEFAULT_UPLOAD_CHUNK_SIZE,
           upload_id: storedUploadId,
           file_key: resumeKey,
-          api_key: apiKey,
-          model_name: modelName,
-          model_base_url: modelBaseUrl,
         }),
       });
       const uploadId = String(initData.upload_id || "");
@@ -1924,7 +1827,7 @@ export default function App() {
       window.localStorage.removeItem(resumeKey);
       return finalized;
     },
-    [apiKey, fetchJson, modelBaseUrl, modelName, setProgressTextIfChanged],
+    [fetchJson, setProgressTextIfChanged],
   );
 
   const uploadBatchFiles = useCallback(
@@ -2036,15 +1939,9 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          api_key: apiKey,
-          model_name: modelName,
-          model_base_url: modelBaseUrl,
           filepath: file.filepath,
-          whisper_model: whisperModel,
-          use_video: useVideo,
           web_search: webSearch,
           max_vision: maxVision,
-          fps,
           summary_only: summaryOnly,
         }),
       });
@@ -2143,14 +2040,10 @@ export default function App() {
       if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
     }
   }, [
-    apiKey,
     fetchJson,
-    fps,
     hideProgress,
     loadHistory,
     maxVision,
-    modelBaseUrl,
-    modelName,
     showError,
     showSuccess,
     showProgress,
@@ -2160,9 +2053,7 @@ export default function App() {
     summaryOnly,
     uiScrollBehavior,
     updateProgressBoard,
-    useVideo,
     webSearch,
-    whisperModel,
   ]);
 
   const analyzeSingle = useCallback(async () => {
@@ -2177,9 +2068,6 @@ export default function App() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         url: targetUrl,
-        api_key: apiKey,
-        model_name: modelName,
-        model_base_url: modelBaseUrl,
       }),
     });
     const uploadedPath = String(uploaded.filepath || "").trim();
@@ -2195,7 +2083,7 @@ export default function App() {
       status: "pending",
       error: "",
     } satisfies BatchFileItem;
-  }, [apiKey, fetchJson, modelBaseUrl, modelName]);
+  }, [fetchJson]);
 
   const importSourceUrlOnly = useCallback(async () => {
     const urls = parseSourceUrls(sourceUrl);
@@ -2314,15 +2202,9 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          api_key: apiKey,
-          model_name: modelName,
-          model_base_url: modelBaseUrl,
           filepaths: analyzableFiles.map((item) => item.filepath),
-          whisper_model: whisperModel,
-          use_video: useVideo,
           web_search: webSearch,
           max_vision: maxVision,
-          fps,
           summary_only: summaryOnly,
         }),
       });
@@ -2380,14 +2262,10 @@ export default function App() {
       if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
     }
   }, [
-    apiKey,
     fetchJson,
-    fps,
     hideProgress,
     loadHistory,
     maxVision,
-    modelBaseUrl,
-    modelName,
     countBatchStatus,
     showError,
     showProgress,
@@ -2396,19 +2274,12 @@ export default function App() {
     stopSinglePolling,
     updateProgressBoard,
     uiScrollBehavior,
-    useVideo,
     webSearch,
-    whisperModel,
     getAnalyzableBatchFiles,
     summaryOnly,
   ]);
 
   const startAnalyze = useCallback(async () => {
-    if (!apiKey) {
-      showError("请输入 API Key");
-      return;
-    }
-    if (!validateModelConfig()) return;
     const analyzableFiles = getAnalyzableBatchFiles();
     if (analyzableFiles.length === 1) return analyzeSingle();
     if (analyzableFiles.length > 1) return analyzeBatch();
@@ -2421,7 +2292,7 @@ export default function App() {
       return;
     }
     showError("请先上传视频文件");
-  }, [analyzeBatch, analyzeBySourceUrl, analyzeSingle, apiKey, getAnalyzableBatchFiles, showError, sourceUrl, validateModelConfig]);
+  }, [analyzeBatch, analyzeBySourceUrl, analyzeSingle, getAnalyzableBatchFiles, showError, sourceUrl]);
 
   const openHistoryRecord = useCallback(
     async (recordId: string) => {
@@ -2536,8 +2407,6 @@ export default function App() {
   );
 
   const saveEditedSteps = useCallback(async () => {
-    if (!apiKey) return showError("请输入 API Key");
-    if (!validateModelConfig()) return;
     if (!resultData?.output_dir) return showError("缺少输出目录信息");
     setSavingSteps(true);
     showProgress("重新生成中", "根据编辑步骤生成新文档...");
@@ -2547,9 +2416,6 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          api_key: apiKey,
-          model_name: modelName,
-          model_base_url: modelBaseUrl,
           steps: editedSteps,
           output_dir: resultData.output_dir,
           web_search: enableWebSearch,
@@ -2577,7 +2443,7 @@ export default function App() {
       setSavingSteps(false);
       hideProgress();
     }
-  }, [apiKey, editedSteps, fetchJson, hideProgress, modelBaseUrl, modelName, resultData?.output_dir, showError, showProgress, validateModelConfig, webSearch]);
+  }, [editedSteps, fetchJson, hideProgress, resultData?.output_dir, showError, showProgress, webSearch]);
 
   const triggerDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -2928,6 +2794,13 @@ export default function App() {
             <span>Video Insights</span>
           </button>
           <div className="flex items-center gap-2">
+            <span
+              aria-hidden="true"
+              className="history-nav-btn pointer-events-none invisible inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-base font-medium text-neutral-200"
+            >
+              <HistoryIcon className="h-3.5 w-3.5" />
+              历史
+            </span>
             <button
               type="button"
               aria-expanded={historyDrawerOpen}
@@ -2940,19 +2813,6 @@ export default function App() {
             >
               <HistoryIcon className="h-3.5 w-3.5" />
               历史
-            </button>
-            <button
-              type="button"
-              aria-expanded={settingsDrawerOpen}
-              aria-controls="settings-drawer"
-              onClick={() => {
-                setHistoryDrawerOpen(false);
-                setSettingsDrawerOpen((prev) => !prev);
-              }}
-              className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-base font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
-            >
-              <SettingsIcon className="h-3.5 w-3.5" />
-              设置
             </button>
           </div>
         </div>
@@ -4056,24 +3916,9 @@ export default function App() {
                     </div>
 
                     <div className="config-field mb-3 space-y-1">
-                      <button
-                        ref={modelTestButtonRef}
-                        type="button"
-                        className={cn(
-                          "history-refresh-btn flex w-full items-center justify-center gap-1 rounded-lg border border-neutral-700 px-2.5 py-2 text-xs font-medium",
-                          modelTestGuideActive && "model-test-guide-btn",
-                        )}
-                        disabled={testingModel}
-                        aria-busy={testingModel}
-                        onClick={() => {
-                          if (modelTestGuideActive) setModelTestGuideActive(false);
-                          void testModelConnection();
-                        }}
-                      >
-                        <RefreshIcon className={`h-3.5 w-3.5 ${testingModel ? "history-refresh-icon-spin" : ""}`} />
-                        {testingModel ? "测试中..." : "测试链接"}
-                      </button>
-                      <p className="text-xs text-neutral-500">测试当前参数是否可连通模型（API Key / Base URL / 模型名称）</p>
+                      <div className="rounded-lg border border-neutral-700/80 bg-neutral-900/70 px-2.5 py-2 text-xs text-neutral-400">
+                        测试链接按钮已停用，模型连通性由后端启动分析时自动处理。
+                      </div>
                     </div>
 
                     <div className="config-field mb-3 space-y-1">
