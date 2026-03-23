@@ -3,6 +3,7 @@
 # =========================
 flask>=2.3.0
 werkzeug>=2.3.0
+waitress>=3.0.0
 
 # =========================
 # Environment variables
@@ -19,6 +20,8 @@ volcengine-python-sdk[ark]>=1.0.0
 # =========================
 ffmpeg-python>=0.2.0
 imageio-ffmpeg>=0.5.1
+yt-dlp>=2025.1.0
+scrapling[fetchers]>=0.4.0
 
 # =========================
 # Speech-to-text

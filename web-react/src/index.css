@@ -409,6 +409,23 @@ body {
   }
 }
 
+@keyframes modelTestGuidePulse {
+  0%,
+  100% {
+    border-color: rgba(56, 189, 248, 0.56);
+    box-shadow:
+      0 0 0 0 rgba(56, 189, 248, 0),
+      inset 0 1px 0 rgba(186, 230, 253, 0.12);
+  }
+  50% {
+    border-color: rgba(125, 211, 252, 0.95);
+    box-shadow:
+      0 0 0 4px rgba(56, 189, 248, 0.18),
+      0 0 20px rgba(14, 165, 233, 0.2),
+      inset 0 1px 0 rgba(224, 242, 254, 0.28);
+  }
+}
+
 .app-main {
   width: 100%;
   animation: fadeUpIn 0.5s ease-out both;
@@ -1132,6 +1149,153 @@ body {
   justify-content: center;
 }
 
+.summary-only-scroll-rail {
+  scrollbar-gutter: stable both-edges;
+}
+
+.summary-only-markdown-content {
+  color: rgba(226, 232, 240, 0.96);
+  line-height: 1.78;
+  letter-spacing: 0.003em;
+}
+
+.summary-only-markdown-content :is(h1, h2, h3, h4) {
+  margin-top: 1.05em;
+  margin-bottom: 0.55em;
+  color: rgba(240, 249, 255, 0.98);
+  line-height: 1.35;
+}
+
+.summary-only-markdown-content h1 {
+  font-size: 1.14rem;
+}
+
+.summary-only-markdown-content h2 {
+  font-size: 1.04rem;
+}
+
+.summary-only-markdown-content h3 {
+  font-size: 0.98rem;
+}
+
+.summary-only-markdown-content p {
+  margin-top: 0.62em;
+  margin-bottom: 0.62em;
+}
+
+.summary-only-markdown-content :is(ul, ol) {
+  margin-top: 0.48em;
+  margin-bottom: 0.7em;
+  padding-left: 1.15rem;
+}
+
+.summary-only-markdown-content li {
+  margin-top: 0.22em;
+  margin-bottom: 0.22em;
+}
+
+.summary-only-markdown-content li::marker {
+  color: rgba(94, 234, 212, 0.8);
+}
+
+.summary-only-markdown-content blockquote {
+  margin: 0.7em 0;
+  border-left: 3px solid rgba(45, 212, 191, 0.55);
+  background: rgba(15, 23, 42, 0.42);
+  color: rgba(203, 213, 225, 0.95);
+  padding: 0.55em 0.78em;
+  border-radius: 0.4rem;
+}
+
+.summary-only-markdown-content :not(pre) > code {
+  border: 1px solid rgba(71, 85, 105, 0.7);
+  background: rgba(2, 6, 23, 0.6);
+  color: rgba(186, 230, 253, 0.96);
+  border-radius: 0.34rem;
+  padding: 0.1em 0.36em;
+}
+
+.summary-only-markdown-content pre {
+  border: 1px solid rgba(51, 65, 85, 0.7);
+  background: rgba(2, 6, 23, 0.72);
+  border-radius: 0.58rem;
+  padding: 0.7rem 0.82rem;
+  overflow: auto;
+}
+
+.standard-markdown-content {
+  color: rgba(226, 232, 240, 0.96);
+  line-height: 1.72;
+}
+
+.standard-markdown-content :is(h1, h2, h3, h4) {
+  margin-top: 1em;
+  margin-bottom: 0.46em;
+  color: rgba(248, 250, 252, 0.98);
+  line-height: 1.32;
+}
+
+.standard-markdown-content h1 {
+  font-size: 1.12rem;
+}
+
+.standard-markdown-content h2 {
+  font-size: 1.02rem;
+}
+
+.standard-markdown-content h3 {
+  font-size: 0.96rem;
+}
+
+.standard-markdown-content p {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
+}
+
+.standard-markdown-content :is(ul, ol) {
+  margin-top: 0.42em;
+  margin-bottom: 0.65em;
+  padding-left: 1.12rem;
+}
+
+.standard-markdown-content li {
+  margin-top: 0.18em;
+  margin-bottom: 0.18em;
+}
+
+.standard-markdown-content li::marker {
+  color: rgba(125, 211, 252, 0.78);
+}
+
+.standard-markdown-content strong {
+  color: rgba(241, 245, 249, 0.98);
+}
+
+.standard-markdown-content blockquote {
+  margin: 0.62em 0;
+  border-left: 3px solid rgba(56, 189, 248, 0.52);
+  background: rgba(15, 23, 42, 0.38);
+  color: rgba(203, 213, 225, 0.95);
+  padding: 0.5em 0.72em;
+  border-radius: 0.4rem;
+}
+
+.standard-markdown-content :not(pre) > code {
+  border: 1px solid rgba(71, 85, 105, 0.68);
+  background: rgba(2, 6, 23, 0.55);
+  color: rgba(191, 219, 254, 0.96);
+  border-radius: 0.32rem;
+  padding: 0.08em 0.34em;
+}
+
+.standard-markdown-content pre {
+  border: 1px solid rgba(51, 65, 85, 0.68);
+  background: rgba(2, 6, 23, 0.68);
+  border-radius: 0.56rem;
+  padding: 0.66rem 0.78rem;
+  overflow: auto;
+}
+
 .history-empty-state {
   position: relative;
   width: 100%;
@@ -1681,6 +1845,10 @@ body {
   animation: modelRequiredGuidePulse 1.05s ease-in-out infinite;
 }
 
+.model-test-guide-btn {
+  animation: modelTestGuidePulse 1.05s ease-in-out infinite;
+}
+
 .file-status-chip {
   position: relative;
   display: inline-flex;
@@ -1769,6 +1937,97 @@ body {
   backdrop-filter: blur(6px);
 }
 
+@media (max-width: 900px) and (pointer: coarse) {
+  .app-main,
+  .motion-enter,
+  .panel-card,
+  .list-item-pop {
+    animation-duration: 0.34s;
+  }
+
+  .history-drawer-overlay,
+  .history-drawer-backdrop {
+    animation-duration: 0.14s;
+  }
+
+  .history-drawer-panel,
+  .progress-dialog-anim {
+    animation-duration: 0.2s;
+  }
+
+  .progress-fill-anim {
+    transition-duration: 0.35s;
+  }
+
+  .toast-anim {
+    animation-duration: 0.28s;
+    backdrop-filter: none;
+  }
+
+  .hero-icon-float,
+  .history-empty-art,
+  .api-key-guide-input,
+  .model-required-guide-input,
+  .model-test-guide-btn,
+  .file-status-chip-success,
+  .file-status-chip-failed,
+  .history-refresh-icon-spin {
+    animation: none !important;
+  }
+
+  .file-status-chip-success::after,
+  .hero-chip:hover::before,
+  .clear-list-btn:hover:not(:disabled)::before,
+  .clear-list-btn:hover:not(:disabled) .clear-list-icon,
+  .zip-download-btn:hover:not(:disabled),
+  .zip-download-btn:hover:not(:disabled)::before,
+  .steps-edit-btn:hover:not(:disabled)::before,
+  .app-main button.steps-edit-save-btn:hover:not(:disabled)::before,
+  .history-nav-btn:hover::before {
+    animation: none !important;
+  }
+
+  .hero-chip::before,
+  .upload-dropzone::after,
+  .history-nav-btn::before,
+  .history-refresh-btn::before,
+  .clear-list-btn::before,
+  .zip-download-btn::before,
+  .steps-edit-btn::before,
+  .app-main button.steps-edit-save-btn::before {
+    display: none;
+  }
+
+  .config-field,
+  .settings-select,
+  .settings-number-input,
+  .settings-stepper-btn,
+  .feature-toggle,
+  .feature-checkbox,
+  .history-nav-btn,
+  .history-refresh-btn,
+  .upload-dropzone,
+  .clear-list-btn,
+  .zip-download-btn,
+  .steps-edit-btn,
+  .app-main button.steps-edit-save-btn,
+  .app-main button.steps-edit-cancel-btn,
+  .app-main button:not(.start-analyze-btn),
+  .list-item-pop {
+    transition-duration: 0.14s;
+  }
+
+  .history-nav-btn:hover,
+  .clear-list-btn:hover:not(:disabled),
+  .zip-download-btn:hover:not(:disabled),
+  .steps-edit-btn:hover:not(:disabled),
+  .upload-dropzone:hover,
+  .app-main button:hover:not(:disabled):not(.start-analyze-btn) {
+    transform: none;
+    filter: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .app-main,
   .motion-enter,
@@ -1784,6 +2043,7 @@ body {
   .app-main button.steps-edit-save-btn:hover:not(:disabled)::before,
   .api-key-guide-input,
   .model-required-guide-input,
+  .model-test-guide-btn,
   .file-status-chip,
   .file-status-chip-success::after,
   .fps-reveal,

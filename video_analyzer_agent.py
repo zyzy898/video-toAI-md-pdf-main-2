@@ -1,10 +1,12 @@
-import os
+﻿import os
 import json
 import asyncio
 import logging
 import subprocess
 import re
 import base64
+import hashlib
+import shutil
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -12,11 +14,17 @@ from pathlib import Path
 from volcenginesdkarkruntime import AsyncArk
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
+from threading import RLock
 
 try:
     import ffmpeg
 except Exception:  # pragma: no cover - 兜底兼容
     ffmpeg = None
+
+try:
+    import whisper as whisper_lib
+except Exception:  # pragma: no cover - 兜底兼容
+    whisper_lib = None
 
 # 配置日志
 logging.basicConfig(
@@ -28,6 +36,11 @@ class VideoAnalyzerAgent:
     DEFAULT_MODEL_NAME = "doubao-seed-2-0-pro-260215"
     DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
     DEFAULT_CHAT_TEMPERATURE = 0.2
+    SUBTITLE_CACHE_ROOT = (Path(__file__).resolve().parent / "outputs" / ".subtitle_cache").resolve()
+    _subtitle_cache_lock = RLock()
+    _whisper_model_cache_lock = RLock()
+    _whisper_infer_lock = RLock()
+    _whisper_model_cache: Dict[str, Any] = {}
     FONT_PATHS = [
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\simsun.ttc",
@@ -79,7 +92,25 @@ class VideoAnalyzerAgent:
 
         self.client = AsyncArk(base_url=self.base_url, api_key=self.api_key)
         self.whisper_model = whisper_model
+        self.whisper_threads = self._resolve_whisper_threads()
+        self._parsed_srt_cache_key: tuple[str, int, int] | None = None
+        self._parsed_srt_cache_value: List[Dict[str, Any]] | None = None
         self.ffmpeg_cmd = self._prepare_ffmpeg_command()
+        try:
+            self.SUBTITLE_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            logging.warning("字幕缓存目录初始化失败，将回退到直连模式: %s", exc)
+
+    def _resolve_whisper_threads(self) -> int:
+        raw_value = str(os.getenv("WHISPER_THREADS", "")).strip()
+        default_threads = max(1, min(8, int(os.cpu_count() or 1)))
+        if not raw_value:
+            return default_threads
+        try:
+            threads = int(raw_value)
+        except (TypeError, ValueError):
+            return default_threads
+        return max(1, min(16, threads))
 
     def _prepare_ffmpeg_command(self) -> str:
         """
@@ -298,44 +329,215 @@ class VideoAnalyzerAgent:
 
     # ========== Whisper 字幕生成 ==========
 
-    def generate_subtitles(self, video_path: str, output_dir: str = ".") -> str:
-        """
-        调用本地 whisper 命令行从视频生成 SRT 字幕文件
-        :param video_path: 视频文件路径
-        :param output_dir: 字幕输出目录
-        :return: 生成的 SRT 文件路径
-        """
-        output_dir = Path(output_dir)
-        output_dir.mkdir(parents=True, exist_ok=True)
+    def _get_resident_whisper_model(self):
+        model_name = str(self.whisper_model or "").strip().lower() or "base"
+        if whisper_lib is None:
+            raise RuntimeError("openai-whisper Python 包不可用")
 
+        with self._whisper_model_cache_lock:
+            cached_model = self._whisper_model_cache.get(model_name)
+            if cached_model is not None:
+                return cached_model
+
+            # 使用 CPU 时，尽量将线程数控制在配置值内，避免过度占用。
+            try:
+                import torch
+
+                torch.set_num_threads(int(self.whisper_threads))
+            except Exception:
+                pass
+
+            try:
+                model = whisper_lib.load_model(model_name, device="cpu")
+            except TypeError:
+                model = whisper_lib.load_model(model_name)
+
+            self._whisper_model_cache[model_name] = model
+            logging.info("Whisper 常驻模型已加载: %s", model_name)
+            return model
+
+    def _generate_subtitles_with_resident_whisper(
+        self,
+        video_file: Path,
+        output_dir: Path,
+        srt_path: Path,
+    ) -> tuple[bool, str]:
+        if whisper_lib is None:
+            return False, "openai-whisper Python 包不可用"
+
+        try:
+            model = self._get_resident_whisper_model()
+        except Exception as exc:
+            return False, str(exc)
+
+        try:
+            with self._whisper_infer_lock:
+                result = model.transcribe(
+                    str(video_file),
+                    language="zh",
+                    task="transcribe",
+                    fp16=False,
+                    verbose=False,
+                )
+
+            writer = whisper_lib.utils.get_writer("srt", str(output_dir))
+            writer(result, str(video_file))
+        except Exception as exc:
+            return False, str(exc)
+
+        if not srt_path.exists() or srt_path.stat().st_size <= 0:
+            return False, f"Whisper 常驻模式未生成字幕文件: {srt_path}"
+        return True, ""
+
+    def _generate_subtitles_with_whisper_cli(
+        self,
+        video_file: Path,
+        output_dir: Path,
+        srt_path: Path,
+    ) -> tuple[bool, str]:
         cmd = [
             "whisper",
-            str(video_path),
+            str(video_file),
             "--model",
             self.whisper_model,
             "--language",
             "zh",
+            "--task",
+            "transcribe",
+            "--fp16",
+            "False",
+            "--threads",
+            str(self.whisper_threads),
             "--output_format",
             "srt",
             "--output_dir",
             str(output_dir),
         ]
-        print(f"正在使用 Whisper ({self.whisper_model}) 生成字幕...")
-        result = subprocess.run(cmd, capture_output=True, text=True)
-
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
         if result.returncode != 0:
-            raise RuntimeError(f"Whisper 字幕生成失败: {result.stderr}")
+            return False, str(result.stderr or "").strip()
+        if not srt_path.exists() or srt_path.stat().st_size <= 0:
+            return False, f"Whisper CLI 未生成字幕文件: {srt_path}"
+        return True, ""
 
-        # whisper 输出文件名为 视频文件名.srt
-        srt_filename = Path(video_path).stem + ".srt"
+    def _build_subtitle_cache_key(
+        self,
+        video_path: Path,
+        cache_identity: Optional[str] = None,
+    ) -> str:
+        normalized_identity = str(cache_identity or "").strip()
+        if normalized_identity:
+            raw_key = f"cache_identity:{normalized_identity}|{self.whisper_model}|zh"
+            return hashlib.sha256(raw_key.encode("utf-8", errors="ignore")).hexdigest()
+
+        stat_info = video_path.stat()
+        mtime_ns = int(getattr(stat_info, "st_mtime_ns", int(stat_info.st_mtime * 1e9)))
+        raw_key = (
+            f"{video_path.resolve(strict=False)}|{stat_info.st_size}|{mtime_ns}|"
+            f"{self.whisper_model}|zh"
+        )
+        return hashlib.sha256(raw_key.encode("utf-8", errors="ignore")).hexdigest()
+
+    def _try_restore_subtitle_from_cache(
+        self,
+        video_path: Path,
+        target_srt_path: Path,
+        cache_identity: Optional[str] = None,
+    ) -> bool:
+        try:
+            cache_key = self._build_subtitle_cache_key(video_path, cache_identity=cache_identity)
+        except OSError:
+            return False
+
+        cache_path = self.SUBTITLE_CACHE_ROOT / f"{cache_key}.srt"
+        with self._subtitle_cache_lock:
+            try:
+                if not cache_path.exists() or cache_path.stat().st_size <= 0:
+                    return False
+                target_srt_path.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(cache_path, target_srt_path)
+                return target_srt_path.exists() and target_srt_path.stat().st_size > 0
+            except OSError:
+                return False
+
+    def _save_subtitle_to_cache(
+        self,
+        video_path: Path,
+        srt_path: Path,
+        cache_identity: Optional[str] = None,
+    ) -> None:
+        try:
+            cache_key = self._build_subtitle_cache_key(video_path, cache_identity=cache_identity)
+        except OSError:
+            return
+
+        cache_path = self.SUBTITLE_CACHE_ROOT / f"{cache_key}.srt"
+        with self._subtitle_cache_lock:
+            try:
+                if cache_path.exists() and cache_path.stat().st_size > 0:
+                    return
+                shutil.copy2(srt_path, cache_path)
+            except OSError:
+                return
+
+    def generate_subtitles(
+        self,
+        video_path: str,
+        output_dir: str = ".",
+        cache_identity: Optional[str] = None,
+    ) -> str:
+        """
+        调用本地 whisper 命令行从视频生成 SRT 字幕文件
+        :param video_path: 视频文件路径
+        :param output_dir: 字幕输出目录
+        :param cache_identity: 跨目录复用字幕缓存的身份标识（如视频 SHA-256）
+        :return: 生成的 SRT 文件路径
+        """
+        video_file = Path(video_path)
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        srt_filename = video_file.stem + ".srt"
         srt_path = output_dir / srt_filename
+
+        if srt_path.exists() and srt_path.stat().st_size > 0:
+            return str(srt_path)
+        if self._try_restore_subtitle_from_cache(
+            video_file,
+            srt_path,
+            cache_identity=cache_identity,
+        ):
+            print(f"字幕缓存命中: {srt_path}")
+            return str(srt_path)
+
+        print(f"正在使用 Whisper ({self.whisper_model}) 常驻模型生成字幕...")
+        resident_ok, resident_error = self._generate_subtitles_with_resident_whisper(
+            video_file,
+            output_dir,
+            srt_path,
+        )
+        if not resident_ok:
+            logging.warning("Whisper 常驻模式失败，回退命令行模式: %s", resident_error)
+            print("Whisper 常驻模式失败，正在回退命令行模式...")
+            cli_ok, cli_error = self._generate_subtitles_with_whisper_cli(
+                video_file,
+                output_dir,
+                srt_path,
+            )
+            if not cli_ok:
+                raise RuntimeError(f"Whisper 字幕生成失败: {cli_error}")
 
         if not srt_path.exists():
             raise FileNotFoundError(f"Whisper 未生成字幕文件: {srt_path}")
 
+        self._save_subtitle_to_cache(video_file, srt_path, cache_identity=cache_identity)
         print(f"字幕已生成: {srt_path}")
         return str(srt_path)
-
     # ========== 字幕分析：识别操作步骤（默认模式，纯文本，便宜） ==========
 
     async def analyze_subtitles(self, srt_path: str) -> List[Dict]:
@@ -609,7 +811,16 @@ class VideoAnalyzerAgent:
             return []
 
         if max_workers is None:
-            max_workers = min(4, os.cpu_count() or 2)
+            raw_screenshot_workers = str(os.getenv("SCREENSHOT_MAX_WORKERS", "")).strip()
+            default_screenshot_workers = 2
+            if raw_screenshot_workers:
+                try:
+                    parsed_workers = int(raw_screenshot_workers)
+                except (TypeError, ValueError):
+                    parsed_workers = default_screenshot_workers
+            else:
+                parsed_workers = default_screenshot_workers
+            max_workers = max(1, min(parsed_workers, os.cpu_count() or 2))
         max_workers = max(1, min(max_workers, len(screenshot_tasks)))
 
         screenshot_paths: List[Path] = []
@@ -1173,7 +1384,20 @@ IMPORTANT:
 
     def parse_srt(self, srt_path):
         """解析srt文件，返回字幕列表"""
-        with open(srt_path, "r", encoding="utf-8") as f:
+        srt_file = Path(srt_path).resolve(strict=False)
+        try:
+            stat_info = srt_file.stat()
+            cache_key = (
+                str(srt_file),
+                int(stat_info.st_size),
+                int(getattr(stat_info, "st_mtime_ns", int(stat_info.st_mtime * 1e9))),
+            )
+            if self._parsed_srt_cache_key == cache_key and self._parsed_srt_cache_value is not None:
+                return list(self._parsed_srt_cache_value)
+        except OSError:
+            cache_key = None
+
+        with open(srt_file, "r", encoding="utf-8") as f:
             content = f.read()
 
         content = content.replace("\r\n", "\n").replace("\r", "\n")
@@ -1203,6 +1427,9 @@ IMPORTANT:
                 except Exception:
                     continue
 
+        if cache_key is not None:
+            self._parsed_srt_cache_key = cache_key
+            self._parsed_srt_cache_value = list(subtitles)
         return subtitles
 
     def time_to_seconds(self, time_str):

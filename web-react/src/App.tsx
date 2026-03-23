@@ -27,10 +27,15 @@ const VALID_VIDEO_EXTENSIONS = new Set([
 const WEB_SEARCH_ERROR_HINTS = ["toolnotopen", "web search", "联网搜索"];
 const WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_content_plugin";
 const ALIYUN_APIKEY_DOC_URL = "https://help.aliyun.com/zh/model-studio/error-code#apikey-error";
+const CONTENT_POLICY_BLOCK_MESSAGE =
+  "上传已被风控强拦截：检测到高风险色情/裸露/血腥/暴力内容，系统已直接拒绝该视频上传。请删除敏感画面后重试";
 const DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024;
 const UPLOAD_RESUME_KEY_PREFIX = "video-upload-resume-v1";
 const HISTORY_CLIENT_ID_KEY = "video-insights-client-id-v1";
 const HISTORY_CLIENT_ID_HEADER = "X-Client-ID";
+const USER_SETTINGS_STORAGE_KEY_PREFIX = "video-insights-user-settings-v1";
+const ERROR_TOAST_DURATION_MS = 9000;
+const ERROR_GUIDE_DURATION_MS = 5200;
 
 const createHistoryClientId = () => {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -55,6 +60,15 @@ const getOrCreateHistoryClientId = () => {
 const extractRequestId = (message: string) => {
   const match = String(message || "").match(/request[_\s-]*id['"]?\s*[:：]\s*['"]?([A-Za-z0-9._-]+)/i);
   return match?.[1] || "";
+};
+
+const extractErrorCode = (message: string) => {
+  const match = String(message || "").match(/(?:^|\|)\s*code=([A-Za-z0-9._-]+)/i);
+  return String(match?.[1] || "").trim().toLowerCase();
+};
+
+const formatContentPolicyViolationMessage = (_message: string, _inline = false) => {
+  return CONTENT_POLICY_BLOCK_MESSAGE;
 };
 
 const extractModelNameFromNotFound = (message: string) => {
@@ -99,14 +113,101 @@ const formatModelConnectionError = (message: string) => {
   return "";
 };
 
+const formatRiskHint = (risk?: RiskResult) => {
+  if (!risk) return "";
+  const level = String(risk.risk_level || "").trim();
+  const code = String(risk.reason_code || "").trim();
+  const reason = String(risk.reason || "").trim();
+  const scoreText = risk.scores
+    ? Object.entries(risk.scores)
+        .filter(([, value]) => typeof value === "number")
+        .map(([key, value]) => `${key}:${Number(value).toFixed(2)}`)
+        .join(" / ")
+    : "";
+  const parts = [level ? `等级: ${level}` : "", code ? `规则: ${code}` : "", reason, scoreText].filter(Boolean);
+  return parts.join(" | ");
+};
+
+const SEGMENT_ZONE_LABELS: Record<string, string> = {
+  standard: "标准区",
+  long: "长视频区",
+  super_long: "超长区",
+  trim_required: "裁剪优先区",
+};
+
+const SEGMENT_POLICY_CODE_GUIDES: Record<string, string> = {
+  video_segment_trim_required: "当前视频属于裁剪优先区，请先裁剪后再上传或分析。",
+  video_segment_super_long_batch_not_allowed: "批量中包含超长视频，建议改为单文件处理。",
+  video_segment_long_batch_limit: "包含长视频时，整批最多允许 2 个视频。",
+  video_segment_batch_not_allowed: "当前批次不符合分段策略，请按提示拆分或裁剪后重试。",
+};
+
+const getSegmentZoneLabel = (zone?: string, fallback?: string) =>
+  SEGMENT_ZONE_LABELS[String(zone || "").trim().toLowerCase()] || String(fallback || "").trim() || "未知区";
+
+const formatSegmentPolicyHint = (policy?: SegmentPolicy) => {
+  if (!policy) return "";
+  const zoneText = getSegmentZoneLabel(policy.zone, policy.zone_label);
+  const durationText = String(policy.duration_text || "").trim() || "未知";
+  const sizeMb = Number(policy.file_size_mb || 0);
+  const sizeText = Number.isFinite(sizeMb) && sizeMb > 0 ? `${sizeMb.toFixed(1)}MB` : "未知大小";
+  return `分段策略: ${zoneText}（时长 ${durationText}，大小 ${sizeText}）`;
+};
+
+const formatBatchSegmentPolicyHint = (policy?: BatchSegmentPolicy) => {
+  if (!policy) return "";
+  const total = Number(policy.summary?.total_files || 0);
+  const longCount = Number(policy.summary?.long_count || 0);
+  const superLongCount = Number(policy.summary?.super_long_count || 0);
+  const trimCount = Number(policy.summary?.trim_required_count || 0);
+  const parts = [
+    total > 0 ? `批次: ${total} 个` : "",
+    longCount > 0 ? `长视频 ${longCount}` : "",
+    superLongCount > 0 ? `超长 ${superLongCount}` : "",
+    trimCount > 0 ? `裁剪优先 ${trimCount}` : "",
+  ].filter(Boolean);
+  return parts.length > 0 ? `分段策略: ${parts.join(" / ")}` : "";
+};
+
+const compactErrorDetail = (message: string) => {
+  const parts = String(message || "")
+    .split("|")
+    .map((item) => item.trim())
+    .filter(Boolean)
+    .filter((item) => !/^code=/i.test(item))
+    .filter((item) => !/^等级[:：]/.test(item))
+    .filter((item) => !/^规则[:：]/.test(item));
+  return parts.slice(0, 2).join("；");
+};
+
+const formatSegmentPolicyGuideByCode = (errorCode: string, message: string, requestIdText: string) => {
+  const guide = SEGMENT_POLICY_CODE_GUIDES[String(errorCode || "").trim().toLowerCase()];
+  if (!guide) return "";
+  const detail = compactErrorDetail(message);
+  return `${guide}${requestIdText}${detail ? ` ${detail}` : ""}`;
+};
+
 const formatErrorMessage = (rawMessage: string) => {
   const message = String(rawMessage || "").trim();
   if (!message) return "操作失败";
+  const requestId = extractRequestId(message);
+  const requestIdText = requestId ? `（请求 ID：${requestId}）` : "";
+  const errorCode = extractErrorCode(message);
+
+  if (errorCode === "risk_model_config_invalid") {
+    return `上传前模型配置校验失败：请检查 Base URL 与模型名称是否匹配当前平台，并确认模型支持图片理解（风控检测依赖图片输入）${requestIdText}`;
+  }
+  if (errorCode === "risk_model_auth_failed") {
+    return `上传前模型鉴权失败：请检查 API Key 是否有效，并确认与当前 Base URL/平台匹配${requestIdText}`;
+  }
+  const segmentPolicyGuide = formatSegmentPolicyGuideByCode(errorCode, message, requestIdText);
+  if (segmentPolicyGuide) return segmentPolicyGuide;
+  if (errorCode === "content_policy_violation" || message.includes("上传被拒绝")) {
+    return formatContentPolicyViolationMessage(message);
+  }
 
   const lower = message.toLowerCase();
   if (WEB_SEARCH_ERROR_HINTS.some((hint) => lower.includes(hint))) {
-    const requestId = extractRequestId(message);
-    const requestIdText = requestId ? `（请求 ID：${requestId}）` : "";
     return `联网搜索功能未开通。请前往火山引擎控制台开通后重试：${WEB_SEARCH_ACTIVATION_URL}${requestIdText}`;
   }
 
@@ -119,10 +220,24 @@ const formatErrorMessage = (rawMessage: string) => {
 const formatInlineErrorMessage = (rawMessage: string) => {
   const message = String(rawMessage || "").trim();
   if (!message) return "";
+  const requestId = extractRequestId(message);
+  const requestIdText = requestId ? `（请求 ID：${requestId}）` : "";
+  const errorCode = extractErrorCode(message);
+
+  if (errorCode === "risk_model_config_invalid") {
+    return `模型配置校验失败，请检查 Base URL、模型名称与视觉能力${requestIdText}`;
+  }
+  if (errorCode === "risk_model_auth_failed") {
+    return `模型鉴权失败，请检查 API Key 与平台匹配关系${requestIdText}`;
+  }
+  const segmentPolicyGuide = formatSegmentPolicyGuideByCode(errorCode, message, requestIdText);
+  if (segmentPolicyGuide) return segmentPolicyGuide;
+  if (errorCode === "content_policy_violation" || message.includes("上传被拒绝")) {
+    return formatContentPolicyViolationMessage(message, true);
+  }
   const lower = message.toLowerCase();
 
   if (WEB_SEARCH_ERROR_HINTS.some((hint) => lower.includes(hint))) {
-    const requestId = extractRequestId(message);
     return requestId ? `联网搜索未开通（请求 ID：${requestId}）` : "联网搜索未开通，请在火山引擎控制台开通后重试";
   }
 
@@ -132,9 +247,39 @@ const formatInlineErrorMessage = (rawMessage: string) => {
   return message.replace(/\s+/g, " ").trim();
 };
 
+const DEGRADE_REASON_LABELS: Record<string, string> = {
+  standard_steps_not_detected_subtitle_candidates_generated: "未识别到标准步骤，已根据字幕生成候选步骤",
+  subtitle_signal_insufficient_timeline_summary_generated: "字幕信号不足，已自动生成时间线摘要",
+  user_requested_summary_only: "已按你的选择仅生成摘要版内容",
+  content_generation_failed_emergency_summary_generated: "标准与候选步骤均不可用，已切换紧急摘要保底",
+  content_generation_failed: "内容提炼失败，已返回保底结果",
+  content_policy_blocked: "内容触发安全策略，已拦截",
+};
+
+const formatDegradeReason = (rawReason?: string) => {
+  const reason = String(rawReason || "").trim();
+  if (!reason) return "标准步骤未稳定提炼，已自动降级输出";
+  const mapped = DEGRADE_REASON_LABELS[reason.toLowerCase()];
+  if (mapped) return mapped;
+  if (/[\u4e00-\u9fa5]/u.test(reason)) return reason;
+  return "系统未提炼出高置信度标准步骤，已输出可读保底结果";
+};
+
+const formatSegmentPolicyLine = (policy?: SegmentPolicy) => {
+  if (!policy) return "";
+  const zoneText = getSegmentZoneLabel(policy.zone, policy.zone_label);
+  const durationText = String(policy.duration_text || "").trim() || "未知";
+  const sizeText =
+    typeof policy.file_size_mb === "number" && Number.isFinite(policy.file_size_mb)
+      ? `${Number(policy.file_size_mb).toFixed(1)}MB`
+      : "未知大小";
+  return `${zoneText} · 时长 ${durationText} · 大小 ${sizeText}`;
+};
+
 const STAGE_LABELS: Record<string, string> = {
   prepare: "准备中",
   upload: "上传中",
+  moderation: "安全检测",
   subtitle: "字幕识别",
   analysis: "内容分析",
   screenshots: "截图生成",
@@ -148,6 +293,7 @@ const STAGE_LABELS: Record<string, string> = {
 const STAGE_PERCENT: Record<string, number> = {
   prepare: 8,
   upload: 35,
+  moderation: 70,
   subtitle: 28,
   analysis: 55,
   screenshots: 75,
@@ -159,6 +305,37 @@ const STAGE_PERCENT: Record<string, number> = {
 };
 
 type ModelPreset = "ark" | "openai" | "deepseek" | "qwen" | "custom";
+
+type PersistedUserSettings = {
+  version?: number;
+  apiKey?: string;
+  modelPreset?: ModelPreset | string;
+  modelName?: string;
+  modelBaseUrl?: string;
+  whisperModel?: string;
+  maxVision?: number;
+  useVideo?: boolean;
+  webSearch?: boolean;
+  fps?: number;
+  summaryOnly?: boolean;
+  updatedAt?: string;
+};
+
+const normalizeModelBaseUrlForSignature = (value: string) =>
+  String(value || "").trim().replace(/\/+$/u, "");
+
+const buildModelConfigSignature = (
+  apiKey: string,
+  modelPreset: ModelPreset,
+  modelName: string,
+  modelBaseUrl: string,
+) =>
+  [
+    modelPreset,
+    String(apiKey || "").trim(),
+    String(modelName || "").trim(),
+    normalizeModelBaseUrlForSignature(modelBaseUrl),
+  ].join("||");
 
 const MODEL_PRESETS: Record<Exclude<ModelPreset, "custom">, { label: string; baseUrl: string }> = {
   ark: {
@@ -179,6 +356,18 @@ const MODEL_PRESETS: Record<Exclude<ModelPreset, "custom">, { label: string; bas
   },
 };
 
+const MODEL_PRESET_VALUES: ModelPreset[] = ["ark", "openai", "deepseek", "qwen", "custom"];
+const WHISPER_MODEL_VALUES = new Set(["tiny", "base", "small", "medium", "large"]);
+
+const clampNumber = (value: unknown, fallback: number, min: number, max: number) => {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.max(min, Math.min(max, parsed));
+};
+
+const safeString = (value: unknown, maxLength: number, fallback = "") =>
+  typeof value === "string" ? value.slice(0, Math.max(0, maxLength)) : fallback;
+
 type Mode = "" | "upload" | "single" | "batch";
 type FileStatus = "pending" | "processing" | "success" | "failed";
 
@@ -197,11 +386,99 @@ type BatchFileItem = {
   error: string;
 };
 
+type RiskResult = {
+  decision?: "allow" | "restrict" | "block" | string;
+  risk_level?: "low" | "medium" | "high" | string;
+  reason_code?: string;
+  reason?: string;
+  scores?: Partial<Record<"nudity" | "violence" | "gore", number>>;
+};
+
+type BlockedNotice = {
+  title?: string;
+  risk_level?: string;
+  reason_code?: string;
+  reason?: string;
+  suggestions?: string[];
+  retry_guidance?: string;
+};
+
+type SegmentPolicy = {
+  filename?: string;
+  zone?: string;
+  zone_label?: string;
+  duration_seconds?: number | null;
+  duration_text?: string;
+  file_size_mb?: number;
+  allow_upload?: boolean;
+  allow_batch?: boolean;
+  requires_trim?: boolean;
+  recommendations?: string[];
+};
+
+type BatchSegmentPolicy = {
+  allowed?: boolean;
+  code?: string;
+  error?: string;
+  warnings?: string[];
+  summary?: {
+    total_files?: number;
+    long_count?: number;
+    super_long_count?: number;
+    trim_required_count?: number;
+    total_duration_seconds?: number;
+  };
+};
+
+type EffectiveOptions = {
+  use_video?: boolean;
+  web_search?: boolean;
+  max_vision?: number;
+  summary_only?: boolean;
+};
+
+type ApiErrorPayload = {
+  error?: string;
+  code?: string;
+  risk?: RiskResult;
+  result_mode?: string;
+  quality_score?: number;
+  degrade_reason?: string;
+  blocked_notice?: BlockedNotice;
+  analysis_note?: string;
+  segment_policy?: SegmentPolicy;
+  batch_segment_policy?: BatchSegmentPolicy;
+  file_segment_policies?: SegmentPolicy[];
+  batch_policy_warnings?: string[];
+};
+
 type SingleResultData = {
   steps: StepItem[];
   markdown: string;
   output_dir: string;
+  output_dir_name?: string;
   pdf_path?: string;
+  has_steps?: boolean;
+  result_mode?: string;
+  fallback_used?: boolean;
+  analysis_note?: string;
+  quality_score?: number;
+  degrade_reason?: string;
+  content_title?: string;
+  key_points?: string[];
+  timeline_points?: Array<{ time?: string; text?: string }>;
+  confidence_note?: string;
+  blocked_notice?: BlockedNotice;
+  risk?: RiskResult;
+  segment_policy?: SegmentPolicy;
+  segment_guardrails?: string[];
+  effective_options?: EffectiveOptions;
+  video_preview_url?: string;
+  subtitle_available?: boolean;
+  subtitle_file_name?: string;
+  subtitle_line_count?: number;
+  subtitle_exports?: Record<string, string>;
+  subtitle_workbench_url?: string;
 };
 
 type BatchResultItem = {
@@ -210,11 +487,35 @@ type BatchResultItem = {
   success: boolean;
   steps_count?: number;
   output_dir?: string;
+  output_dir_name?: string;
   error?: string;
+  code?: string;
+  risk?: RiskResult;
+  result_mode?: string;
+  fallback_used?: boolean;
+  analysis_note?: string;
+  quality_score?: number;
+  degrade_reason?: string;
+  content_title?: string;
+  key_points?: string[];
+  timeline_points?: Array<{ time?: string; text?: string }>;
+  confidence_note?: string;
+  blocked_notice?: BlockedNotice;
+  segment_policy?: SegmentPolicy;
+  segment_guardrails?: string[];
+  effective_options?: EffectiveOptions;
+  video_preview_url?: string;
+  subtitle_available?: boolean;
+  subtitle_file_name?: string;
+  subtitle_line_count?: number;
+  subtitle_exports?: Record<string, string>;
+  subtitle_workbench_url?: string;
 };
 
 type BatchResultData = {
   results: BatchResultItem[];
+  batch_segment_policy?: BatchSegmentPolicy;
+  batch_policy_warnings?: string[];
   summary?: {
     total?: number;
     success?: number;
@@ -229,6 +530,18 @@ type HistoryItem = {
   steps_count?: number;
   timestamp?: string;
 };
+
+class ApiRequestError extends Error {
+  status: number;
+  payload: ApiErrorPayload;
+
+  constructor(message: string, status: number, payload: ApiErrorPayload) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+    this.payload = payload;
+  }
+}
 
 type ProgressBoard = {
   mode: Mode;
@@ -288,10 +601,99 @@ const FPS_MIN = 0.1;
 const FPS_MAX = 10;
 const FPS_STEP = 0.1;
 const HERO_ANIMATION_TOP_THRESHOLD = 4;
+const MOBILE_PERF_MEDIA_QUERY = "(max-width: 900px) and (pointer: coarse)";
+const REDUCED_MOTION_MEDIA_QUERY = "(prefers-reduced-motion: reduce)";
+const PROGRESS_POLL_INTERVAL_DESKTOP_MS = 5000;
+const PROGRESS_POLL_INTERVAL_MOBILE_MS = 9000;
+
+type NavigatorWithConnection = Navigator & {
+  connection?: {
+    saveData?: boolean;
+    addEventListener?: (type: "change", listener: () => void) => void;
+    removeEventListener?: (type: "change", listener: () => void) => void;
+  };
+};
+
+type SubtitleLine = {
+  index?: number;
+  start_time?: string;
+  end_time?: string;
+  start_seconds?: number;
+  end_seconds?: number;
+  text?: string;
+};
+
+type SubtitleWorkbenchData = {
+  subtitle_file?: string;
+  subtitle_available?: boolean;
+  line_count?: number;
+  lines?: SubtitleLine[];
+  video_preview_url?: string;
+  subtitle_exports?: Record<string, string>;
+};
+
+const shouldEnableMobilePerfMode = () => {
+  if (typeof window === "undefined") return false;
+  const coarseMobile = window.matchMedia(MOBILE_PERF_MEDIA_QUERY).matches;
+  const reducedMotion = window.matchMedia(REDUCED_MOTION_MEDIA_QUERY).matches;
+  const saveData = Boolean((navigator as NavigatorWithConnection).connection?.saveData);
+  return coarseMobile || reducedMotion || saveData;
+};
 
 const isValidVideo = (filename: string) => {
   const ext = String(filename || "").split(".").pop()?.toLowerCase() || "";
   return VALID_VIDEO_EXTENSIONS.has(ext);
+};
+
+const parseSourceUrls = (raw: string) => {
+  const input = String(raw || "");
+  if (!input.trim()) return [];
+
+  const candidates: string[] = [];
+
+  const directMatches = input.match(/https?:\/\/[^\s"'<>]+/giu) || [];
+  candidates.push(...directMatches);
+
+  const schemeLessPatterns = [
+    /v\.douyin\.com\/[A-Za-z0-9/_-]+/giu,
+    /(?:www\.)?douyin\.com\/[^\s"'<>]+/giu,
+    /b23\.tv\/[^\s"'<>]+/giu,
+    /(?:www\.)?bilibili\.com\/[^\s"'<>]+/giu,
+    /xhslink\.com\/[A-Za-z0-9/_-]+/giu,
+    /(?:www\.)?xiaohongshu\.com\/[^\s"'<>]+/giu,
+  ];
+  for (const pattern of schemeLessPatterns) {
+    const matched = input.match(pattern) || [];
+    candidates.push(...matched);
+  }
+
+  const normalized: string[] = [];
+  for (const rawCandidate of candidates) {
+    let url = String(rawCandidate || "").trim();
+    if (!url) continue;
+
+    url = url
+      .replace(/^[<(\[{"'“‘]+/u, "")
+      .replace(/[>)\]}”’"']+$/u, "")
+      .replace(/[，。！？；：、,.;!?]+$/u, "")
+      .trim();
+    if (!url) continue;
+
+    if (!/^https?:\/\//iu.test(url)) {
+      url = `https://${url}`;
+    }
+    try {
+      const parsed = new URL(url);
+      if (!/^https?:$/iu.test(parsed.protocol)) continue;
+      const canonical = parsed.toString();
+      if (canonical && !normalized.includes(canonical)) {
+        normalized.push(canonical);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return normalized;
 };
 
 const basename = (value: string | undefined | null) =>
@@ -560,7 +962,7 @@ const HISTORY_VIRTUAL_OVERSCAN = 6;
 
 const ReadonlyStepsList = memo(function ReadonlyStepsList({ steps }: { steps: StepItem[] }) {
   return (
-    <div className="history-scroll max-h-[min(62vh,40rem)] space-y-2 overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+    <div className="space-y-2">
       {steps.map((step, i) => (
         <div key={`s-${i}`} className="rounded border border-neutral-800 bg-neutral-950/60 p-2">
           <p className="text-xs text-neutral-500">
@@ -696,10 +1098,26 @@ const VirtualizedHistoryList = memo(function VirtualizedHistoryList({
   );
 });
 
-const MarkdownPreview = memo(function MarkdownPreview({ html }: { html: string }) {
+const MarkdownPreview = memo(function MarkdownPreview({
+  html,
+  className,
+  contentClassName,
+}: {
+  html: string;
+  className?: string;
+  contentClassName?: string;
+}) {
   return (
-    <div className="history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
-      <div className="prose prose-invert max-w-none text-sm" dangerouslySetInnerHTML={{ __html: html }} />
+    <div
+      className={cn(
+        "history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]",
+        className,
+      )}
+    >
+      <div
+        className={cn("prose prose-invert max-w-none text-sm", contentClassName)}
+        dangerouslySetInnerHTML={{ __html: html }}
+      />
     </div>
   );
 });
@@ -717,10 +1135,13 @@ export default function App() {
   const [useVideo, setUseVideo] = useState(false);
   const [webSearch, setWebSearch] = useState(false);
   const [fps, setFps] = useState(1);
+  const [summaryOnly, setSummaryOnly] = useState(false);
+  const [sourceUrl, setSourceUrl] = useState("");
+  const [importingUrl, setImportingUrl] = useState(false);
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
-  const [testingModel, setTestingModel] = useState(false);
+  const [, setTestingModel] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [deletingHistoryId, setDeletingHistoryId] = useState("");
@@ -730,11 +1151,16 @@ export default function App() {
   const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
   const [apiKeyGuideActive, setApiKeyGuideActive] = useState(false);
   const [modelConfigGuideActive, setModelConfigGuideActive] = useState(false);
+  const [, setModelTestGuideActive] = useState(false);
 
   const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
   const [batchResultData, setBatchResultData] = useState<BatchResultData | null>(null);
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [subtitleWorkbench, setSubtitleWorkbench] = useState<SubtitleWorkbenchData | null>(null);
+  const [subtitleLoading, setSubtitleLoading] = useState(false);
+  const [subtitleKeyword, setSubtitleKeyword] = useState("");
+  const [subtitleLoadError, setSubtitleLoadError] = useState("");
 
   const [isEditMode, setIsEditMode] = useState(false);
   const [editedSteps, setEditedSteps] = useState<StepItem[]>([]);
@@ -751,11 +1177,14 @@ export default function App() {
   const [successMessage, setSuccessMessage] = useState("");
   const [showSuccessToast, setShowSuccessToast] = useState(false);
   const [heroAnimationActive, setHeroAnimationActive] = useState(true);
+  const [mobilePerfMode, setMobilePerfMode] = useState<boolean>(() => shouldEnableMobilePerfMode());
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const sourceUrlInputRef = useRef<HTMLInputElement | null>(null);
   const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
   const modelBaseUrlInputRef = useRef<HTMLInputElement | null>(null);
   const modelNameInputRef = useRef<HTMLInputElement | null>(null);
+  const modelTestButtonRef = useRef<HTMLButtonElement | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -763,10 +1192,20 @@ export default function App() {
   const apiKeyGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelConfigGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelConfigGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modelTestGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modelTestGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const singleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progressVisibleRef = useRef(false);
   const batchFilesRef = useRef<BatchFileItem[]>([]);
+  const verifiedModelConfigSignatureRef = useRef("");
+  const userSettingsStorageKeyRef = useRef("");
+  const [userSettingsLoaded, setUserSettingsLoaded] = useState(false);
+  const subtitleVideoRef = useRef<HTMLVideoElement | null>(null);
+  const progressPollIntervalMs = mobilePerfMode
+    ? PROGRESS_POLL_INTERVAL_MOBILE_MS
+    : PROGRESS_POLL_INTERVAL_DESKTOP_MS;
+  const uiScrollBehavior: ScrollBehavior = mobilePerfMode ? "auto" : "smooth";
 
   useEffect(() => {
     progressVisibleRef.current = progressVisible;
@@ -777,6 +1216,110 @@ export default function App() {
   }, [batchFiles]);
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const clientId = getOrCreateHistoryClientId() || "anonymous";
+    const storageKey = `${USER_SETTINGS_STORAGE_KEY_PREFIX}:${clientId}`;
+    userSettingsStorageKeyRef.current = storageKey;
+    try {
+      const raw = window.localStorage.getItem(storageKey);
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as PersistedUserSettings;
+      if (!parsed || typeof parsed !== "object") return;
+
+      const presetText = String(parsed.modelPreset || "").trim().toLowerCase();
+      if (MODEL_PRESET_VALUES.includes(presetText as ModelPreset)) {
+        setModelPreset(presetText as ModelPreset);
+      }
+
+      const whisperText = String(parsed.whisperModel || "").trim().toLowerCase();
+      if (WHISPER_MODEL_VALUES.has(whisperText)) {
+        setWhisperModel(whisperText);
+      }
+
+      setApiKey(safeString(parsed.apiKey, 500, ""));
+      setModelName(safeString(parsed.modelName, 200, ""));
+      setModelBaseUrl(safeString(parsed.modelBaseUrl, 300, "https://ark.cn-beijing.volces.com/api/v3"));
+      setMaxVision(Math.round(clampNumber(parsed.maxVision, 10, MAX_VISION_MIN, MAX_VISION_MAX)));
+      setFps(Number(clampNumber(parsed.fps, 1, FPS_MIN, FPS_MAX).toFixed(1)));
+
+      if (typeof parsed.useVideo === "boolean") setUseVideo(parsed.useVideo);
+      if (typeof parsed.webSearch === "boolean") setWebSearch(parsed.webSearch);
+      if (typeof parsed.summaryOnly === "boolean") setSummaryOnly(parsed.summaryOnly);
+    } catch {
+      // ignore malformed local data
+    } finally {
+      setUserSettingsLoaded(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!userSettingsLoaded) return;
+
+    const storageKey =
+      userSettingsStorageKeyRef.current ||
+      `${USER_SETTINGS_STORAGE_KEY_PREFIX}:${getOrCreateHistoryClientId() || "anonymous"}`;
+    userSettingsStorageKeyRef.current = storageKey;
+    const payload: PersistedUserSettings = {
+      version: 1,
+      apiKey: safeString(apiKey, 500, ""),
+      modelPreset,
+      modelName: safeString(modelName, 200, ""),
+      modelBaseUrl: safeString(modelBaseUrl, 300, ""),
+      whisperModel,
+      maxVision: Math.round(clampNumber(maxVision, 10, MAX_VISION_MIN, MAX_VISION_MAX)),
+      useVideo: Boolean(useVideo),
+      webSearch: Boolean(webSearch),
+      fps: Number(clampNumber(fps, 1, FPS_MIN, FPS_MAX).toFixed(1)),
+      summaryOnly: Boolean(summaryOnly),
+      updatedAt: new Date().toISOString(),
+    };
+    try {
+      window.localStorage.setItem(storageKey, JSON.stringify(payload));
+    } catch {
+      // ignore storage write failure
+    }
+  }, [apiKey, fps, maxVision, modelBaseUrl, modelName, modelPreset, summaryOnly, useVideo, userSettingsLoaded, webSearch, whisperModel]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+
+    const coarseMobileQuery = window.matchMedia(MOBILE_PERF_MEDIA_QUERY);
+    const reducedMotionQuery = window.matchMedia(REDUCED_MOTION_MEDIA_QUERY);
+    const connection = (navigator as NavigatorWithConnection).connection;
+    const updateMode = () => {
+      const next = coarseMobileQuery.matches || reducedMotionQuery.matches || Boolean(connection?.saveData);
+      setMobilePerfMode((prev) => (prev === next ? prev : next));
+    };
+    const addMediaListener = (media: MediaQueryList, listener: () => void) => {
+      if (typeof media.addEventListener === "function") {
+        media.addEventListener("change", listener);
+        return;
+      }
+      media.addListener(listener);
+    };
+    const removeMediaListener = (media: MediaQueryList, listener: () => void) => {
+      if (typeof media.removeEventListener === "function") {
+        media.removeEventListener("change", listener);
+        return;
+      }
+      media.removeListener(listener);
+    };
+
+    updateMode();
+    addMediaListener(coarseMobileQuery, updateMode);
+    addMediaListener(reducedMotionQuery, updateMode);
+    connection?.addEventListener?.("change", updateMode);
+
+    return () => {
+      removeMediaListener(coarseMobileQuery, updateMode);
+      removeMediaListener(reducedMotionQuery, updateMode);
+      connection?.removeEventListener?.("change", updateMode);
+    };
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
       if (successTimerRef.current) clearTimeout(successTimerRef.current);
@@ -784,6 +1327,8 @@ export default function App() {
       if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
       if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
       if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
+      if (modelTestGuideTimerRef.current) clearTimeout(modelTestGuideTimerRef.current);
+      if (modelTestGuideFocusTimerRef.current) clearTimeout(modelTestGuideFocusTimerRef.current);
       if (batchTimerRef.current) clearInterval(batchTimerRef.current);
       if (singleTimerRef.current) clearInterval(singleTimerRef.current);
     };
@@ -830,6 +1375,10 @@ export default function App() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
+    if (mobilePerfMode) {
+      setHeroAnimationActive(false);
+      return;
+    }
 
     let rafId = 0;
     const syncHeroAnimationState = () => {
@@ -852,7 +1401,7 @@ export default function App() {
       if (rafId) window.cancelAnimationFrame(rafId);
       window.removeEventListener("scroll", handleScroll);
     };
-  }, []);
+  }, [mobilePerfMode]);
 
   const withHistoryClientHeader = useCallback((options: RequestInit = {}) => {
     const headers = new Headers(options.headers || {});
@@ -865,9 +1414,15 @@ export default function App() {
 
   const fetchJson = useCallback(async <T,>(url: string, options: RequestInit = {}) => {
     const response = await fetch(url, withHistoryClientHeader(options));
-    const data = (await response.json().catch(() => ({}))) as { error?: string } & T;
+    const data = (await response.json().catch(() => ({}))) as ApiErrorPayload & T;
     if (!response.ok || data.error) {
-      throw new Error(data.error || `请求失败 (${response.status})`);
+      const base = String(data.error || `请求失败 (${response.status})`);
+      const riskHint = formatRiskHint(data.risk);
+      const segmentHint = formatSegmentPolicyHint(data.segment_policy);
+      const batchSegmentHint = formatBatchSegmentPolicyHint(data.batch_segment_policy);
+      const codeText = data.code ? `code=${data.code}` : "";
+      const merged = [base, codeText, segmentHint, batchSegmentHint, riskHint].filter(Boolean).join(" | ");
+      throw new ApiRequestError(merged, response.status, data);
     }
     return data;
   }, [withHistoryClientHeader]);
@@ -887,22 +1442,7 @@ export default function App() {
     setErrorMessage(formatErrorMessage(rawMessage));
     setShowErrorToast(true);
     if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
-    errorTimerRef.current = setTimeout(() => setShowErrorToast(false), 5000);
-
-    if (rawMessage.includes("请输入 ARK API Key") || rawMessage.includes("请输入 API Key")) {
-      setHistoryDrawerOpen(false);
-      setSettingsDrawerOpen(true);
-      setApiKeyGuideActive(true);
-
-      if (apiKeyGuideTimerRef.current) clearTimeout(apiKeyGuideTimerRef.current);
-      apiKeyGuideTimerRef.current = setTimeout(() => setApiKeyGuideActive(false), 2800);
-
-      if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
-      apiKeyGuideFocusTimerRef.current = setTimeout(() => {
-        apiKeyInputRef.current?.focus();
-        apiKeyInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-      }, 220);
-    }
+    errorTimerRef.current = setTimeout(() => setShowErrorToast(false), ERROR_TOAST_DURATION_MS);
   }, []);
 
   const showSuccess = useCallback((message: string) => {
@@ -921,7 +1461,10 @@ export default function App() {
     setModelConfigGuideActive(true);
 
     if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
-    modelConfigGuideTimerRef.current = setTimeout(() => setModelConfigGuideActive(false), 2800);
+    modelConfigGuideTimerRef.current = setTimeout(
+      () => setModelConfigGuideActive(false),
+      ERROR_GUIDE_DURATION_MS,
+    );
 
     if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
     modelConfigGuideFocusTimerRef.current = setTimeout(() => {
@@ -933,9 +1476,27 @@ export default function App() {
           ? modelNameInputRef.current
           : modelBaseUrlInputRef.current;
       target?.focus();
-      target?.scrollIntoView({ behavior: "smooth", block: "center" });
+      target?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
     }, 220);
-  }, [modelBaseUrl, modelName, modelPreset]);
+  }, [modelBaseUrl, modelName, modelPreset, uiScrollBehavior]);
+
+  const triggerModelTestGuide = useCallback(() => {
+    setHistoryDrawerOpen(false);
+    setSettingsDrawerOpen(true);
+    setModelTestGuideActive(true);
+
+    if (modelTestGuideTimerRef.current) clearTimeout(modelTestGuideTimerRef.current);
+    modelTestGuideTimerRef.current = setTimeout(
+      () => setModelTestGuideActive(false),
+      ERROR_GUIDE_DURATION_MS,
+    );
+
+    if (modelTestGuideFocusTimerRef.current) clearTimeout(modelTestGuideFocusTimerRef.current);
+    modelTestGuideFocusTimerRef.current = setTimeout(() => {
+      modelTestButtonRef.current?.focus();
+      modelTestButtonRef.current?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
+    }, 260);
+  }, [uiScrollBehavior]);
 
   const validateModelConfig = useCallback(() => {
     const hasBaseUrl = Boolean(String(modelBaseUrl || "").trim());
@@ -987,13 +1548,53 @@ export default function App() {
 
       const responseText = String(data.reply || "").replace(/\s+/g, " ").trim();
       const briefReply = responseText ? ` · 返回：${responseText.slice(0, 48)}` : "";
+      verifiedModelConfigSignatureRef.current = buildModelConfigSignature(
+        apiKey,
+        modelPreset,
+        modelName,
+        modelBaseUrl,
+      );
       showSuccess(`${String(data.message || "模型连接测试成功")}${briefReply}`);
     } catch (error) {
       showError(String((error as Error).message || error));
     } finally {
       setTestingModel(false);
     }
-  }, [apiKey, fetchJson, modelBaseUrl, modelName, showError, showSuccess, validateModelConfig]);
+  }, [apiKey, fetchJson, modelBaseUrl, modelName, modelPreset, showError, showSuccess, validateModelConfig]);
+
+  const pickUploadPrecheckError = useCallback((message: string) => {
+    const raw = String(message || "").trim();
+    const normalized = raw.replace(/^模型连接测试失败[:：]\s*/u, "").trim();
+    const errorCode = extractErrorCode(normalized);
+    if (errorCode === "risk_model_config_invalid") {
+      return "模型配置无效：请检查 Base URL、模型名称是否匹配，并确认模型支持图片理解";
+    }
+    if (errorCode === "risk_model_auth_failed") {
+      return "模型鉴权失败：请检查 API Key 是否有效且与当前平台匹配";
+    }
+    const parts = normalized.split("|").map((item) => item.trim()).filter(Boolean);
+    const preferredHints = [
+      "模型鉴权失败",
+      "模型连接失败",
+      "请求过于频繁",
+      "模型服务请求超时",
+      "模型服务调用失败",
+      "联网搜索功能未开通",
+    ];
+    for (const hint of preferredHints) {
+      const matched = parts.find((item) => item.includes(hint));
+      if (matched) return matched;
+    }
+    return parts[0] || normalized || "模型连通测试失败";
+  }, []);
+
+  const verifyModelConnectionForUpload = useCallback(async () => {
+    // 模型连通校验已取消：统一由后端 .env 托管模型配置。
+    void pickUploadPrecheckError;
+    void triggerModelTestGuide;
+    void testModelConnection;
+    return true;
+  }, [pickUploadPrecheckError, testModelConnection, triggerModelTestGuide]);
 
   const setProgressTextIfChanged = useCallback((nextText: string) => {
     const normalized = String(nextText || "");
@@ -1030,11 +1631,16 @@ export default function App() {
     let success = 0;
     let failed = 0;
     batchFilesRef.current.forEach((item) => {
+      if (!item.filepath) return;
       if (item.status === "success") success += 1;
       if (item.status === "failed") failed += 1;
     });
     return { success, failed };
   }, []);
+  const getAnalyzableBatchFiles = useCallback(
+    () => batchFilesRef.current.filter((item) => Boolean(String(item.filepath || "").trim())),
+    [],
+  );
   const loadHistory = useCallback(async () => {
     setLoadingHistory(true);
     try {
@@ -1103,7 +1709,7 @@ export default function App() {
       const stage = String(progress.stage || "").toLowerCase();
       const status = String(progress.status || "").toLowerCase();
       const currentFile = String(progress.current_file || "");
-      const total = Number(progress.total) || batchFilesRef.current.length;
+      const total = Number(progress.total) || getAnalyzableBatchFiles().length;
       const current = Number(progress.current) || 0;
       const { success, failed } = countBatchStatus();
       let percent = 0;
@@ -1147,22 +1753,32 @@ export default function App() {
     } catch {
       // ignore polling errors
     }
-  }, [countBatchStatus, fetchJson, getStageProgress, setProgressTextIfChanged, updateProgressBoard]);
+  }, [countBatchStatus, fetchJson, getAnalyzableBatchFiles, getStageProgress, setProgressTextIfChanged, updateProgressBoard]);
 
   const startSinglePolling = useCallback(() => {
     stopSinglePolling();
     void pullSingleProgress();
-    singleTimerRef.current = setInterval(() => void pullSingleProgress(), 5000);
-  }, [pullSingleProgress, stopSinglePolling]);
+    singleTimerRef.current = setInterval(() => void pullSingleProgress(), progressPollIntervalMs);
+  }, [progressPollIntervalMs, pullSingleProgress, stopSinglePolling]);
 
   const startBatchPolling = useCallback(() => {
     stopBatchPolling();
     void pullBatchProgress();
-    batchTimerRef.current = setInterval(() => void pullBatchProgress(), 5000);
-  }, [pullBatchProgress, stopBatchPolling]);
+    batchTimerRef.current = setInterval(() => void pullBatchProgress(), progressPollIntervalMs);
+  }, [progressPollIntervalMs, pullBatchProgress, stopBatchPolling]);
+
+  useEffect(() => {
+    if (singleTimerRef.current) startSinglePolling();
+    if (batchTimerRef.current) startBatchPolling();
+  }, [progressPollIntervalMs, startBatchPolling, startSinglePolling]);
 
   const uploadSingleFileWithResume = useCallback(
-    async (file: File, fileIndex: number, totalFiles: number) => {
+    async (
+      file: File,
+      fileIndex: number,
+      totalFiles: number,
+      onSafetyCheckStart?: (currentFile: File, currentIndex: number, total: number) => void,
+    ) => {
       const resumeKey = `${UPLOAD_RESUME_KEY_PREFIX}:${file.name}:${file.size}:${file.lastModified}`;
       const storedUploadId = window.localStorage.getItem(resumeKey) || "";
       const initData = await fetchJson<{
@@ -1201,6 +1817,8 @@ export default function App() {
         await fetchJson("/upload_chunk", { method: "POST", body: formData });
       }
 
+      onSafetyCheckStart?.(file, fileIndex, totalFiles);
+      setProgressTextIfChanged(`已上传完成，正在进行安全检测：${file.name}（${fileIndex}/${totalFiles}）`);
       const finalized = await fetchJson<{ filename: string; filepath: string }>("/upload_chunk_finalize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1219,38 +1837,100 @@ export default function App() {
         showError("没有可用的视频文件");
         return;
       }
+
+      const readyForUpload = await verifyModelConnectionForUpload();
+      if (!readyForUpload) return;
+
       showProgress("上传中", "正在上传视频...");
       updateProgressBoard({ mode: "upload", stage: "prepare", total: files.length, percent: 0 });
       try {
         const uploaded: BatchFileItem[] = [];
+        let uploadedSuccess = 0;
+        let uploadedFailed = 0;
         for (let i = 0; i < files.length; i += 1) {
-          const item = await uploadSingleFileWithResume(files[i], i + 1, files.length);
-          uploaded.push({ filename: item.filename, filepath: item.filepath, status: "pending", error: "" });
+          const currentFile = files[i];
+          try {
+            const item = await uploadSingleFileWithResume(
+              currentFile,
+              i + 1,
+              files.length,
+              (processingFile, currentIndex, total) => {
+                const moderationPercent = Math.min(
+                  99,
+                  Math.round(((Math.max(0, currentIndex - 1) + STAGE_PERCENT.moderation / 100) / total) * 100),
+                );
+                setProgressTextIfChanged(`已上传完成，正在进行安全检测：${processingFile.name}（${currentIndex}/${total}）`);
+                updateProgressBoard({
+                  mode: "upload",
+                  stage: "moderation",
+                  total,
+                  current: currentIndex,
+                  success: uploadedSuccess,
+                  failed: uploadedFailed,
+                  percent: moderationPercent,
+                  currentFile: processingFile.name,
+                });
+              },
+            );
+            uploaded.push({ filename: item.filename, filepath: item.filepath, status: "pending", error: "" });
+            uploadedSuccess += 1;
+          } catch (error) {
+            const apiError = error instanceof ApiRequestError ? error : null;
+            let message = String((error as Error).message || error || "上传失败");
+            if (apiError?.payload?.code === "content_policy_violation") {
+              message = formatContentPolicyViolationMessage("", true);
+            } else if (apiError?.payload?.error) {
+              message = String(apiError.payload.error);
+            }
+            const segmentHint = formatSegmentPolicyHint(apiError?.payload?.segment_policy);
+            if (segmentHint) message = [message, segmentHint].filter(Boolean).join(" | ");
+            uploaded.push({
+              filename: currentFile.name,
+              filepath: "",
+              status: "failed",
+              error: formatInlineErrorMessage(message),
+            });
+            uploadedFailed += 1;
+          }
           updateProgressBoard({
             mode: "upload",
             stage: i + 1 >= files.length ? "done" : "upload",
             total: files.length,
             current: i + 1,
-            success: i + 1,
+            success: uploadedSuccess,
+            failed: uploadedFailed,
             percent: Math.round(((i + 1) / files.length) * 100),
           });
         }
         setBatchFiles((prev) => [...prev, ...uploaded]);
+        if (uploadedFailed > 0) {
+          showError(`已跳过 ${uploadedFailed} 个上传失败视频，可继续分析其余视频。`);
+        }
       } catch (error) {
         showError(`上传失败: ${String((error as Error).message || error)}`);
       } finally {
         hideProgress();
       }
     },
-    [hideProgress, showError, showProgress, updateProgressBoard, uploadSingleFileWithResume],
+    [
+      hideProgress,
+      setProgressTextIfChanged,
+      showError,
+      showProgress,
+      updateProgressBoard,
+      uploadSingleFileWithResume,
+      verifyModelConnectionForUpload,
+    ],
   );
-  const analyzeSingle = useCallback(async () => {
-    if (batchFilesRef.current.length !== 1) return;
-    const file = batchFilesRef.current[0];
-    setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "pending", error: "" })));
+  const analyzeByUploadedFile = useCallback(async (file: BatchFileItem) => {
+    setBatchFiles((prev) =>
+      prev.map((item) =>
+        item.filepath ? { ...item, status: item.filepath === file.filepath ? "pending" : item.status, error: "" } : item,
+      ),
+    );
     stopBatchPolling();
     setIsAnalyzing(true);
-    showProgress("单文件处理中", "正在分析视频，请稍候...");
+    showProgress("单文件处理中", summaryOnly ? "正在生成摘要版，请稍候..." : "正在分析视频，请稍候...");
     updateProgressBoard({ mode: "single", stage: "prepare", total: 1, percent: 5, currentFile: file.filename });
     startSinglePolling();
     let reveal = false;
@@ -1259,22 +1939,24 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          api_key: apiKey,
-          model_name: modelName,
-          model_base_url: modelBaseUrl,
           filepath: file.filepath,
-          whisper_model: whisperModel,
-          use_video: useVideo,
           web_search: webSearch,
           max_vision: maxVision,
-          fps,
+          summary_only: summaryOnly,
         }),
       });
       setResultData(data);
       setBatchResultData(null);
       setIsEditMode(false);
       setEditedSteps([]);
-      setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "success", error: "" })));
+      if (data?.fallback_used) {
+        showSuccess(String(data.analysis_note || "未识别到标准步骤，已自动生成候选内容。"));
+      }
+      setBatchFiles((prev) =>
+        prev.map((item) =>
+          item.filepath === file.filepath ? { ...item, status: "success", error: "" } : item,
+        ),
+      );
       updateProgressBoard({
         mode: "single",
         stage: "done",
@@ -1288,9 +1970,58 @@ export default function App() {
       reveal = true;
       await loadHistory();
     } catch (error) {
+      const apiError = error instanceof ApiRequestError ? error : null;
+      if (apiError?.payload?.code === "content_policy_violation") {
+        const blockedNotice = apiError.payload.blocked_notice || {
+          title: "安全检测未通过（已拦截）",
+          risk_level: String(apiError.payload.risk?.risk_level || "high"),
+          reason_code: String(apiError.payload.risk?.reason_code || "CONTENT_POLICY_VIOLATION"),
+          reason: String(apiError.payload.risk?.reason || CONTENT_POLICY_BLOCK_MESSAGE),
+          suggestions: ["删除敏感片段后重新上传检测。"],
+          retry_guidance: "请整改后重试。",
+        };
+        setResultData({
+          steps: [],
+          markdown: "",
+          output_dir: "",
+          pdf_path: "",
+          result_mode: "blocked_notice",
+          fallback_used: false,
+          analysis_note: String(apiError.payload.analysis_note || "已生成安全检测说明卡。"),
+          quality_score: Number(apiError.payload.quality_score || 0),
+          degrade_reason: String(apiError.payload.degrade_reason || "content_policy_blocked"),
+          blocked_notice: blockedNotice,
+          risk: apiError.payload.risk,
+        });
+        setBatchResultData(null);
+        setIsEditMode(false);
+        setEditedSteps([]);
+        setBatchFiles((prev) =>
+          prev.map((item) =>
+            item.filepath === file.filepath ? { ...item, status: "failed", error: "安全检测未通过" } : item,
+          ),
+        );
+        updateProgressBoard({
+          mode: "single",
+          stage: "done",
+          total: 1,
+          current: 1,
+          success: 0,
+          failed: 1,
+          currentFile: file.filename,
+          percent: 100,
+        });
+        showSuccess("安全检测未通过，已生成检测结果说明卡。");
+        reveal = true;
+        return;
+      }
       const message = String((error as Error).message || error);
       if (WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint))) setWebSearch(false);
-      setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "failed", error: message })));
+      setBatchFiles((prev) =>
+        prev.map((item) =>
+          item.filepath === file.filepath ? { ...item, status: "failed", error: message } : item,
+        ),
+      );
       updateProgressBoard({
         mode: "single",
         stage: "failed",
@@ -1306,35 +2037,164 @@ export default function App() {
       stopSinglePolling();
       setIsAnalyzing(false);
       hideProgress();
-      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
     }
   }, [
-    apiKey,
     fetchJson,
-    fps,
     hideProgress,
     loadHistory,
     maxVision,
-    modelBaseUrl,
-    modelName,
     showError,
+    showSuccess,
     showProgress,
     startSinglePolling,
     stopBatchPolling,
     stopSinglePolling,
+    summaryOnly,
+    uiScrollBehavior,
     updateProgressBoard,
-    useVideo,
     webSearch,
-    whisperModel,
+  ]);
+
+  const analyzeSingle = useCallback(async () => {
+    const analyzableFiles = getAnalyzableBatchFiles();
+    if (analyzableFiles.length !== 1) return;
+    await analyzeByUploadedFile(analyzableFiles[0]);
+  }, [analyzeByUploadedFile, getAnalyzableBatchFiles]);
+
+  const uploadBySourceUrl = useCallback(async (targetUrl: string) => {
+    const uploaded = await fetchJson<{ filename: string; filepath: string; download_title?: string }>("/upload_url", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        url: targetUrl,
+      }),
+    });
+    const uploadedPath = String(uploaded.filepath || "").trim();
+    if (!uploadedPath) throw new Error("链接导入失败：未返回可分析文件");
+
+    const uploadedName =
+      String(uploaded.download_title || uploaded.filename || "").trim() ||
+      basename(uploadedPath) ||
+      "链接视频";
+    return {
+      filename: uploadedName,
+      filepath: uploadedPath,
+      status: "pending",
+      error: "",
+    } satisfies BatchFileItem;
+  }, [fetchJson]);
+
+  const importSourceUrlOnly = useCallback(async () => {
+    const urls = parseSourceUrls(sourceUrl);
+    if (urls.length === 0) {
+      showError("请输入有效的视频链接（http/https）");
+      sourceUrlInputRef.current?.focus();
+      return;
+    }
+    const readyForUpload = await verifyModelConnectionForUpload();
+    if (!readyForUpload) return;
+
+    setImportingUrl(true);
+    showProgress("链接导入中", "正在下载链接视频并执行安全检测...");
+    updateProgressBoard({ mode: "upload", stage: "prepare", total: 1, percent: 0, current: 0 });
+
+    try {
+      const uploadedItem = await uploadBySourceUrl(urls[0]);
+      setBatchFiles((prev) => [uploadedItem, ...prev]);
+      setSourceUrl("");
+      updateProgressBoard({
+        mode: "upload",
+        stage: "done",
+        total: 1,
+        current: 1,
+        success: 1,
+        failed: 0,
+        percent: 100,
+        currentFile: uploadedItem.filename,
+      });
+      showSuccess("链接导入成功，可直接开始分析。");
+    } catch (error) {
+      showError(`链接导入失败: ${String((error as Error).message || error)}`);
+    } finally {
+      hideProgress();
+      setImportingUrl(false);
+    }
+  }, [
+    hideProgress,
+    showError,
+    showProgress,
+    showSuccess,
+    sourceUrl,
+    updateProgressBoard,
+    uploadBySourceUrl,
+    verifyModelConnectionForUpload,
+  ]);
+
+  const analyzeBySourceUrl = useCallback(async () => {
+    const urls = parseSourceUrls(sourceUrl);
+    if (urls.length === 0) {
+      showError("请输入有效的视频链接（http/https）");
+      sourceUrlInputRef.current?.focus();
+      return;
+    }
+    const readyForUpload = await verifyModelConnectionForUpload();
+    if (!readyForUpload) return;
+
+    setImportingUrl(true);
+    stopBatchPolling();
+    stopSinglePolling();
+    setIsAnalyzing(true);
+    showProgress("链接处理中", "正在下载链接视频并执行安全检测...");
+    updateProgressBoard({ mode: "upload", stage: "prepare", total: 1, percent: 0, current: 0 });
+
+    try {
+      const uploadedItem = await uploadBySourceUrl(urls[0]);
+      setBatchFiles((prev) => [uploadedItem, ...prev]);
+      setSourceUrl("");
+      updateProgressBoard({
+        mode: "upload",
+        stage: "done",
+        total: 1,
+        current: 1,
+        success: 1,
+        failed: 0,
+        percent: 100,
+        currentFile: uploadedItem.filename,
+      });
+      setProgressTextIfChanged("链接视频导入完成，正在启动分析...");
+      await analyzeByUploadedFile(uploadedItem);
+    } catch (error) {
+      showError(`链接分析失败: ${String((error as Error).message || error)}`);
+      hideProgress();
+      setIsAnalyzing(false);
+    } finally {
+      setImportingUrl(false);
+    }
+  }, [
+    analyzeByUploadedFile,
+    hideProgress,
+    setProgressTextIfChanged,
+    showError,
+    showProgress,
+    sourceUrl,
+    stopBatchPolling,
+    stopSinglePolling,
+    updateProgressBoard,
+    uploadBySourceUrl,
+    verifyModelConnectionForUpload,
   ]);
 
   const analyzeBatch = useCallback(async () => {
-    if (batchFilesRef.current.length <= 1) return;
-    setBatchFiles((prev) => prev.map((item) => ({ ...item, status: "pending", error: "" })));
+    const analyzableFiles = getAnalyzableBatchFiles();
+    if (analyzableFiles.length <= 1) return;
+    setBatchFiles((prev) =>
+      prev.map((item) => (item.filepath ? { ...item, status: "pending", error: "" } : item)),
+    );
     stopSinglePolling();
     setIsAnalyzing(true);
-    showProgress("批量处理中", "正在逐个分析视频...");
-    updateProgressBoard({ mode: "batch", stage: "prepare", total: batchFilesRef.current.length, percent: 0 });
+    showProgress("批量处理中", summaryOnly ? "正在逐个生成摘要版..." : "正在逐个分析视频...");
+    updateProgressBoard({ mode: "batch", stage: "prepare", total: analyzableFiles.length, percent: 0 });
     startBatchPolling();
     let reveal = false;
     try {
@@ -1342,34 +2202,38 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          api_key: apiKey,
-          model_name: modelName,
-          model_base_url: modelBaseUrl,
-          filepaths: batchFilesRef.current.map((item) => item.filepath),
-          whisper_model: whisperModel,
-          use_video: useVideo,
+          filepaths: analyzableFiles.map((item) => item.filepath),
           web_search: webSearch,
           max_vision: maxVision,
-          fps,
+          summary_only: summaryOnly,
         }),
       });
       setBatchResultData(data);
       setResultData(null);
       setIsEditMode(false);
       setEditedSteps([]);
-      const nextFiles: BatchFileItem[] = batchFilesRef.current.map((item, index) => ({
-        ...item,
-        status: data.results?.[index]?.success ? "success" : "failed",
-        error: data.results?.[index]?.error || "",
-      }));
+      let resultIndex = 0;
+      const nextFiles: BatchFileItem[] = batchFilesRef.current.map((item) => {
+        if (!item.filepath) return item;
+        const result = data.results?.[resultIndex];
+        resultIndex += 1;
+        const base = String(result?.error || "");
+        const riskHint = formatRiskHint(result?.risk);
+        const codeText = result?.code ? `code=${result.code}` : "";
+        return {
+          ...item,
+          status: result?.success ? "success" : "failed",
+          error: [base, codeText, riskHint].filter(Boolean).join(" | "),
+        };
+      });
       setBatchFiles(nextFiles);
-      const success = nextFiles.filter((item) => item.status === "success").length;
-      const failed = nextFiles.filter((item) => item.status === "failed").length;
+      const success = nextFiles.filter((item) => item.filepath && item.status === "success").length;
+      const failed = nextFiles.filter((item) => item.filepath && item.status === "failed").length;
       updateProgressBoard({
         mode: "batch",
         stage: "done",
-        total: Number(data?.summary?.total) || nextFiles.length,
-        current: Number(data?.summary?.total) || nextFiles.length,
+        total: Number(data?.summary?.total) || analyzableFiles.length,
+        current: Number(data?.summary?.total) || analyzableFiles.length,
         success: Number(data?.summary?.success) || success,
         failed: Number(data?.summary?.failed) || failed,
         currentFile: "",
@@ -1384,7 +2248,7 @@ export default function App() {
       updateProgressBoard({
         mode: "batch",
         stage: "failed",
-        total: batchFilesRef.current.length,
+        total: analyzableFiles.length,
         current: success + failed,
         success,
         failed,
@@ -1395,17 +2259,13 @@ export default function App() {
       stopBatchPolling();
       setIsAnalyzing(false);
       hideProgress();
-      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
     }
   }, [
-    apiKey,
     fetchJson,
-    fps,
     hideProgress,
     loadHistory,
     maxVision,
-    modelBaseUrl,
-    modelName,
     countBatchStatus,
     showError,
     showProgress,
@@ -1413,21 +2273,26 @@ export default function App() {
     stopBatchPolling,
     stopSinglePolling,
     updateProgressBoard,
-    useVideo,
+    uiScrollBehavior,
     webSearch,
-    whisperModel,
+    getAnalyzableBatchFiles,
+    summaryOnly,
   ]);
 
   const startAnalyze = useCallback(async () => {
-    if (!apiKey) {
-      showError("请输入 API Key");
+    const analyzableFiles = getAnalyzableBatchFiles();
+    if (analyzableFiles.length === 1) return analyzeSingle();
+    if (analyzableFiles.length > 1) return analyzeBatch();
+    if (batchFilesRef.current.length > 0) {
+      showError("没有可分析的视频，请查看失败原因后重试上传。");
       return;
     }
-    if (!validateModelConfig()) return;
-    if (batchFilesRef.current.length === 1) return analyzeSingle();
-    if (batchFilesRef.current.length > 1) return analyzeBatch();
+    if (parseSourceUrls(sourceUrl).length > 0) {
+      await analyzeBySourceUrl();
+      return;
+    }
     showError("请先上传视频文件");
-  }, [analyzeBatch, analyzeSingle, apiKey, showError, validateModelConfig]);
+  }, [analyzeBatch, analyzeBySourceUrl, analyzeSingle, getAnalyzableBatchFiles, showError, sourceUrl]);
 
   const openHistoryRecord = useCallback(
     async (recordId: string) => {
@@ -1441,11 +2306,29 @@ export default function App() {
           steps: Array.isArray(record.steps) ? record.steps : [],
           markdown: record.markdown || "",
           output_dir: record.output_dir || "",
+          output_dir_name: record.output_dir_name || "",
           pdf_path: record.pdf_path || "",
+          has_steps: Boolean(record.steps && Array.isArray(record.steps) && record.steps.length > 0),
+          result_mode: String(record.result_mode || ""),
+          fallback_used: Boolean(record.fallback_used),
+          analysis_note: String(record.analysis_note || ""),
+          quality_score: Number(record.quality_score || 0),
+          degrade_reason: String(record.degrade_reason || ""),
+          content_title: String(record.content_title || ""),
+          confidence_note: String(record.confidence_note || ""),
+          video_preview_url: String(record.video_preview_url || ""),
+          subtitle_available: Boolean(record.subtitle_available),
+          subtitle_file_name: String(record.subtitle_file_name || ""),
+          subtitle_line_count: Number(record.subtitle_line_count || 0),
+          subtitle_exports:
+            record.subtitle_exports && typeof record.subtitle_exports === "object"
+              ? (record.subtitle_exports as Record<string, string>)
+              : {},
+          subtitle_workbench_url: String(record.subtitle_workbench_url || ""),
         });
         setBatchResultData(null);
         if (resultsRef.current) {
-          resultsRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+          resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
         }
       } catch (error) {
         showError(`加载历史失败: ${String((error as Error).message || error)}`);
@@ -1453,7 +2336,7 @@ export default function App() {
         hideProgress();
       }
     },
-    [fetchJson, hideProgress, showError, showProgress],
+    [fetchJson, hideProgress, showError, showProgress, uiScrollBehavior],
   );
 
   const openDeleteHistoryConfirm = useCallback(
@@ -1524,8 +2407,6 @@ export default function App() {
   );
 
   const saveEditedSteps = useCallback(async () => {
-    if (!apiKey) return showError("请输入 API Key");
-    if (!validateModelConfig()) return;
     if (!resultData?.output_dir) return showError("缺少输出目录信息");
     setSavingSteps(true);
     showProgress("重新生成中", "根据编辑步骤生成新文档...");
@@ -1535,9 +2416,6 @@ export default function App() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          api_key: apiKey,
-          model_name: modelName,
-          model_base_url: modelBaseUrl,
           steps: editedSteps,
           output_dir: resultData.output_dir,
           web_search: enableWebSearch,
@@ -1565,7 +2443,7 @@ export default function App() {
       setSavingSteps(false);
       hideProgress();
     }
-  }, [apiKey, editedSteps, fetchJson, hideProgress, modelBaseUrl, modelName, resultData?.output_dir, showError, showProgress, validateModelConfig, webSearch]);
+  }, [editedSteps, fetchJson, hideProgress, resultData?.output_dir, showError, showProgress, webSearch]);
 
   const triggerDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -1618,6 +2496,120 @@ export default function App() {
       showError(`下载失败: ${String((error as Error).message || error)}`);
     }
   }, [batchResultData?.results, fetchBlob, showError, triggerDownload]);
+
+  const loadSubtitleWorkbench = useCallback(
+    async (outputDir: string) => {
+      const outputDirName = basename(outputDir);
+      if (!outputDirName) {
+        setSubtitleWorkbench(null);
+        setSubtitleLoadError("");
+        return;
+      }
+      setSubtitleLoading(true);
+      setSubtitleLoadError("");
+      try {
+        const data = await fetchJson<SubtitleWorkbenchData>(
+          `/subtitle_workbench?output_dir=${encodeURIComponent(outputDirName)}&limit=12000`,
+        );
+        setSubtitleWorkbench(data);
+        setSubtitleLoadError("");
+      } catch (error) {
+        setSubtitleWorkbench(null);
+        setSubtitleLoadError(String((error as Error).message || error || "字幕加载失败"));
+      } finally {
+        setSubtitleLoading(false);
+      }
+    },
+    [fetchJson],
+  );
+
+  useEffect(() => {
+    const outputDir = String(resultData?.output_dir || "").trim();
+    const blockedMode = String(resultData?.result_mode || "").trim().toLowerCase() === "blocked_notice";
+    if (!outputDir || blockedMode) {
+      setSubtitleWorkbench(null);
+      setSubtitleLoading(false);
+      setSubtitleLoadError("");
+      return;
+    }
+    let cancelled = false;
+    setSubtitleLoading(true);
+    setSubtitleLoadError("");
+    void loadSubtitleWorkbench(outputDir)
+      .catch(() => {
+        if (!cancelled) setSubtitleWorkbench(null);
+      })
+      .finally(() => {
+        if (!cancelled) setSubtitleLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadSubtitleWorkbench, resultData?.output_dir, resultData?.result_mode]);
+
+  useEffect(() => {
+    setSubtitleKeyword("");
+  }, [resultData?.output_dir]);
+
+  const downloadSubtitleFile = useCallback(
+    async (format: "srt" | "vtt" | "txt") => {
+      const outputDirName = basename(resultData?.output_dir);
+      if (!outputDirName) {
+        showError("没有可下载字幕的结果");
+        return;
+      }
+      try {
+        const blob = await fetchBlob(
+          `/download_subtitle/${encodeURIComponent(outputDirName)}?format=${encodeURIComponent(format)}`,
+        );
+        triggerDownload(blob, `${outputDirName}_subtitle.${format}`);
+      } catch (error) {
+        showError(`字幕下载失败: ${String((error as Error).message || error)}`);
+      }
+    },
+    [fetchBlob, resultData?.output_dir, showError, triggerDownload],
+  );
+
+  const seekVideoTo = useCallback((seconds: number) => {
+    const videoEl = subtitleVideoRef.current;
+    if (!videoEl) return;
+    const targetSeconds = Math.max(0, Number(seconds) || 0);
+    videoEl.currentTime = targetSeconds;
+    void videoEl.play().catch(() => undefined);
+  }, []);
+
+  const subtitleLines = useMemo(() => (Array.isArray(subtitleWorkbench?.lines) ? subtitleWorkbench?.lines || [] : []), [subtitleWorkbench?.lines]);
+  const subtitleAssetAvailable = useMemo(() => {
+    const exportsObj =
+      resultData?.subtitle_exports && typeof resultData.subtitle_exports === "object"
+        ? (resultData.subtitle_exports as Record<string, string>)
+        : {};
+    return Boolean(
+      String(subtitleWorkbench?.subtitle_file || "").trim() ||
+        String(resultData?.subtitle_file_name || "").trim() ||
+        Boolean(subtitleWorkbench?.subtitle_available) ||
+        Boolean(resultData?.subtitle_available) ||
+        Number(resultData?.subtitle_line_count || 0) > 0 ||
+        Object.keys(exportsObj).length > 0,
+    );
+  }, [
+    resultData?.subtitle_available,
+    resultData?.subtitle_exports,
+    resultData?.subtitle_file_name,
+    resultData?.subtitle_line_count,
+    subtitleWorkbench?.subtitle_available,
+    subtitleWorkbench?.subtitle_file,
+  ]);
+  const filteredSubtitleLines = useMemo(() => {
+    const keyword = String(subtitleKeyword || "").trim().toLowerCase();
+    if (!keyword) return subtitleLines;
+    return subtitleLines.filter((line) => {
+      const text = String(line.text || "").toLowerCase();
+      const start = String(line.start_time || "").toLowerCase();
+      const end = String(line.end_time || "").toLowerCase();
+      return text.includes(keyword) || start.includes(keyword) || end.includes(keyword);
+    });
+  }, [subtitleKeyword, subtitleLines]);
 
   const renderedMarkdown = useMemo(() => {
     if (!resultData?.markdown) return "";
@@ -1703,23 +2695,58 @@ export default function App() {
   const decreaseFps = useCallback(() => {
     setFps((prev) => clampFps(prev - FPS_STEP));
   }, [clampFps]);
-  const canAnalyze = !isAnalyzing && batchFiles.length > 0;
+  const analyzableBatchCount = useMemo(
+    () => batchFiles.filter((item) => Boolean(String(item.filepath || "").trim())).length,
+    [batchFiles],
+  );
+  const hasSourceUrlInput = useMemo(() => parseSourceUrls(sourceUrl).length > 0, [sourceUrl]);
+  const canAnalyze = !isAnalyzing && (analyzableBatchCount > 0 || hasSourceUrlInput);
   const analyzeButtonText = isAnalyzing
-    ? batchFiles.length === 1
+    ? analyzableBatchCount === 1
       ? "单文件处理中..."
       : "批量处理中..."
-    : batchFiles.length === 1
+    : analyzableBatchCount === 1
       ? "开始单文件分析"
-      : "开始分析";
+      : analyzableBatchCount > 1
+        ? "开始分析"
+        : hasSourceUrlInput
+          ? "开始链接分析"
+          : "开始分析";
   const hasSingleResult = Boolean(resultData);
   const hasBatchResult = Boolean(batchResultData);
   const hasAnyResult = hasSingleResult || hasBatchResult;
   const singleResultSteps = resultData?.steps || EMPTY_STEPS;
+  const singleResultMode = String(resultData?.result_mode || "").trim().toLowerCase();
+  const isBlockedNoticeResult = singleResultMode === "blocked_notice";
+  const isDegradedResult = singleResultMode === "candidate_steps" || singleResultMode === "timeline_summary";
   const drawerOverlayActive =
     historyDrawerOpen || settingsDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
-  const heroCanvasAnimating = !drawerOverlayActive && heroAnimationActive;
+  const heroCanvasAnimating = !mobilePerfMode && !drawerOverlayActive && heroAnimationActive;
+  const shouldShowBackgroundBeams = !mobilePerfMode;
+  const shouldAnimateNoiseBackground = !mobilePerfMode && !drawerOverlayActive;
+  const analyzeActionButton = (
+    <button
+      aria-busy={isAnalyzing}
+      className="start-analyze-btn h-full w-full cursor-pointer rounded-full bg-linear-to-r from-neutral-950 via-black to-neutral-900 px-4 py-2 text-neutral-100 shadow-[0px_1px_0px_0px_rgba(255,255,255,0.09)_inset,0px_0.5px_1px_0px_rgba(148,163,184,0.32)] transition-all duration-150 active:scale-98 disabled:cursor-not-allowed disabled:opacity-60"
+      disabled={!canAnalyze}
+      onClick={() => {
+        if (!canAnalyze) return;
+        void startAnalyze();
+      }}
+    >
+      <span className="inline-flex items-center justify-center gap-1.5">
+        <PlayIcon className="h-3.5 w-3.5" />
+        <span>{analyzeButtonText}</span>
+      </span>
+    </button>
+  );
   const handleStudioClick = useCallback(() => {
     if (typeof window === "undefined") return;
+    if (mobilePerfMode) {
+      window.scrollTo({ top: 0, behavior: "auto" });
+      window.location.reload();
+      return;
+    }
 
     const startY = window.scrollY || document.documentElement.scrollTop || 0;
     if (startY <= 1) {
@@ -1745,13 +2772,15 @@ export default function App() {
     };
 
     window.requestAnimationFrame(animateToTop);
-  }, []);
+  }, [mobilePerfMode]);
 
   return (
     <div className="app-root relative min-h-screen bg-neutral-950 text-neutral-100">
-      <div className="pointer-events-none absolute inset-0">
-        <BackgroundBeams className="opacity-70" />
-      </div>
+      {shouldShowBackgroundBeams ? (
+        <div className="pointer-events-none absolute inset-0">
+          <BackgroundBeams className="opacity-70" />
+        </div>
+      ) : null}
       <nav className="fixed inset-x-0 top-0 z-40 w-full border-y border-neutral-800 bg-neutral-900/80 backdrop-blur-md">
         <div className="mx-auto flex min-h-[52px] w-full max-w-[1320px] items-center justify-between px-4 sm:px-6 md:px-8">
           <button
@@ -1765,6 +2794,13 @@ export default function App() {
             <span>Video Insights</span>
           </button>
           <div className="flex items-center gap-2">
+            <span
+              aria-hidden="true"
+              className="history-nav-btn pointer-events-none invisible inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-base font-medium text-neutral-200"
+            >
+              <HistoryIcon className="h-3.5 w-3.5" />
+              历史
+            </span>
             <button
               type="button"
               aria-expanded={historyDrawerOpen}
@@ -1777,19 +2813,6 @@ export default function App() {
             >
               <HistoryIcon className="h-3.5 w-3.5" />
               历史
-            </button>
-            <button
-              type="button"
-              aria-expanded={settingsDrawerOpen}
-              aria-controls="settings-drawer"
-              onClick={() => {
-                setHistoryDrawerOpen(false);
-                setSettingsDrawerOpen((prev) => !prev);
-              }}
-              className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-base font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
-            >
-              <SettingsIcon className="h-3.5 w-3.5" />
-              设置
             </button>
           </div>
         </div>
@@ -1806,29 +2829,37 @@ export default function App() {
               )}
             >
               视频转文档 
-              <CanvasText
-                text=" 不止是提取   更是理解"
-                className="hero-toast-anchor inline align-middle"
-                backgroundClassName="bg-blue-600 dark:bg-blue-700"
-                colors={HERO_TITLE_CANVAS_COLORS}
-                animating={heroCanvasAnimating}
-                lineGap={4}
-                animationDuration={20}
-              />
+              {mobilePerfMode ? (
+                <span className="hero-toast-anchor inline align-middle text-sky-300/90"> 不止是提取 更是理解</span>
+              ) : (
+                <CanvasText
+                  text=" 不止是提取   更是理解"
+                  className="hero-toast-anchor inline align-middle"
+                  backgroundClassName="bg-blue-600 dark:bg-blue-700"
+                  colors={HERO_TITLE_CANVAS_COLORS}
+                  animating={heroCanvasAnimating}
+                  lineGap={4}
+                  animationDuration={20}
+                />
+              )}
             </h1>
             <p className="mx-auto max-w-3xl text-balance text-center text-sm font-medium text-neutral-300 sm:text-base md:text-lg">
               AI 自动分析视频内容，抓取关键截图，拆解核心步骤，输出结构清晰、重点明确的总结文档。
             </p>
             <p className="mx-auto max-w-3xl text-balance text-center text-sm font-medium text-neutral-300 sm:text-base">
-              <CanvasText
-                text="让信息沉淀更高效，Turn insights into docs。"
-                className="inline align-middle"
-                backgroundClassName="bg-blue-600/80 dark:bg-blue-700/80"
-                colors={HERO_SUBTITLE_CANVAS_COLORS}
-                animating={heroCanvasAnimating}
-                lineGap={4}
-                animationDuration={22}
-              />
+              {mobilePerfMode ? (
+                <span className="inline align-middle text-sky-200/95">让信息沉淀更高效，Turn insights into docs。</span>
+              ) : (
+                <CanvasText
+                  text="让信息沉淀更高效，Turn insights into docs。"
+                  className="inline align-middle"
+                  backgroundClassName="bg-blue-600/80 dark:bg-blue-700/80"
+                  colors={HERO_SUBTITLE_CANVAS_COLORS}
+                  animating={heroCanvasAnimating}
+                  lineGap={4}
+                  animationDuration={22}
+                />
+              )}
             </p>
             <div className="mt-2 flex flex-wrap justify-center gap-2">
               <span className="hero-chip rounded-full border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300">Whisper</span>
@@ -1844,6 +2875,41 @@ export default function App() {
               <div className="mb-2 flex items-center gap-2">
                 <UploadIcon className="h-4 w-4 text-neutral-300" />
                 <h2 className="text-base font-semibold">上传视频</h2>
+              </div>
+              <div className="mb-3 rounded-lg border border-sky-400/30 bg-sky-500/8 p-3">
+                <p className="text-xs font-semibold tracking-wide text-sky-100/95">视频链接直达分析</p>
+                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+                  <input
+                    ref={sourceUrlInputRef}
+                    type="url"
+                    placeholder="粘贴视频链接（http/https）"
+                    className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500"
+                    value={sourceUrl}
+                    disabled={isAnalyzing || importingUrl}
+                    onChange={(e) => setSourceUrl(e.target.value)}
+                  />
+                  <div className="flex shrink-0 gap-2">
+                    <button
+                      type="button"
+                      className="rounded border border-neutral-700 px-3 py-1.5 text-xs text-neutral-200 transition-colors hover:border-sky-400/60 hover:text-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isAnalyzing || importingUrl}
+                      onClick={() => void importSourceUrlOnly()}
+                    >
+                      {importingUrl ? "导入中..." : "导入链接"}
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded border border-teal-400/50 bg-teal-500/12 px-3 py-1.5 text-xs text-teal-100 transition-colors hover:border-teal-300 hover:bg-teal-500/18 disabled:cursor-not-allowed disabled:opacity-60"
+                      disabled={isAnalyzing || importingUrl}
+                      onClick={() => void analyzeBySourceUrl()}
+                    >
+                      {importingUrl ? "处理中..." : "链接直达分析"}
+                    </button>
+                  </div>
+                </div>
+                <p className="mt-1 text-[11px] text-sky-100/85">
+                  只需提供链接即可下载并分析；平台播放页链接建议安装 `yt-dlp` 以提升兼容性。
+                </p>
               </div>
               <input
                 ref={fileInputRef}
@@ -1878,6 +2944,40 @@ export default function App() {
                 </div>
                 <p>点击选择单个/多个视频文件</p>
                 <p className="mt-1 text-xs text-neutral-500">支持 MP4, AVI, MOV, MKV, WMV, FLV, WebM, M4V 等格式</p>
+              </div>
+              <div className="mt-2 rounded-lg border border-sky-400/30 bg-sky-500/8 p-3">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <p className="text-xs font-semibold tracking-wide text-sky-100/95">上传策略建议</p>
+                  <span className="rounded-full border border-sky-300/35 bg-sky-500/15 px-2 py-0.5 text-[11px] text-sky-100/90">
+                    稳定性优先
+                  </span>
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
+                    <p className="text-[11px] font-medium text-sky-200/95">标准推荐</p>
+                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
+                      推荐上传 20 分钟以内、250MB 以内的视频，处理速度和稳定性最佳。
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
+                    <p className="text-[11px] font-medium text-sky-200/95">长视频模式</p>
+                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
+                      20 分钟以上或 250MB 以上的视频会自动进入长视频处理模式，系统将进行切片/压缩后再分析，耗时会明显增加。
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
+                    <p className="text-[11px] font-medium text-sky-200/95">超长视频建议</p>
+                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
+                      45 分钟以上的视频建议先按章节裁剪后再上传；90 分钟以上的超长视频请拆分后上传，以保证处理稳定性。
+                    </p>
+                  </div>
+                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
+                    <p className="text-[11px] font-medium text-sky-200/95">批量建议</p>
+                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
+                      批量上传建议最多 5 个视频；若包含长视频，建议最多 2 个。
+                    </p>
+                  </div>
+                </div>
               </div>
               <div className="mt-2 space-y-2">
                 {batchFiles.map((item, index) => (
@@ -1953,35 +3053,40 @@ export default function App() {
                   清空列表
                 </button>
               ) : null}
-              <NoiseBackground
-                containerClassName="mt-3 mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5"
-                className="w-full"
-                gradientColors={ANALYZE_BUTTON_GRADIENT_COLORS}
-                noiseIntensity={0.07}
-                speed={0.13}
-                animating={!drawerOverlayActive}
-              >
-                <button
-                  aria-busy={isAnalyzing}
-                  className="h-full w-full cursor-pointer rounded-full bg-linear-to-r from-neutral-950 via-black to-neutral-900 px-4 py-2 text-neutral-100 shadow-[0px_1px_0px_0px_rgba(255,255,255,0.09)_inset,0px_0.5px_1px_0px_rgba(148,163,184,0.32)] transition-all duration-150 active:scale-98 disabled:cursor-not-allowed disabled:opacity-60"
-                  disabled={!canAnalyze}
-                  onClick={() => {
-                    if (!canAnalyze) return;
-                    void startAnalyze();
-                  }}
+              {mobilePerfMode ? (
+                <div className="mt-3 mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5">
+                  {analyzeActionButton}
+                </div>
+              ) : (
+                <NoiseBackground
+                  containerClassName="mt-3 mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5"
+                  className="w-full"
+                  gradientColors={ANALYZE_BUTTON_GRADIENT_COLORS}
+                  noiseIntensity={0.07}
+                  speed={0.13}
+                  animating={shouldAnimateNoiseBackground}
                 >
-                  <span className="inline-flex items-center justify-center gap-1.5">
-                    <PlayIcon className="h-3.5 w-3.5" />
-                    <span>{analyzeButtonText}</span>
-                  </span>
-                </button>
-              </NoiseBackground>
+                  {analyzeActionButton}
+                </NoiseBackground>
+              )}
+              <button
+                type="button"
+                className={`mt-2 w-full rounded border px-3 py-1.5 text-xs transition-colors ${
+                  summaryOnly
+                    ? "border-amber-400/60 bg-amber-500/15 text-amber-200"
+                    : "border-neutral-700 text-neutral-300 hover:border-amber-400/45 hover:text-amber-200"
+                }`}
+                disabled={isAnalyzing}
+                onClick={() => setSummaryOnly((prev) => !prev)}
+              >
+                {summaryOnly ? "仅生成摘要版：已开启" : "仅生成摘要版"}
+              </button>
             </section>
 
             {hasAnyResult ? (
               <div
                 ref={resultsRef}
-                className="results-grid grid items-start gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]"
+                className="results-grid grid items-stretch gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]"
               >
                 {hasBatchResult ? (
                   <section className="panel-card motion-enter rounded-xl border border-neutral-800 bg-neutral-900/70 p-4 xl:col-span-2">
@@ -1998,23 +3103,99 @@ export default function App() {
                         下载批量 ZIP
                       </button>
                     </div>
+                    {(batchResultData?.batch_policy_warnings || []).length > 0 ? (
+                      <div className="mb-2 rounded border border-amber-400/35 bg-amber-500/10 p-2 text-xs text-amber-200/95">
+                        <p className="font-semibold">批次策略提醒</p>
+                        <ul className="mt-1 list-disc space-y-1 pl-5">
+                          {(batchResultData?.batch_policy_warnings || []).slice(0, 3).map((tip, idx) => (
+                            <li key={`batch-policy-warning-${idx}`}>{tip}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                    {batchResultData?.batch_segment_policy?.summary ? (
+                      <div className="mb-2 rounded border border-sky-400/30 bg-sky-500/8 p-2 text-xs text-sky-100/95">
+                        <p className="font-semibold">
+                          批次分段统计：总计 {Number(batchResultData.batch_segment_policy.summary.total_files || 0)} 个
+                        </p>
+                        <p className="mt-1">
+                          长视频 {Number(batchResultData.batch_segment_policy.summary.long_count || 0)} · 超长{" "}
+                          {Number(batchResultData.batch_segment_policy.summary.super_long_count || 0)} · 裁剪优先{" "}
+                          {Number(batchResultData.batch_segment_policy.summary.trim_required_count || 0)}
+                        </p>
+                      </div>
+                    ) : null}
                     <div className="space-y-2">
                       {(batchResultData?.results || []).map((r, i) => (
                         <div key={`${r.filename}-${i}`} className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
                           <div className="flex items-center justify-between">
                             <p className="truncate text-sm font-medium">{r.filename}</p>
-                            <span className={`text-xs ${r.success ? "text-emerald-300" : "text-rose-300"}`}>
-                              {r.success ? "成功" : "失败"}
+                            <span
+                              className={`text-xs ${
+                                r.success
+                                  ? r.result_mode === "candidate_steps" || r.result_mode === "timeline_summary"
+                                    ? "text-amber-300"
+                                    : "text-emerald-300"
+                                  : r.result_mode === "blocked_notice" || r.code === "content_policy_violation"
+                                    ? "text-amber-300"
+                                    : "text-rose-300"
+                              }`}
+                            >
+                              {r.success
+                                ? r.result_mode === "candidate_steps" || r.result_mode === "timeline_summary"
+                                  ? "已完成（降级）"
+                                  : "成功"
+                                : r.result_mode === "blocked_notice" || r.code === "content_policy_violation"
+                                  ? "已拦截"
+                                  : "失败"}
                             </span>
                           </div>
+                          {r.segment_policy ? (
+                            <p className="mt-1 text-[11px] text-sky-200/90">
+                              分段策略：{formatSegmentPolicyLine(r.segment_policy)}
+                            </p>
+                          ) : null}
+                          {(r.segment_guardrails || []).length > 0 ? (
+                            <p className="mt-1 text-[11px] text-amber-200/90">
+                              调整：{String((r.segment_guardrails || [])[0] || "")}
+                            </p>
+                          ) : null}
                           {r.success ? (
-                            <button
-                              className="zip-download-btn mt-1 flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
-                              onClick={() => void downloadSingleFromBatch(r.output_dir, r.filename)}
-                            >
-                              <DownloadSingleIcon className="h-3.5 w-3.5" />
-                              下载
-                            </button>
+                            <>
+                              <button
+                                className="zip-download-btn mt-1 flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
+                                onClick={() => void downloadSingleFromBatch(r.output_dir, r.filename)}
+                              >
+                                <DownloadSingleIcon className="h-3.5 w-3.5" />
+                                下载
+                              </button>
+                              {r.fallback_used ? (
+                                <p className="mt-1 text-xs text-amber-300/90">
+                                  {(r.analysis_note || "未识别到标准步骤，已自动生成候选内容。") +
+                                    `（质量分：${Number(r.quality_score || 0).toFixed(2)}）`}
+                                </p>
+                              ) : null}
+                            </>
+                          ) : r.result_mode === "blocked_notice" || r.code === "content_policy_violation" ? (
+                            <div className="mt-1 rounded border border-rose-500/45 bg-rose-500/10 p-2 text-xs text-rose-200/95">
+                              <p className="font-semibold">
+                                {r.blocked_notice?.title || "安全检测未通过（已拦截）"}
+                              </p>
+                              <p className="mt-1">
+                                等级：{String(r.blocked_notice?.risk_level || r.risk?.risk_level || "high")} · 规则：
+                                {String(r.blocked_notice?.reason_code || r.risk?.reason_code || "CONTENT_POLICY_VIOLATION")}
+                              </p>
+                              <p className="mt-1 break-words">
+                                {String(r.blocked_notice?.reason || r.risk?.reason || r.error || CONTENT_POLICY_BLOCK_MESSAGE)}
+                              </p>
+                              {(r.blocked_notice?.suggestions || []).length > 0 ? (
+                                <ul className="mt-1 list-disc space-y-1 pl-4">
+                                  {(r.blocked_notice?.suggestions || []).slice(0, 3).map((tip, idx) => (
+                                    <li key={`b-tip-${i}-${idx}`}>{tip}</li>
+                                  ))}
+                                </ul>
+                              ) : null}
+                            </div>
                           ) : (
                             <p className="mt-1 text-xs text-rose-300">{r.error || "处理失败"}</p>
                           )}
@@ -2025,13 +3206,21 @@ export default function App() {
                 ) : null}
 
                 {hasSingleResult ? (
-                  <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
+                  <section className="panel-card motion-enter result-heavy-surface flex h-full min-h-0 flex-col rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
                     <div className="mb-2 flex items-center justify-between">
                       <div className="flex items-center gap-2">
                         <StepsIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">识别到的步骤</h2>
+                        <h2 className="text-base font-semibold">
+                          {isBlockedNoticeResult
+                            ? "安全检测结果说明"
+                            : isDegradedResult
+                              ? singleResultMode === "timeline_summary"
+                                ? "时间线摘要（自动降级）"
+                                : "候选步骤（自动降级）"
+                              : "识别到的步骤"}
+                        </h2>
                       </div>
-                      {!isEditMode ? (
+                      {!isEditMode && !isBlockedNoticeResult ? (
                         <button
                           className="steps-edit-btn flex items-center gap-1 rounded px-2 py-1 text-xs"
                           onClick={() => {
@@ -2053,10 +3242,97 @@ export default function App() {
                         </button>
                       ) : null}
                     </div>
-                    {!isEditMode ? (
-                      <ReadonlyStepsList steps={singleResultSteps} />
+                    {resultData?.analysis_note ? (
+                      <p
+                        className={`mb-2 text-xs ${
+                          isBlockedNoticeResult ? "text-rose-300/90" : "text-amber-300/90"
+                        }`}
+                      >
+                        {resultData.analysis_note}
+                      </p>
+                    ) : null}
+                    {resultData?.segment_policy ? (
+                      <div className="mb-2 rounded border border-sky-400/35 bg-sky-500/8 p-2 text-xs text-sky-100/95">
+                        <p className="font-semibold">分段策略：{formatSegmentPolicyLine(resultData.segment_policy)}</p>
+                        {(resultData.segment_policy.recommendations || []).length > 0 ? (
+                          <ul className="mt-1 list-disc space-y-1 pl-5 text-sky-100/90">
+                            {(resultData.segment_policy.recommendations || []).slice(0, 3).map((tip, idx) => (
+                              <li key={`single-policy-tip-${idx}`}>{tip}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        {(resultData.segment_guardrails || []).length > 0 ? (
+                          <ul className="mt-1 list-disc space-y-1 pl-5 text-amber-200/90">
+                            {(resultData.segment_guardrails || []).slice(0, 3).map((tip, idx) => (
+                              <li key={`single-guardrail-${idx}`}>{tip}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                      </div>
+                    ) : null}
+                    {isBlockedNoticeResult ? (
+                      <div className="rounded border border-rose-500/45 bg-rose-500/10 p-3 text-sm">
+                        <p className="font-semibold text-rose-200">
+                          {resultData?.blocked_notice?.title || "安全检测未通过（已拦截）"}
+                        </p>
+                        <p className="mt-1 text-rose-100/90">
+                          风险等级：{String(resultData?.blocked_notice?.risk_level || resultData?.risk?.risk_level || "high")}
+                        </p>
+                        <p className="text-rose-100/90">
+                          规则码：{String(resultData?.blocked_notice?.reason_code || resultData?.risk?.reason_code || "CONTENT_POLICY_VIOLATION")}
+                        </p>
+                        <p className="mt-1 text-rose-100/95 break-words">
+                          {String(resultData?.blocked_notice?.reason || resultData?.risk?.reason || CONTENT_POLICY_BLOCK_MESSAGE)}
+                        </p>
+                        {(resultData?.blocked_notice?.suggestions || []).length > 0 ? (
+                          <ul className="mt-2 list-disc space-y-1 pl-5 text-rose-100/90">
+                            {(resultData?.blocked_notice?.suggestions || []).slice(0, 4).map((tip, idx) => (
+                              <li key={`bn-tip-${idx}`}>{tip}</li>
+                            ))}
+                          </ul>
+                        ) : null}
+                        {resultData?.blocked_notice?.retry_guidance ? (
+                          <p className="mt-2 text-rose-100/90">{resultData.blocked_notice.retry_guidance}</p>
+                        ) : null}
+                      </div>
+                    ) : !isEditMode ? (
+                      <div className="single-result-scroll history-scroll flex-1 min-h-0 space-y-2 overflow-auto pr-1">
+                        {isDegradedResult ? (
+                          <div className="space-y-2">
+                            <div className="rounded border border-amber-400/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200">
+                              置信度较低（质量分：{Number(resultData?.quality_score || 0).toFixed(2)}）。原因：
+                              {formatDegradeReason(resultData?.degrade_reason)}
+                            </div>
+                            {resultData?.content_title ? (
+                              <div className="rounded border border-amber-400/30 bg-amber-500/6 p-2 text-xs text-amber-100/95">
+                                <p className="font-semibold">标题：{resultData.content_title}</p>
+                                {(resultData.key_points || []).length > 0 ? (
+                                  <ul className="mt-1 list-disc space-y-1 pl-5">
+                                    {(resultData.key_points || []).slice(0, 5).map((item, idx) => (
+                                      <li key={`kp-${idx}`}>{item}</li>
+                                    ))}
+                                  </ul>
+                                ) : null}
+                                {(resultData.timeline_points || []).length > 0 ? (
+                                  <p className="mt-1">
+                                    时间点：
+                                    {(resultData.timeline_points || [])
+                                      .slice(0, 5)
+                                      .map((item) => String(item?.time || "00:00"))
+                                      .join(" / ")}
+                                  </p>
+                                ) : null}
+                                {resultData?.confidence_note ? (
+                                  <p className="mt-1">{resultData.confidence_note}</p>
+                                ) : null}
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
+                        <ReadonlyStepsList steps={singleResultSteps} />
+                      </div>
                     ) : (
-                      <div className="steps-edit-scroll history-scroll max-h-[min(62vh,40rem)] overflow-auto pr-1 xl:h-[min(62vh,40rem)]">
+                      <div className="steps-edit-scroll history-scroll flex-1 min-h-0 overflow-auto pr-1">
                         <div className="steps-edit-actions mb-2 flex gap-2">
                           <button
                             type="button"
@@ -2182,7 +3458,7 @@ export default function App() {
                   </section>
                 ) : null}
 
-                {hasSingleResult ? (
+                {hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.markdown) ? (
                   <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
                     <div className="mb-2 flex items-center justify-between">
                       <div className="flex items-center gap-2">
@@ -2197,7 +3473,127 @@ export default function App() {
                         下载 ZIP
                       </button>
                     </div>
-                    <MarkdownPreview html={renderedMarkdown} />
+                    <MarkdownPreview
+                      html={renderedMarkdown}
+                      className={summaryOnly ? "summary-only-scroll-rail" : undefined}
+                      contentClassName={
+                        summaryOnly ? "summary-only-markdown-content" : "standard-markdown-content"
+                      }
+                    />
+                  </section>
+                ) : null}
+
+                {hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.output_dir) ? (
+                  <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
+                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <StepsIcon className="h-4 w-4 text-neutral-300" />
+                        <h2 className="text-base font-semibold">字幕工作台</h2>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={subtitleLoading}
+                          onClick={() => void loadSubtitleWorkbench(String(resultData?.output_dir || ""))}
+                        >
+                          {subtitleLoading ? "加载中..." : "刷新字幕"}
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={subtitleLoading}
+                          onClick={() => void downloadSubtitleFile("srt")}
+                        >
+                          导出 SRT
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={subtitleLoading}
+                          onClick={() => void downloadSubtitleFile("vtt")}
+                        >
+                          导出 VTT
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
+                          disabled={subtitleLoading}
+                          onClick={() => void downloadSubtitleFile("txt")}
+                        >
+                          导出 TXT
+                        </button>
+                      </div>
+                    </div>
+
+                    {String(subtitleWorkbench?.video_preview_url || resultData?.video_preview_url || "").trim() ? (
+                      <div className="mb-2 overflow-hidden rounded border border-neutral-800 bg-black/40">
+                        <video
+                          ref={subtitleVideoRef}
+                          controls
+                          preload="metadata"
+                          className="max-h-[300px] w-full bg-black"
+                          src={String(subtitleWorkbench?.video_preview_url || resultData?.video_preview_url || "")}
+                        />
+                      </div>
+                    ) : null}
+
+                    {subtitleLoading ? (
+                      <p className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-300">
+                        正在加载字幕...
+                      </p>
+                    ) : subtitleLines.length > 0 ? (
+                      <>
+                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                          <input
+                            type="text"
+                            className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500 sm:max-w-xs"
+                            placeholder="搜索字幕内容或时间点"
+                            value={subtitleKeyword}
+                            onChange={(e) => setSubtitleKeyword(e.target.value)}
+                          />
+                          <p className="text-xs text-neutral-400">
+                            共 {subtitleLines.length} 行，匹配 {filteredSubtitleLines.length} 行
+                          </p>
+                        </div>
+                        <div className="history-scroll max-h-[340px] space-y-1 overflow-auto pr-1">
+                          {filteredSubtitleLines.slice(0, 1200).map((line, idx) => (
+                            <button
+                              type="button"
+                              key={`sub-line-${line.index || idx}-${line.start_time || ""}`}
+                              className="w-full rounded border border-neutral-800 bg-neutral-950/60 px-2 py-1.5 text-left text-xs transition-colors hover:border-teal-400/60 hover:bg-teal-500/10"
+                              onClick={() => seekVideoTo(Number(line.start_seconds || 0))}
+                            >
+                              <p className="font-semibold text-teal-200/95">
+                                {String(line.start_time || "00:00:00,000")} - {String(line.end_time || "00:00:00,000")}
+                              </p>
+                              <p className="mt-0.5 whitespace-pre-wrap text-neutral-200">{String(line.text || "")}</p>
+                            </button>
+                          ))}
+                        </div>
+                      </>
+                    ) : subtitleAssetAvailable ? (
+                      <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
+                        <p>
+                          已检测到字幕文件，但当前未加载到字幕行。你可以点击“刷新字幕”，或直接导出 SRT/VTT/TXT。
+                        </p>
+                        {String(subtitleWorkbench?.subtitle_file || resultData?.subtitle_file_name || "").trim() ? (
+                          <p className="mt-1 text-xs text-amber-200/90">
+                            字幕文件：{String(subtitleWorkbench?.subtitle_file || resultData?.subtitle_file_name || "")}
+                            {Number(resultData?.subtitle_line_count || 0) > 0
+                              ? `（约 ${Number(resultData?.subtitle_line_count || 0)} 行）`
+                              : ""}
+                          </p>
+                        ) : null}
+                        {subtitleLoadError ? (
+                          <p className="mt-1 text-xs text-amber-200/90">加载原因：{subtitleLoadError}</p>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <p className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-300">
+                        当前结果未检测到可用字幕。你可以切换字幕模式重新分析，或检查音频质量后重试。
+                      </p>
+                    )}
                   </section>
                 ) : null}
               </div>
@@ -2250,6 +3646,9 @@ export default function App() {
                         </button>
                       </div>
                     </div>
+                    <p className="mt-2 rounded border border-amber-400/35 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200/95">
+                      提醒：历史记录与服务器生成的总结文件仅保留 72 小时，系统会自动清理。
+                    </p>
                   </div>
                   <VirtualizedHistoryList
                     active={historyDrawerOpen}
@@ -2517,17 +3916,9 @@ export default function App() {
                     </div>
 
                     <div className="config-field mb-3 space-y-1">
-                      <button
-                        type="button"
-                        className="history-refresh-btn flex w-full items-center justify-center gap-1 rounded-lg border border-neutral-700 px-2.5 py-2 text-xs font-medium"
-                        disabled={testingModel}
-                        aria-busy={testingModel}
-                        onClick={() => void testModelConnection()}
-                      >
-                        <RefreshIcon className={`h-3.5 w-3.5 ${testingModel ? "history-refresh-icon-spin" : ""}`} />
-                        {testingModel ? "测试中..." : "测试链接"}
-                      </button>
-                      <p className="text-xs text-neutral-500">测试当前参数是否可连通模型（API Key / Base URL / 模型名称）</p>
+                      <div className="rounded-lg border border-neutral-700/80 bg-neutral-900/70 px-2.5 py-2 text-xs text-neutral-400">
+                        测试链接按钮已停用，模型连通性由后端启动分析时自动处理。
+                      </div>
                     </div>
 
                     <div className="config-field mb-3 space-y-1">

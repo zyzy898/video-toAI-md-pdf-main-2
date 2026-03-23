@@ -21,6 +21,106 @@ Before broad UI refactors, confirm the required scope and default to minimal-dif
 - Tags: scope_control, migration
 
 ---
+## [LRN-20260316-001] best_practice
+
+**Logged**: 2026-03-16T15:40:00+08:00
+**Priority**: medium
+**Status**: resolved
+**Area**: tests
+
+### Summary
+When testing chunk-upload flow, test data must respect server-side minimum chunk size constraints to avoid false regression signals.
+
+### Details
+In smoke tests, using `chunk_size=3` triggered an unexpected `400` on the second chunk. This was not a backend regression: `/upload_chunk_init` normalizes chunk size with a lower bound of `256 * 1024`, so `total_size=6` results in only one chunk. Sending `chunk_index=1` is therefore invalid by design.
+
+### Suggested Action
+For chunk-upload tests:
+1. Read/align with backend bounds (`DEFAULT_UPLOAD_CHUNK_SIZE`, min `256KB`, max limit).
+2. Use `total_size` and `chunk_size` values that actually produce the intended `total_chunks`.
+3. Treat out-of-range chunk index failures as expected behavior unless bounds are met.
+
+### Metadata
+- Source: conversation
+- Related Files: app.py
+- Tags: chunk-upload, smoke-test, false-negative, backend
+
+### Resolution
+- **Resolved**: 2026-03-16T15:41:00+08:00
+- **Commit/PR**: local_workspace_change
+- **Notes**: Updated smoke test payload to use realistic chunk sizes and verified full chunk flow passed.
+
+---
+
+## [LRN-20260316-002] best_practice
+
+**Logged**: 2026-03-16T15:42:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+For large OOP refactors, preserve compatibility by keeping old function interfaces and proving parity with automated structural checks.
+
+### Details
+The backend was refactored into service classes (`RiskBlocklistService`, `UploadSessionService`, `VideoProcessingService`, etc.) while keeping all existing route handlers and helper function names. Risk was controlled by:
+- maintaining wrapper functions with original names/signatures,
+- comparing old/new route sets and top-level function sets,
+- comparing old/new function signatures via AST.
+This reduced behavioral risk while improving maintainability.
+
+### Suggested Action
+During future architecture refactors:
+1. Introduce class-based services behind compatibility wrappers.
+2. Run route/function/signature parity checks against `HEAD`.
+3. Add smoke tests for critical paths before and after refactor.
+
+### Metadata
+- Source: conversation
+- Related Files: app.py
+- Tags: refactor, oop, backward-compatibility, regression-prevention
+- See Also: LRN-20260316-001
+
+### Resolution
+- **Resolved**: 2026-03-16T15:43:00+08:00
+- **Commit/PR**: local_workspace_change
+- **Notes**: Confirmed no route/function/signature loss and all key smoke endpoints passed.
+
+---
+
+## [LRN-20260315-001] best_practice
+
+**Logged**: 2026-03-15T23:30:00+08:00
+**Priority**: high
+**Status**: resolved
+**Area**: backend
+
+### Summary
+Prevent Chinese mojibake in source files by enforcing UTF-8 write/read flow and adding a post-edit encoding check.
+
+### Details
+Several user-facing strings in `app.py` became mojibake (for example `璇疯緭鍏?API Key`) after iterative edits. This typically happens when text is copied from a console/session using a different code page, or when file writes are not explicitly UTF-8. Because these strings are API error messages and logs, mojibake directly impacts usability and troubleshooting.
+
+### Suggested Action
+1. Always save edited markdown/text/code with UTF-8 explicitly (especially when using PowerShell file output commands).
+2. Avoid copying localized terminal output directly into source strings.
+3. After text-heavy edits, run a quick mojibake scan in touched files:
+   - `rg -n "鍒|娌|璇|鏂|缂|瓒|鏈|杈撳|瑙嗛|鍐呭|涓嶆敮" app.py`
+4. Run syntax validation after cleanup:
+   - `python -m py_compile app.py`
+5. If mojibake is found, replace by intent (based on endpoint behavior), not by blind conversion.
+
+### Metadata
+- Source: conversation
+- Related Files: app.py, updata.md
+- Tags: encoding, mojibake, utf8, backend, prevention
+
+### Resolution
+- **Resolved**: 2026-03-15T23:35:00+08:00
+- **Commit/PR**: local_workspace_change
+- **Notes**: Repaired mojibake in upload/analyze/test_model/batch error paths and standardized human-readable Chinese messages by functional context.
+
+---
 ## [LRN-20260311-001] correction
 
 **Logged**: 2026-03-11T00:00:00+08:00
@@ -126,5 +226,97 @@ In strict regenerate mode, verify generated markdown includes edited step titles
 - **Resolved**: 2026-03-12T00:00:00+08:00
 - **Commit/PR**: local_workspace_change
 - **Notes**: Added strict alignment validator and fallback markdown builder in `generate_step_document` when `respect_step_content=True`.
+
+---
+
+## [LRN-20260318-001] best_practice
+
+**Logged**: 2026-03-18T01:05:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+For Scrapling integration, use `StealthySession` session management in an OOP reader class, not ad-hoc function calls.
+
+### Details
+Recent Douyin URL parsing failures showed that simple one-off fetcher calls are unstable under anti-bot pressure.
+Moving to a structured `ScraplingPageReader` + session manager allows stable retries, session reuse, and clearer fallback orchestration.
+
+### Suggested Action
+Keep scraping orchestration in dedicated modules (`main/*.py`) and inject runtime settings from app config/env via a provider function.
+
+### Metadata
+- Source: conversation
+- Related Files: app.py, main/scrapling_page_reader.py
+- Tags: scrapling, stealthy-session, oop
+
+---
+
+## [LRN-20260318-002] correction
+
+**Logged**: 2026-03-18T10:33:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+User explicitly requires `import scrapling` package-style imports, not custom import names.
+
+### Details
+In this task, the user clarified that integration style matters: use `import scrapling` and call via package namespace (e.g., `scrapling.Fetcher`, `scrapling.fetchers.StealthySession`).
+Avoid `from scrapling import ...` or renamed import styles for this code path.
+
+### Suggested Action
+Treat this as a coding convention for scraping modules in this project; keep imports package-qualified unless user asks otherwise.
+
+### Metadata
+- Source: user_feedback
+- Related Files: main/scrapling_page_reader.py
+- Tags: correction, import-style, scrapling
+
+---
+## [LRN-20260318-003] correction
+
+**Logged**: 2026-03-18T18:20:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+When user asks to "直接使用现有代码", do not add unrelated restoration modules; integrate through the existing downloader files directly.
+
+### Details
+During this integration task, user explicitly corrected scope: avoid补回/重建 extra modules and focus on wiring the provided files (`bilibili_downloader_llm.py`, `douyin_downloader_llm.py`, `xiaohongshu_downloader_llm.py`) into the URL analysis path.
+
+### Suggested Action
+For similar requests, implement a thin adapter that only orchestrates existing modules and keep non-requested restoration work out of scope.
+
+### Metadata
+- Source: user_feedback
+- Related Files: app.py, main/platform_link_downloader.py
+- Tags: correction, scope-control, integration
+
+---
+## [LRN-20260318-004] correction
+
+**Logged**: 2026-03-18T19:08:00+08:00
+**Priority**: high
+**Status**: pending
+**Area**: backend
+
+### Summary
+Shared downloader LLM config must use `.env` keys directly and allow `.env` values to globally override process config.
+
+### Details
+User requested that editing `.env` should be sufficient for global coverage. Previous implementation used multi-key fallbacks and one-time loading, which could allow non-`.env` values to win in some cases.
+
+### Suggested Action
+Make `shared_llm_config` read `.env` on each request for `LLM_API_KEY/LLM_BASE_URL/LLM_MODEL`, sync these to `os.environ`, and keep all downloader injection paths on this shared function.
+
+### Metadata
+- Source: user_feedback
+- Related Files: main/shared_llm_config.py, main/platform_link_downloader.py
+- Tags: correction, env-config, llm
 
 ---
