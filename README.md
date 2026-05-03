@@ -1,7 +1,5 @@
 # 🎬 视频转 Markdown / PDF 智能分析系统
 
-<img width="2528" height="1219" alt="32883e8997c7aaee86a0204f271ac2ee" src="https://github.com/user-attachments/assets/bb3235fc-4fd9-44bb-8c26-dac1e33cb143" />
-
 > 一个面向“教程视频 / 操作演示 / 工作流录屏”的全栈项目。  
 > 它会在内容安全检测通过后，把视频自动整理成结构化步骤、关键截图、Markdown 文档、PDF、字幕导出和可下载结果包。
 
