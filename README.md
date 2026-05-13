@@ -38,7 +38,8 @@
 - `markdown` + `fpdf2`：文档与 PDF 生成
 - `yt-dlp`：平台播放页下载兜底
 - `scrapling`：页面抓取与候选视频地址发现
-- `volcengine-python-sdk[ark]`：模型调用客户端
+- `volcengine-python-sdk[ark]`：Ark 模型客户端（可选，仅在 `MODEL_PROVIDER=ark` 时生效）
+- `llm_client/`：自研的 capability-based LLM 客户端抽象，按 `MODEL_PROVIDER / MODEL_BASE_URL` 在 Ark 与 OpenAI 兼容接口之间路由
 
 ### 前端
 
@@ -57,6 +58,11 @@
 .
 ├─ app.py                           # Flask 主应用，包含上传、风控、分析、历史、导出等主链路
 ├─ video_analyzer_agent.py          # Whisper、视频分析、截图、视觉增强、Markdown/PDF 生成
+├─ llm_client/                      # LLM 客户端抽象（provider 路由 / 能力声明 / 错误归一化）
+│  ├─ base.py                       # LLMClient 抽象基类 + Capability 枚举 + 错误类型
+│  ├─ ark_client.py                 # Ark 实现，支持视频理解 / 文件上传 / 联网搜索
+│  ├─ openai_compat_client.py       # OpenAI 兼容实现（OpenAI / DeepSeek / Qwen 等）
+│  └─ factory.py                    # 根据 MODEL_PROVIDER / base_url 构建对应 client
 ├─ Scrapling_download/              # B站 / 抖音 / 小红书平台链接下载器与共享 LLM 配置
 ├─ web-react/                       # React + TypeScript 前端工作台
 ├─ scripts/
@@ -119,6 +125,53 @@
 - 写入 `history.json`
 - 前端可按客户端 ID 隔离查看历史
 - 支持单结果或批量结果 ZIP 打包下载
+
+---
+
+## 🔌 LLM 客户端抽象与平台路由
+
+所有模型调用都走 `llm_client/` 下的统一抽象，`VideoAnalyzerAgent` 不直接依赖任何 provider SDK。
+
+### 能力声明（Capability）
+
+每个 provider 的客户端会显式声明自己支持哪些能力：
+
+| 能力 | 含义 | Ark | OpenAI / DeepSeek / Qwen / 兼容 |
+| --- | --- | --- | --- |
+| `CHAT_COMPLETIONS` | 文本对话 | ✅ | ✅ |
+| `FILE_UPLOAD` | 视频文件上传到平台 | ✅ | ❌ |
+| `VIDEO_UNDERSTANDING` | 原生视频理解（`input_video + file_id`） | ✅ | ❌ |
+| `WEB_SEARCH_TOOL` | 联网搜索工具（`tools=[{type: web_search}]`） | ✅ | ❌ |
+
+### Provider 路由规则
+
+按优先级从高到低：
+
+1. 显式 `provider` 参数（调用 `VideoAnalyzerAgent(..., provider=...)`）
+2. `.env` 中的 `MODEL_PROVIDER`
+3. `MODEL_BASE_URL` 启发式：
+   - `*.volces.com` / `volcengineapi.com` / `bytedance.com` → `ark`
+   - `api.openai.com` → `openai`
+   - 其他 HTTPS → `openai_compatible`
+
+### 自动降级行为
+
+启用非 Ark 平台时：
+
+- 后端入口会自动把 `use_video` 与 `web_search` 置为 `false`
+- 生成字幕分析链路（`summary_only` 按视频时长策略照常触发）
+- 前端 `effective_options` 与 `segment_guardrails` 会如实回显
+
+### 新增错误码
+
+当运行时仍然触碰到不支持的能力（例如老版客户端强制传 `web_search=true`），后端统一返回：
+
+```text
+HTTP 400
+code=provider_feature_unsupported
+```
+
+前端会自动翻译为：「当前模型平台不支持该能力（视频理解 / 联网搜索 / 文件上传）。请切换平台，或关闭对应选项后重试」。
 
 ---
 
@@ -464,6 +517,13 @@ http://127.0.0.1:80
 MODEL_API_KEY=your_api_key
 MODEL_NAME=doubao-seed-2-0-pro-260215
 MODEL_BASE_URL=https://ark.cn-beijing.volces.com/api/v3
+# 可选：显式指定 LLM 后端 provider，未设置时按 Base URL 自动推断。
+#   ark             → 火山引擎 Ark（默认识别 .volces.com）
+#   openai          → OpenAI 官方（识别 api.openai.com）
+#   openai_compatible → OpenAI 兼容接口（DeepSeek / Qwen / 兼容网关等）
+# 注意：视频理解、文件上传、联网搜索工具目前只有 Ark 支持，切换到其他 provider
+# 时后端会自动把 use_video / web_search 关闭并走字幕分析链路。
+# MODEL_PROVIDER=ark
 
 # ===== 分析默认参数 =====
 WHISPER_MODE=base
@@ -481,46 +541,148 @@ LONG_VIDEO_PREPROCESS_ENABLED=1
 # ===== 风控相关 =====
 RISK_MAX_FRAMES=4
 RISK_DYNAMIC_MAX_FRAMES=8
+# 视觉风控兜底模型（可选，仅管理员配置）：仅在主视觉风控模型不可用时启用，
+# 必须支持图像输入。
 RISK_FALLBACK_API_KEY=
 RISK_FALLBACK_MODEL_NAME=
 RISK_FALLBACK_MODEL_BASE_URL=
 
-# ===== URL 抓取 / 下载 =====
-SCRAPE_FETCH_MODE=auto
+# ===== URL 抓取（Scrapling） =====
+SCRAPE_FETCH_MODE=auto              # auto / static / dynamic
+SCRAPE_TIMEOUT_SECONDS=45
+SCRAPE_RETRIES=3
+SCRAPE_RETRY_DELAY_SECONDS=2
+SCRAPE_DYNAMIC_WAIT_SECONDS=4
+SCRAPE_DYNAMIC_HEADLESS=1
+SCRAPE_DYNAMIC_DISABLE_RESOURCES=0
+SCRAPE_DYNAMIC_NETWORK_IDLE=1
+SCRAPE_IMPERSONATE=chrome
 SCRAPE_PROXY_URL=
+SCRAPE_USER_AGENT=
+SCRAPE_EXTRA_HEADERS_JSON=          # JSON 或 K=V;K=V 文本
+SCRAPE_COOKIES_JSON=
 SCRAPE_MODEL_PARSE_ENABLED=1
+SCRAPE_MODEL_HTML_MAX_CHARS=32000
+SCRAPE_STRICT_MEDIA_ID_MATCH=1
+# 隐身会话（仅 dynamic 模式生效）
+SCRAPE_STEALTH_SESSION_MAX_PAGES=2
+SCRAPE_STEALTH_SESSION_MAX_REQUESTS=60
+SCRAPE_STEALTH_SESSION_IDLE_TTL_SECONDS=300
+SCRAPE_STEALTH_REAL_CHROME=0
+SCRAPE_STEALTH_BLOCK_WEBRTC=1
+SCRAPE_STEALTH_SOLVE_CLOUDFLARE=0
+SCRAPE_STEALTH_LOCALE=
+SCRAPE_STEALTH_TIMEZONE_ID=
+# 可选：为抓取单独配置一组模型凭证（优先于 MODEL_* 共享配置）
+SCRAPE_MODEL_API_KEY=
+SCRAPE_MODEL_NAME=
+SCRAPE_MODEL_BASE_URL=
+
+# ===== yt-dlp 兜底下载 =====
 YTDLP_PREFER_BROWSER_COOKIES=1
 YTDLP_COOKIES_FROM_BROWSER=chrome
+YTDLP_BROWSER_FALLBACKS=chrome,edge
+YTDLP_COOKIES_FILE=
+YTDLP_COOKIE_HEADER=
 
 # ===== 服务参数 =====
 HOST=127.0.0.1
 PORT=5000
+FLASK_DEBUG=0
 WAITRESS_THREADS=4
 WAITRESS_CONNECTION_LIMIT=100
 ```
 
 ### 配置说明
 
+#### 模型主入口
+
 | 变量 | 作用 |
 | --- | --- |
 | `MODEL_API_KEY` | 后端共享模型密钥，风控与分析都会用到 |
 | `MODEL_NAME` | 主模型名称 |
 | `MODEL_BASE_URL` | 兼容接口的 Base URL |
-| `WHISPER_MODE` | Whisper 模型级别：`tiny/base/small/medium/large` |
-| `ANALYZE_USE_VIDEO` | 后端默认是否启用视频理解模式 |
-| `VIDEO_ANALYZE_FPS` | 视频模式的抽帧频率 |
-| `MAX_VISION` | 低置信度步骤的最大视觉增强次数 |
-| `WEB_SEARCH` | 文档生成是否启用联网搜索 |
-| `WHISPER_THREADS` | Whisper 推理线程数 |
-| `SCREENSHOT_MAX_WORKERS` | 截图并发数 |
-| `BATCH_ANALYZE_MAX_WORKERS` | 批量分析并发数 |
-| `LONG_VIDEO_PREPROCESS_ENABLED` | 是否启用长视频预处理 |
-| `RISK_MAX_FRAMES` | 基础风控抽帧数 |
-| `RISK_DYNAMIC_MAX_FRAMES` | 动态抽帧上限 |
-| `RISK_FALLBACK_*` | 系统级视觉风控兜底模型 |
-| `SCRAPE_*` | 页面抓取、动态等待、代理、隐身会话等配置 |
-| `YTDLP_*` | `yt-dlp` cookies 来源与策略 |
-| `WAITRESS_*` | 生产服务线程和连接数 |
+| `MODEL_PROVIDER` | 可选，强制选择 provider：`ark` / `openai` / `openai_compatible`；未设置时按 Base URL 推断 |
+| `ARK_API_KEY` / `OPENAI_API_KEY` | 历史兼容命名，等价于 `MODEL_API_KEY` |
+
+#### 分析参数
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `WHISPER_MODE` / `WHISPER_MODEL` | Whisper 模型级别：`tiny/base/small/medium/large` | `base` |
+| `ANALYZE_USE_VIDEO` / `USE_VIDEO` | 是否启用视频理解模式（仅 Ark 支持） | `1` |
+| `VIDEO_ANALYZE_FPS` / `ANALYZE_FPS` / `VIDEO_FPS` | 视频模式抽帧频率 | `1.0` |
+| `MAX_VISION` | 低置信度步骤的视觉增强次数上限 | `10` |
+| `WEB_SEARCH` | 文档生成是否启用联网搜索（仅 Ark 支持） | `0` |
+
+#### 性能
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `WHISPER_THREADS` | Whisper 推理线程数（1-16） | CPU 核数（1-8） |
+| `SCREENSHOT_MAX_WORKERS` | 截图生成并发数 | `2` |
+| `BATCH_ANALYZE_MAX_WORKERS` | 批量分析并发数（1-16） | `2` |
+| `LONG_VIDEO_PREPROCESS_ENABLED` | 长视频自动压缩/切片预处理开关 | `1` |
+
+#### 风控
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `RISK_MAX_FRAMES` | 基础风控抽帧数 | `4` |
+| `RISK_DYNAMIC_MAX_FRAMES` | 动态抽帧上限（会随视频时长增长） | `8` |
+| `RISK_FALLBACK_API_KEY` | 视觉风控兜底模型 Key（必须支持图像输入） | 空 |
+| `RISK_FALLBACK_MODEL_NAME` | 视觉风控兜底模型名 | 空 |
+| `RISK_FALLBACK_MODEL_BASE_URL` | 视觉风控兜底 Base URL | 空 |
+
+#### URL 抓取（Scrapling）
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `SCRAPE_FETCH_MODE` | 抓取模式：`auto` / `static` / `dynamic` | `auto` |
+| `SCRAPE_TIMEOUT_SECONDS` | 抓取超时 | `45` |
+| `SCRAPE_RETRIES` | 重试次数 | `3` |
+| `SCRAPE_RETRY_DELAY_SECONDS` | 重试间隔 | `2` |
+| `SCRAPE_DYNAMIC_WAIT_SECONDS` | 动态渲染等待 | `4` |
+| `SCRAPE_DYNAMIC_HEADLESS` | 动态模式是否无头 | `1` |
+| `SCRAPE_DYNAMIC_DISABLE_RESOURCES` | 动态模式禁用图片/字体等资源 | `0` |
+| `SCRAPE_DYNAMIC_NETWORK_IDLE` | 动态模式是否等网络静默 | `1` |
+| `SCRAPE_IMPERSONATE` | Scrapling 浏览器指纹伪装 | `chrome` |
+| `SCRAPE_PROXY_URL` | 抓取代理 URL | 空 |
+| `SCRAPE_USER_AGENT` | 自定义 User-Agent | 空 |
+| `SCRAPE_EXTRA_HEADERS_JSON` | 追加请求头（JSON 或 `K=V;K=V`） | 空 |
+| `SCRAPE_COOKIES_JSON` | 追加 Cookies（JSON 或 `K=V;K=V`） | 空 |
+| `SCRAPE_MODEL_PARSE_ENABLED` | 是否调用模型辅助解析 HTML 候选视频 | `1` |
+| `SCRAPE_MODEL_HTML_MAX_CHARS` | 发送给模型的 HTML 片段上限 | `32000` |
+| `SCRAPE_STRICT_MEDIA_ID_MATCH` | 抖音类链接严格按媒体 ID 匹配 | `1` |
+| `SCRAPE_STEALTH_SESSION_MAX_PAGES` | 隐身会话最大页数 | `2` |
+| `SCRAPE_STEALTH_SESSION_MAX_REQUESTS` | 隐身会话最大请求数 | `60` |
+| `SCRAPE_STEALTH_SESSION_IDLE_TTL_SECONDS` | 隐身会话空闲回收时间 | `300` |
+| `SCRAPE_STEALTH_REAL_CHROME` | 使用真实 Chrome（需本机安装） | `0` |
+| `SCRAPE_STEALTH_BLOCK_WEBRTC` | 屏蔽 WebRTC 泄漏 | `1` |
+| `SCRAPE_STEALTH_SOLVE_CLOUDFLARE` | 自动处理 Cloudflare 校验 | `0` |
+| `SCRAPE_STEALTH_LOCALE` | 隐身会话 locale | 空 |
+| `SCRAPE_STEALTH_TIMEZONE_ID` | 隐身会话时区 | 空 |
+| `SCRAPE_MODEL_API_KEY` / `SCRAPE_MODEL_NAME` / `SCRAPE_MODEL_BASE_URL` | 抓取专用模型凭证；未设置时回退到 `MODEL_*` | 空 |
+
+#### yt-dlp 兜底下载
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `YTDLP_PREFER_BROWSER_COOKIES` | 优先从浏览器导入 cookies | `1` |
+| `YTDLP_COOKIES_FROM_BROWSER` | 指定浏览器来源（如 `chrome` / `edge`） | 空 |
+| `YTDLP_BROWSER_FALLBACKS` | `PREFER_BROWSER_COOKIES=1` 时的候选列表 | `chrome,edge` |
+| `YTDLP_COOKIES_FILE` | 使用 Netscape 格式的 cookies 文件 | 空 |
+| `YTDLP_COOKIE_HEADER` | 直接传入 `Cookie:` Header 文本 | 空 |
+
+#### 服务与运行时
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `HOST` | 监听地址 | `127.0.0.1` |
+| `PORT` | 监听端口 | `5000` |
+| `FLASK_DEBUG` | `1` 走 Flask 开发服务器；否则走 Waitress | `0` |
+| `WAITRESS_THREADS` | Waitress 工作线程数 | `4` |
+| `WAITRESS_CONNECTION_LIMIT` | Waitress 最大并发连接 | `100` |
 
 ---
 

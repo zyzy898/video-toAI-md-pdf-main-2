@@ -1,20 +1,24 @@
 ﻿import os
 import json
-import asyncio
 import logging
 import subprocess
 import re
 import base64
 import hashlib
 import shutil
-import urllib.error
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from volcenginesdkarkruntime import AsyncArk
 from typing import Any, Dict, List, Optional
 from dotenv import load_dotenv
 from threading import RLock
+
+from llm_client import (
+    Capability,
+    LLMClient,
+    ProviderFeatureUnsupportedError,
+    build_llm_client,
+    resolve_provider,
+)
 
 try:
     import ffmpeg
@@ -58,11 +62,18 @@ class VideoAnalyzerAgent:
         whisper_model: str = "base",
         model_name: str = None,
         model_base_url: str = None,
+        provider: str = None,
+        llm_client: LLMClient = None,
     ):
         """
         初始化视频分析AI Agent
-        :param api_key: 火山引擎ARK API Key，如果为None则从.env文件读取
+        :param api_key: 模型 API Key，None 时从 .env 读取
         :param whisper_model: Whisper 模型名称，默认 "base"
+        :param model_name: 模型名称，None 时从 .env 读取
+        :param model_base_url: 模型接口 Base URL，None 时从 .env 读取
+        :param provider: 可选的 provider 提示（ark / openai / openai_compatible），
+            未提供时按 MODEL_PROVIDER 或 base_url 自动路由
+        :param llm_client: 可选的 LLMClient 实例（主要用于测试注入）
         """
         load_dotenv()
 
@@ -90,7 +101,24 @@ class VideoAnalyzerAgent:
             or self.DEFAULT_MODEL_NAME
         )
 
-        self.client = AsyncArk(base_url=self.base_url, api_key=self.api_key)
+        if llm_client is not None:
+            self.llm_client = llm_client
+            self.provider = getattr(llm_client, "provider", "unknown")
+        else:
+            self.provider = resolve_provider(
+                provider_hint=provider,
+                base_url=self.base_url,
+            )
+            self.llm_client = build_llm_client(
+                api_key=self.api_key,
+                base_url=self.base_url,
+                model=self.model,
+                provider_hint=self.provider,
+            )
+        # Backwards compatibility: older code paths expected `self.client`
+        # to expose the raw provider SDK. Keep it as an alias so any remaining
+        # direct access continues to work without crashing immediately.
+        self.client = self.llm_client
         self.whisper_model = whisper_model
         self.whisper_threads = self._resolve_whisper_threads()
         self._parsed_srt_cache_key: tuple[str, int, int] | None = None
@@ -169,92 +197,27 @@ class VideoAnalyzerAgent:
         return ""
 
     async def _call_api_with_retry(self, api_func, *args, **kwargs):
-        """API 调用重试逻辑"""
-        max_retries = 5
-        for attempt in range(max_retries):
-            try:
-                return await api_func(*args, **kwargs)
-            except Exception as e:
-                if "429" in str(e) and attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 10
-                    print(
-                        f"  请求频率过快，等待 {wait_time} 秒后重试 ({attempt + 1}/{max_retries})..."
-                    )
-                    await asyncio.sleep(wait_time)
-                else:
-                    raise
+        """Shared retry wrapper for async provider calls.
 
-    def _chat_completion_http_fallback(
-        self, messages: List[Dict[str, Any]], temperature: float
-    ) -> str:
-        """Fallback for OpenAI-compatible providers that reject SDK extra fields."""
-        url = f"{self.base_url.rstrip('/')}/chat/completions"
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": float(temperature),
-        }
-        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        req = urllib.request.Request(
-            url=url,
-            data=body,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                raw = resp.read().decode("utf-8", errors="ignore")
-        except urllib.error.HTTPError as exc:
-            error_text = exc.read().decode("utf-8", errors="ignore")
-            raise RuntimeError(error_text or str(exc)) from exc
-        except Exception as exc:
-            raise RuntimeError(str(exc)) from exc
+        Uses :meth:`LLMClient._call_with_retry` under the hood so the policy
+        (5 attempts, exponential 10s backoff on 429) is consistent across
+        every code path that talks to the model.
+        """
 
-        try:
-            data = json.loads(raw)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"模型返回非 JSON: {raw[:300]}") from exc
+        async def _invoke():
+            return await api_func(*args, **kwargs)
 
-        choices = data.get("choices")
-        if not isinstance(choices, list) or not choices:
-            raise RuntimeError(f"模型返回格式异常: {raw[:300]}")
-        message = choices[0].get("message", {})
-        content = message.get("content", "")
-        if isinstance(content, list):
-            text_parts = []
-            for item in content:
-                if isinstance(item, dict) and "text" in item:
-                    text_parts.append(str(item.get("text", "")))
-            content = "\n".join(text_parts)
-        return str(content or "").strip()
+        return await self.llm_client._call_with_retry(_invoke)
 
     async def _chat_completion_text(
         self, messages: List[Dict[str, Any]], temperature: float | None = None
     ) -> str:
-        temp = float(self.DEFAULT_CHAT_TEMPERATURE if temperature is None else temperature)
+        """Thin delegate to the active LLM client."""
 
-        async def call_api():
-            return await self.client.chat.completions.create(
-                model=self.model,
-                temperature=temp,
-                messages=messages,
-            )
-
-        try:
-            response = await self._call_api_with_retry(call_api)
-            if getattr(response, "choices", None):
-                first = response.choices[0]
-                if getattr(first, "message", None) and getattr(first.message, "content", None):
-                    return str(first.message.content).strip()
-            return ""
-        except Exception as exc:
-            err = str(exc).lower()
-            if "stream_options" in err and "stream: true" in err:
-                return await asyncio.to_thread(self._chat_completion_http_fallback, messages, temp)
-            raise
+        return await self.llm_client.chat_completion(
+            messages,
+            temperature=temperature,
+        )
 
     async def test_model_connection(self) -> Dict[str, Any]:
         """Use a tiny request to validate whether model connection is available."""
@@ -269,6 +232,7 @@ class VideoAnalyzerAgent:
             "reply": str(reply or "")[:120],
             "model": self.model,
             "base_url": self.base_url,
+            "provider": getattr(self.llm_client, "provider", self.provider),
         }
 
     def _strip_code_fence(self, text: str) -> str:
@@ -647,49 +611,41 @@ class VideoAnalyzerAgent:
 - 只输出JSON，不要添加其他文字"""
 
         try:
-            if not file_id:
-                print(f"正在上传视频: {video_path}")
-                with open(video_path, "rb") as f:
-                    file = await self.client.files.create(
-                        file=f,
-                        purpose="user_data",
-                        preprocess_configs={"video": {"fps": fps}},
-                    )
-                file_id = file.id
-                print(f"视频上传成功，File ID: {file_id}")
+            if not self.llm_client.supports(Capability.VIDEO_UNDERSTANDING):
+                raise ProviderFeatureUnsupportedError(
+                    provider=self.llm_client.provider,
+                    capability=Capability.VIDEO_UNDERSTANDING,
+                    hint="请切换到支持视频理解的平台（如火山 Ark）或改用字幕分析模式。",
+                )
 
-                await self.client.files.wait_for_processing(file_id)
-                print(f"文件处理完成: {file_id}")
+            if not file_id:
+                if not self.llm_client.supports(Capability.FILE_UPLOAD):
+                    raise ProviderFeatureUnsupportedError(
+                        provider=self.llm_client.provider,
+                        capability=Capability.FILE_UPLOAD,
+                        hint="当前平台不支持视频文件上传，请切换平台或使用字幕分析模式。",
+                    )
+                print(f"正在上传视频: {video_path}")
+                file_id = await self.llm_client.upload_video_file(video_path, fps=fps)
+                print(f"视频上传成功，File ID: {file_id}")
             else:
                 print(f"使用已上传的文件: {file_id}")
 
-            # 调用模型分析视频（带重试）
             print("正在分析视频，识别操作步骤...")
-
-            async def call_api():
-                return await self.client.responses.create(
-                    model=self.model,
-                    input=[
-                        {"role": "system", "content": system_prompt},
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "input_video", "file_id": file_id},
-                                {
-                                    "type": "input_text",
-                                    "text": "请分析这个操作视频，识别出所有操作步骤",
-                                },
-                            ],
-                        },
-                    ],
-                )
-
-            response = await self._call_api_with_retry(call_api)
-            result = self._extract_response_text(response)
+            result = await self.llm_client.analyze_video(
+                file_id=file_id,
+                system_prompt=system_prompt,
+                user_text="请分析这个操作视频，识别出所有操作步骤",
+            )
             steps = self._parse_json_response(result)
 
             return steps
 
+        except ProviderFeatureUnsupportedError:
+            # Let the caller decide how to degrade (usually: fall back to
+            # subtitle-based analysis). Re-raise so upper layers can surface
+            # a precise error code to the frontend.
+            raise
         except Exception as e:
             print(f"分析视频时出错: {e}")
             return []
@@ -1155,21 +1111,31 @@ IMPORTANT:
             user_prompt += "\n请生成完整的步骤操作文档。"
 
         if web_search:
-            print("正在调用 AI 生成步骤操作文档（联网搜索增强）...")
-
-            async def call_api():
-                return await self.client.responses.create(
-                    model=self.model,
-                    input=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    tools=[{"type": "web_search"}],
+            if not self.llm_client.supports(Capability.WEB_SEARCH_TOOL):
+                logging.warning(
+                    "[generate_step_document] provider %s does not support web_search tool; "
+                    "falling back to plain chat completion.",
+                    self.llm_client.provider,
                 )
+                web_search = False
+            else:
+                print("正在调用 AI 生成步骤操作文档（联网搜索增强）...")
+                try:
+                    markdown_content = await self.llm_client.responses_with_tools(
+                        messages=[
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_prompt},
+                        ],
+                        tools=[{"type": "web_search"}],
+                    )
+                except ProviderFeatureUnsupportedError:
+                    logging.warning(
+                        "[generate_step_document] provider rejected web_search capability "
+                        "at runtime; falling back to plain chat completion."
+                    )
+                    web_search = False
 
-            response = await self._call_api_with_retry(call_api)
-            markdown_content = self._extract_response_text(response)
-        else:
+        if not web_search:
             print("正在调用 AI 生成步骤操作文档...")
 
             markdown_content = await self._chat_completion_text(

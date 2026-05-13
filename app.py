@@ -49,6 +49,7 @@ except Exception:
             return []
 
 from video_analyzer_agent import VideoAnalyzerAgent
+from llm_client import ProviderFeatureUnsupportedError
 
 app = Flask(__name__)
 app.secret_key = "video-analyzer-secret-key"
@@ -2441,6 +2442,16 @@ def _extract_http_status_code(message: str) -> int | None:
 
 
 def _normalize_provider_error(error: Any, default_status: int = 500) -> Tuple[str, int, bool]:
+    if isinstance(error, ProviderFeatureUnsupportedError):
+        capability = getattr(error.capability, "value", str(error.capability))
+        hint = f" {error.hint}" if error.hint else ""
+        return (
+            f"当前模型平台 {error.provider} 不支持能力 {capability}，"
+            f"请切换模型或关闭相应选项后重试。{hint} | code=provider_feature_unsupported",
+            400,
+            True,
+        )
+
     raw_message = str(error or "").strip() or "模型服务调用失败"
     lower = raw_message.lower()
     request_id = _extract_request_id(raw_message)
@@ -3463,6 +3474,25 @@ def _build_segment_policy_reject_payload(
     }
 
 
+def _provider_supports_video_understanding() -> bool:
+    """Return True when the active provider advertises VIDEO_UNDERSTANDING.
+
+    Lightweight wrapper around ``llm_client.resolve_provider`` so the analyze
+    path can preemptively disable ``use_video`` when the current platform is
+    known to not support video understanding (e.g. OpenAI / DeepSeek / Qwen).
+    The heuristic matches what ``build_llm_client`` would route to.
+    """
+
+    try:
+        from llm_client import resolve_provider
+    except Exception:
+        return True  # Fail open; Ark remains the historical default.
+
+    base_url = _env_text(("MODEL_BASE_URL",), DEFAULT_MODEL_BASE_URL)
+    provider_hint = _env_text(("MODEL_PROVIDER",), "")
+    return resolve_provider(provider_hint=provider_hint, base_url=base_url) == "ark"
+
+
 def _apply_video_segment_processing_guardrails(
     policy: Dict[str, Any],
     *,
@@ -3477,6 +3507,19 @@ def _apply_video_segment_processing_guardrails(
     adjusted_max_vision = max(0, int(max_vision))
     adjusted_summary_only = bool(summary_only)
     notes: List[str] = []
+
+    if adjusted_use_video and not _provider_supports_video_understanding():
+        adjusted_use_video = False
+        notes.append(
+            "当前模型平台不支持视频理解，已自动切换为字幕分析模式（use_video=false）。"
+        )
+
+    if adjusted_web_search and not _provider_supports_video_understanding():
+        # web_search tool also relies on Ark's responses.create extension.
+        adjusted_web_search = False
+        notes.append(
+            "当前模型平台不支持联网搜索工具，已自动关闭 web_search。"
+        )
 
     if zone == "long":
         if adjusted_use_video:
@@ -7368,6 +7411,7 @@ def test_model():
                 "model_name": model_name,
                 "model_base_url": model_base_url,
                 "reply": str(result.get("reply", "") or ""),
+                "provider": str(result.get("provider", "") or ""),
             }
         )
     except Exception as exc:

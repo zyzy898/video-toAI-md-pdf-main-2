@@ -151,6 +151,9 @@ export const formatErrorMessage = (rawMessage: string) => {
   if (errorCode === "risk_model_auth_failed") {
     return `上传前模型鉴权失败：请检查 API Key 是否有效，并确认与当前 Base URL/平台匹配${requestIdText}`;
   }
+  if (errorCode === "provider_feature_unsupported") {
+    return `当前模型平台不支持该能力（视频理解 / 联网搜索 / 文件上传）。请切换平台，或关闭对应选项后重试${requestIdText}`;
+  }
   const segmentPolicyGuide = formatSegmentPolicyGuideByCode(errorCode, message, requestIdText);
   if (segmentPolicyGuide) return segmentPolicyGuide;
   if (errorCode === "content_policy_violation" || message.includes("上传被拒绝")) {
@@ -180,6 +183,9 @@ export const formatInlineErrorMessage = (rawMessage: string) => {
   }
   if (errorCode === "risk_model_auth_failed") {
     return `模型鉴权失败，请检查 API Key 与平台匹配关系${requestIdText}`;
+  }
+  if (errorCode === "provider_feature_unsupported") {
+    return `当前平台不支持该能力，请切换平台或关闭相应选项${requestIdText}`;
   }
   const segmentPolicyGuide = formatSegmentPolicyGuideByCode(errorCode, message, requestIdText);
   if (segmentPolicyGuide) return segmentPolicyGuide;
