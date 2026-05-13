@@ -1,4 +1,4 @@
-﻿
+
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type UIEvent } from "react";
@@ -2722,6 +2722,11 @@ export default function App() {
   const drawerOverlayActive =
     historyDrawerOpen || settingsDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
   const heroCanvasAnimating = !mobilePerfMode && !drawerOverlayActive && heroAnimationActive;
+  void heroCanvasAnimating;
+  void CanvasText;
+  void BrandStudioIcon;
+  void HERO_TITLE_CANVAS_COLORS;
+  void HERO_SUBTITLE_CANVAS_COLORS;
   const shouldShowBackgroundBeams = !mobilePerfMode;
   const shouldAnimateNoiseBackground = !mobilePerfMode && !drawerOverlayActive;
   const analyzeActionButton = (
@@ -2781,12 +2786,12 @@ export default function App() {
           <BackgroundBeams className="opacity-70" />
         </div>
       ) : null}
-      <nav className="fixed inset-x-0 top-0 z-40 w-full border-y border-neutral-800 bg-neutral-900/80 backdrop-blur-md">
-        <div className="mx-auto flex min-h-[52px] w-full max-w-[1320px] items-center justify-between px-4 sm:px-6 md:px-8">
+      <nav className="vi-nav fixed inset-x-0 top-0 z-40 w-full">
+        <div className="vi-nav-inner mx-auto flex w-full max-w-[1320px] items-center justify-between px-4 sm:px-6 md:px-8">
           <button
             type="button"
             onClick={handleStudioClick}
-            className="brand-nav-btn inline-flex items-center gap-1.5 rounded-sm text-sm font-bold uppercase tracking-[0.14em] text-neutral-400 transition-colors hover:text-neutral-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70"
+            className="brand-nav-btn inline-flex items-center gap-2 rounded-sm text-sm font-semibold tracking-[0.12em] text-neutral-300 transition-colors hover:text-neutral-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/70"
           >
             <span className="brand-nav-icon-wrap" aria-hidden="true">
               <img src="/vite.ico" alt="" className="brand-nav-icon" />
@@ -2794,13 +2799,19 @@ export default function App() {
             <span>Video Insights</span>
           </button>
           <div className="flex items-center gap-2">
-            <span
-              aria-hidden="true"
-              className="history-nav-btn pointer-events-none invisible inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-base font-medium text-neutral-200"
+            <button
+              type="button"
+              aria-expanded={settingsDrawerOpen}
+              aria-controls="settings-drawer"
+              onClick={() => {
+                setHistoryDrawerOpen(false);
+                setSettingsDrawerOpen((prev) => !prev);
+              }}
+              className="vi-nav-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
             >
-              <HistoryIcon className="h-3.5 w-3.5" />
-              历史
-            </span>
+              <SettingsIcon className="h-3.5 w-3.5" />
+              设置
+            </button>
             <button
               type="button"
               aria-expanded={historyDrawerOpen}
@@ -2809,7 +2820,7 @@ export default function App() {
                 setSettingsDrawerOpen(false);
                 setHistoryDrawerOpen((prev) => !prev);
               }}
-              className="history-nav-btn inline-flex items-center gap-1.5 rounded-full bg-neutral-900/60 px-3 py-1.5 text-base font-medium text-neutral-200 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
+              className="vi-nav-pill vi-nav-pill--accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
             >
               <HistoryIcon className="h-3.5 w-3.5" />
               历史
@@ -2818,53 +2829,22 @@ export default function App() {
         </div>
       </nav>
       <main className="app-main relative z-10 mx-auto w-full max-w-[1320px] space-y-6 px-4 pb-8 pt-[5.25rem] sm:px-6 md:space-y-7 md:px-8 md:pb-10 md:pt-24">
-        <header className="hero-panel panel-card motion-enter rounded-xl border-0 bg-transparent p-4">
+        <header className="vi-hero hero-panel panel-card motion-enter rounded-xl border-0 bg-transparent p-4">
           <div className="mx-auto flex w-full max-w-4xl flex-col items-center gap-3 text-center">
-            <div className="hero-icon-float rounded-full border border-neutral-700 bg-neutral-950/70 p-2 text-neutral-300">
-              <BrandStudioIcon className="h-8 w-8" />
-            </div>
-            <h1
-              className={cn(
-                "group relative mx-auto max-w-2xl text-balance text-center text-4xl font-bold tracking-tight sm:text-5xl md:text-6xl xl:text-7xl",
-              )}
-            >
-              视频转文档 
-              {mobilePerfMode ? (
-                <span className="hero-toast-anchor inline align-middle text-sky-300/90"> 不止是提取 更是理解</span>
-              ) : (
-                <CanvasText
-                  text=" 不止是提取   更是理解"
-                  className="hero-toast-anchor inline align-middle"
-                  backgroundClassName="bg-blue-600 dark:bg-blue-700"
-                  colors={HERO_TITLE_CANVAS_COLORS}
-                  animating={heroCanvasAnimating}
-                  lineGap={4}
-                  animationDuration={20}
-                />
-              )}
+            <span className="vi-hero-eyebrow">AI · 视频理解工作台</span>
+            <h1 className="vi-hero-title">
+              视频转文档，
+              <span className="vi-hero-title-accent"> 不止提取，更是理解</span>
             </h1>
-            <p className="mx-auto max-w-3xl text-balance text-center text-sm font-medium text-neutral-300 sm:text-base md:text-lg">
+            <p className="vi-hero-subtitle">
               AI 自动分析视频内容，抓取关键截图，拆解核心步骤，输出结构清晰、重点明确的总结文档。
+              让信息沉淀更高效 — Turn insights into docs.
             </p>
-            <p className="mx-auto max-w-3xl text-balance text-center text-sm font-medium text-neutral-300 sm:text-base">
-              {mobilePerfMode ? (
-                <span className="inline align-middle text-sky-200/95">让信息沉淀更高效，Turn insights into docs。</span>
-              ) : (
-                <CanvasText
-                  text="让信息沉淀更高效，Turn insights into docs。"
-                  className="inline align-middle"
-                  backgroundClassName="bg-blue-600/80 dark:bg-blue-700/80"
-                  colors={HERO_SUBTITLE_CANVAS_COLORS}
-                  animating={heroCanvasAnimating}
-                  lineGap={4}
-                  animationDuration={22}
-                />
-              )}
-            </p>
-            <div className="mt-2 flex flex-wrap justify-center gap-2">
-              <span className="hero-chip rounded-full border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300">Whisper</span>
-              <span className="hero-chip rounded-full border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300">Batch Ready</span>
-              <span className="hero-chip rounded-full border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300">Markdown + PDF</span>
+            <div className="vi-hero-chips">
+              <span className="vi-chip"><span className="vi-chip-dot" />Whisper ASR</span>
+              <span className="vi-chip"><span className="vi-chip-dot" />批量处理</span>
+              <span className="vi-chip"><span className="vi-chip-dot" />Markdown · PDF 导出</span>
+              <span className="vi-chip"><span className="vi-chip-dot" />链接直达分析</span>
             </div>
           </div>
         </header>
@@ -2872,18 +2852,24 @@ export default function App() {
         <div className="app-grid grid items-start gap-5 2xl:gap-6">
           <section className="app-workspace motion-enter motion-delay-2 min-w-0 space-y-4">
             <section className="panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
-              <div className="mb-2 flex items-center gap-2">
-                <UploadIcon className="h-4 w-4 text-neutral-300" />
-                <h2 className="text-base font-semibold">上传视频</h2>
+              <div className="vi-card-head">
+                <div className="vi-card-title">
+                  <span className="vi-card-title-ico"><UploadIcon className="h-4 w-4" /></span>
+                  上传视频
+                </div>
+                <span className="vi-card-sub">拖拽 · 点击 · 链接 · 批量</span>
               </div>
-              <div className="mb-3 rounded-lg border border-sky-400/30 bg-sky-500/8 p-3">
-                <p className="text-xs font-semibold tracking-wide text-sky-100/95">视频链接直达分析</p>
-                <div className="mt-2 flex flex-col gap-2 sm:flex-row">
+              <div className="vi-url-bar mb-3">
+                <div className="vi-url-bar__title">
+                  <span aria-hidden="true">🔗</span>
+                  视频链接直达分析
+                </div>
+                <div className="vi-url-bar__row">
                   <input
                     ref={sourceUrlInputRef}
                     type="url"
                     placeholder="粘贴视频链接（http/https）"
-                    className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500"
+                    className="vi-input flex-1"
                     value={sourceUrl}
                     disabled={isAnalyzing || importingUrl}
                     onChange={(e) => setSourceUrl(e.target.value)}
@@ -2891,7 +2877,7 @@ export default function App() {
                   <div className="flex shrink-0 gap-2">
                     <button
                       type="button"
-                      className="rounded border border-neutral-700 px-3 py-1.5 text-xs text-neutral-200 transition-colors hover:border-sky-400/60 hover:text-sky-100 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="vi-btn vi-btn--sm"
                       disabled={isAnalyzing || importingUrl}
                       onClick={() => void importSourceUrlOnly()}
                     >
@@ -2899,7 +2885,7 @@ export default function App() {
                     </button>
                     <button
                       type="button"
-                      className="rounded border border-teal-400/50 bg-teal-500/12 px-3 py-1.5 text-xs text-teal-100 transition-colors hover:border-teal-300 hover:bg-teal-500/18 disabled:cursor-not-allowed disabled:opacity-60"
+                      className="vi-btn vi-btn--sm vi-btn--primary"
                       disabled={isAnalyzing || importingUrl}
                       onClick={() => void analyzeBySourceUrl()}
                     >
@@ -2907,8 +2893,8 @@ export default function App() {
                     </button>
                   </div>
                 </div>
-                <p className="mt-1 text-[11px] text-sky-100/85">
-                  只需提供链接即可下载并分析；平台播放页链接建议安装 `yt-dlp` 以提升兼容性。
+                <p className="vi-url-bar__note">
+                  只需提供链接即可下载并分析；平台播放页链接建议安装 <code>yt-dlp</code> 提升兼容性。
                 </p>
               </div>
               <input
@@ -2924,9 +2910,7 @@ export default function App() {
                 }}
               />
               <div
-                className={`rounded border-2 border-dashed p-5 text-center ${
-                  batchDragOver ? "border-teal-400 bg-teal-500/10" : "border-neutral-700 bg-neutral-950/50"
-                } upload-dropzone`}
+                className={cn("vi-drop", batchDragOver && "vi-drop--active")}
                 onClick={() => fileInputRef.current?.click()}
                 onDragOver={(e) => {
                   e.preventDefault();
@@ -2939,73 +2923,55 @@ export default function App() {
                   if (e.dataTransfer.files) void uploadBatchFiles(e.dataTransfer.files);
                 }}
               >
-                <div className="mb-2 flex justify-center text-neutral-300">
-                  <FolderPlusIcon className="h-12 w-12" />
+                <div className="vi-drop-icon">
+                  <FolderPlusIcon className="h-7 w-7" />
                 </div>
-                <p>点击选择单个/多个视频文件</p>
-                <p className="mt-1 text-xs text-neutral-500">支持 MP4, AVI, MOV, MKV, WMV, FLV, WebM, M4V 等格式</p>
+                <p className="vi-drop-title">点击选择 · 或拖拽视频到这里</p>
+                <p className="vi-drop-hint">支持 MP4 / AVI / MOV / MKV / WMV / FLV / WebM / M4V 等</p>
               </div>
-              <div className="mt-2 rounded-lg border border-sky-400/30 bg-sky-500/8 p-3">
-                <div className="mb-2 flex items-center justify-between gap-2">
-                  <p className="text-xs font-semibold tracking-wide text-sky-100/95">上传策略建议</p>
-                  <span className="rounded-full border border-sky-300/35 bg-sky-500/15 px-2 py-0.5 text-[11px] text-sky-100/90">
-                    稳定性优先
-                  </span>
+              <div className="vi-kv-grid mt-3">
+                <div className="vi-kv-cell">
+                  <div className="vi-kv-label">标准推荐</div>
+                  <div className="vi-kv-value">20 分钟 · 250 MB 以内</div>
+                  <p className="vi-help">处理速度与稳定性最佳</p>
                 </div>
-                <div className="grid gap-2 sm:grid-cols-2">
-                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
-                    <p className="text-[11px] font-medium text-sky-200/95">标准推荐</p>
-                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
-                      推荐上传 20 分钟以内、250MB 以内的视频，处理速度和稳定性最佳。
-                    </p>
-                  </div>
-                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
-                    <p className="text-[11px] font-medium text-sky-200/95">长视频模式</p>
-                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
-                      20 分钟以上或 250MB 以上的视频会自动进入长视频处理模式，系统将进行切片/压缩后再分析，耗时会明显增加。
-                    </p>
-                  </div>
-                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
-                    <p className="text-[11px] font-medium text-sky-200/95">超长视频建议</p>
-                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
-                      45 分钟以上的视频建议先按章节裁剪后再上传；90 分钟以上的超长视频请拆分后上传，以保证处理稳定性。
-                    </p>
-                  </div>
-                  <div className="rounded-md border border-sky-300/20 bg-sky-500/10 p-2">
-                    <p className="text-[11px] font-medium text-sky-200/95">批量建议</p>
-                    <p className="mt-1 text-xs leading-5 text-sky-100/95">
-                      批量上传建议最多 5 个视频；若包含长视频，建议最多 2 个。
-                    </p>
-                  </div>
+                <div className="vi-kv-cell">
+                  <div className="vi-kv-label">长视频模式</div>
+                  <div className="vi-kv-value">自动切片 · 自动压缩</div>
+                  <p className="vi-help">20 分钟 / 250 MB 以上会自动进入，耗时增加</p>
+                </div>
+                <div className="vi-kv-cell">
+                  <div className="vi-kv-label">超长视频</div>
+                  <div className="vi-kv-value">建议先裁剪</div>
+                  <p className="vi-help">45 分钟+ 建议按章节裁剪，90 分钟+ 请拆分</p>
+                </div>
+                <div className="vi-kv-cell">
+                  <div className="vi-kv-label">批量上限</div>
+                  <div className="vi-kv-value">最多 5 个 / 含长视频 ≤ 2</div>
+                  <p className="vi-help">稳定性优先，避免单批过大</p>
                 </div>
               </div>
-              <div className="mt-2 space-y-2">
+              <div className="vi-batch-list">
                 {batchFiles.map((item, index) => (
                   <div
                     key={`${item.filepath}-${index}`}
                     className={cn(
-                      "flex items-start justify-between rounded border p-2 transition-colors",
-                      item.status === "failed"
-                        ? "border-rose-500/45 bg-rose-500/12"
-                        : "border-neutral-800 bg-neutral-950/60",
+                      "vi-batch-row",
+                      item.status === "failed" && "vi-batch-row--fail",
+                      item.status === "success" && "vi-batch-row--ok",
                     )}
                   >
-                    <div
-                      className={cn(
-                        "min-w-0 flex flex-1 items-start gap-2 rounded-md px-1 py-0.5 transition-colors",
-                        "bg-transparent",
-                      )}
-                    >
+                    <div className="min-w-0 flex flex-1 items-start gap-2.5">
                       <FileVideoIcon
                         className={cn(
-                          "mt-0.5 h-3.5 w-3.5 shrink-0 text-neutral-400 transition-[color,transform,filter] duration-300 ease-out",
-                          item.status === "success" && "text-emerald-300 drop-shadow-[0_0_6px_rgba(52,211,153,0.35)]",
-                          item.status === "failed" && "text-rose-300 drop-shadow-[0_0_6px_rgba(244,63,94,0.32)]",
+                          "mt-0.5 h-4 w-4 shrink-0 text-neutral-400 transition-colors",
+                          item.status === "success" && "text-emerald-300",
+                          item.status === "failed" && "text-rose-300",
                         )}
                       />
                       <div className="min-w-0 flex-1">
-                        <p className="truncate text-sm">{item.filename}</p>
-                        <p className={cn("text-xs", item.status === "failed" ? "text-rose-300/90" : "text-neutral-500")}>
+                        <p className="truncate text-sm font-medium text-neutral-100">{item.filename}</p>
+                        <p className={cn("text-xs", item.status === "failed" ? "text-rose-300/90" : "text-neutral-400")}>
                           {batchStatusText(item.status)}
                         </p>
                         {item.error ? (
@@ -3016,23 +2982,25 @@ export default function App() {
                       </div>
                     </div>
                     <div className="ml-2 flex shrink-0 self-center items-center gap-2">
-                      {(item.status === "success" || item.status === "failed") && (
-                        <span
-                          className={cn(
-                            "file-status-chip",
-                            item.status === "success" ? "file-status-chip-success" : "file-status-chip-failed",
-                          )}
-                        >
-                          {item.status === "success" ? <StatusSuccessIcon /> : <StatusFailedIcon />}
-                          <span>{item.status === "success" ? "成功" : "失败"}</span>
+                      {item.status === "success" ? (
+                        <span className="vi-status vi-status--ok">
+                          <StatusSuccessIcon /> 成功
                         </span>
+                      ) : item.status === "failed" ? (
+                        <span className="vi-status vi-status--fail">
+                          <StatusFailedIcon /> 失败
+                        </span>
+                      ) : item.status === "processing" ? (
+                        <span className="vi-status vi-status--run">处理中</span>
+                      ) : (
+                        <span className="vi-status">待处理</span>
                       )}
                       {batchFiles.length > 1 ? (
                         <button
                           type="button"
                           title="删除文件"
                           aria-label="删除文件"
-                          className="inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10"
+                          className="vi-icon-btn vi-icon-btn--danger"
                           disabled={isAnalyzing}
                           onClick={() => setBatchFiles((prev) => prev.filter((_, i) => i !== index))}
                         >
@@ -3046,36 +3014,37 @@ export default function App() {
               {batchFiles.length > 0 ? (
                 <button
                   type="button"
-                  className="clear-list-btn mt-2 flex w-full items-center justify-center gap-1 rounded border border-neutral-700 px-3 py-1.5 text-sm"
+                  className="vi-btn vi-btn--block vi-btn--sm mt-2"
                   onClick={() => setBatchFiles([])}
                 >
-                  <ClearIcon className="clear-list-icon h-3.5 w-3.5" />
+                  <ClearIcon className="h-3.5 w-3.5" />
                   清空列表
                 </button>
               ) : null}
-              {mobilePerfMode ? (
-                <div className="mt-3 mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5">
-                  {analyzeActionButton}
-                </div>
-              ) : (
-                <NoiseBackground
-                  containerClassName="mt-3 mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5"
-                  className="w-full"
-                  gradientColors={ANALYZE_BUTTON_GRADIENT_COLORS}
-                  noiseIntensity={0.07}
-                  speed={0.13}
-                  animating={shouldAnimateNoiseBackground}
-                >
-                  {analyzeActionButton}
-                </NoiseBackground>
-              )}
+              <div className="vi-cta">
+                {mobilePerfMode ? (
+                  <div className="mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5">
+                    {analyzeActionButton}
+                  </div>
+                ) : (
+                  <NoiseBackground
+                    containerClassName="mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5"
+                    className="w-full"
+                    gradientColors={ANALYZE_BUTTON_GRADIENT_COLORS}
+                    noiseIntensity={0.07}
+                    speed={0.13}
+                    animating={shouldAnimateNoiseBackground}
+                  >
+                    {analyzeActionButton}
+                  </NoiseBackground>
+                )}
+              </div>
               <button
                 type="button"
-                className={`mt-2 w-full rounded border px-3 py-1.5 text-xs transition-colors ${
-                  summaryOnly
-                    ? "border-amber-400/60 bg-amber-500/15 text-amber-200"
-                    : "border-neutral-700 text-neutral-300 hover:border-amber-400/45 hover:text-amber-200"
-                }`}
+                className={cn(
+                  "vi-btn vi-btn--block vi-btn--sm mt-2",
+                  summaryOnly && "vi-btn--primary",
+                )}
                 disabled={isAnalyzing}
                 onClick={() => setSummaryOnly((prev) => !prev)}
               >
@@ -4034,22 +4003,35 @@ export default function App() {
 
       {progressVisible ? (
         <div className="progress-overlay-anim fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
-          <div className="progress-dialog-anim w-full max-w-md rounded-xl border border-neutral-700 bg-neutral-900 p-4">
-            <h3 className="text-base font-semibold">{progressTitle}</h3>
+          <div className="progress-dialog-anim vi-progress-card">
+            <div className="flex items-center justify-between gap-3">
+              <h3 className="text-base font-semibold text-neutral-50">{progressTitle}</h3>
+              <span className="vi-status vi-status--run">{progressPercent}%</span>
+            </div>
             <p className="mt-1 text-sm text-neutral-300">{progressText}</p>
-            <div className="mt-3 rounded border border-neutral-800 bg-neutral-950/70 p-3">
-              <div className="mb-1 flex items-center justify-between text-xs text-neutral-400"><span>{progressModeText}</span><span>{progressPercent}%</span></div>
-              <div className="h-2 overflow-hidden rounded bg-neutral-800"><div className="progress-fill-anim h-full bg-teal-500" style={{ width: `${progressPercent}%` }} /></div>
-              {progressBoard.total > 0 ? <p className="mt-1 text-xs text-neutral-400">进度 {progressBoard.current}/{progressBoard.total}</p> : null}
-              {progressBoard.success > 0 || progressBoard.failed > 0 ? <p className="text-xs text-neutral-400">成功 {progressBoard.success} · 失败 {progressBoard.failed}</p> : null}
-              {progressBoard.stage ? (
-                <p className="text-xs text-neutral-400">
-                  阶段: {progressBoard.stage === "idle" ? "正在准备分析..." : STAGE_LABELS[progressBoard.stage] || progressBoard.stage}
-                </p>
-              ) : (
-                <p className="text-xs text-neutral-400">阶段: 正在准备分析...</p>
-              )}
-              {progressBoard.currentFile ? <p className="truncate text-xs text-teal-300">当前文件: {progressBoard.currentFile}</p> : null}
+            <div className="mt-4">
+              <div className="mb-1.5 flex items-center justify-between text-xs text-neutral-400">
+                <span>{progressModeText}</span>
+                {progressBoard.total > 0 ? (
+                  <span>{progressBoard.current}/{progressBoard.total}</span>
+                ) : null}
+              </div>
+              <div className="vi-progress-track">
+                <div className="vi-progress-bar" style={{ width: `${progressPercent}%` }} />
+              </div>
+            </div>
+            <div className="mt-3 grid gap-1 text-xs text-neutral-400">
+              {progressBoard.success > 0 || progressBoard.failed > 0 ? (
+                <p>成功 <span className="text-emerald-300">{progressBoard.success}</span> · 失败 <span className="text-rose-300">{progressBoard.failed}</span></p>
+              ) : null}
+              <p>
+                阶段: {progressBoard.stage && progressBoard.stage !== "idle"
+                  ? STAGE_LABELS[progressBoard.stage] || progressBoard.stage
+                  : "正在准备分析..."}
+              </p>
+              {progressBoard.currentFile ? (
+                <p className="truncate text-teal-300">当前文件: {progressBoard.currentFile}</p>
+              ) : null}
             </div>
           </div>
         </div>
