@@ -1,0 +1,82 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 270" role="img" aria-label="Mock UI: 勾选分析参数与导出格式">
+  <defs>
+    <linearGradient id="bg3" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0b0d14"/>
+      <stop offset="1" stop-color="#0e1320"/>
+    </linearGradient>
+    <linearGradient id="acc3" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#60a5fa"/>
+    </linearGradient>
+    <radialGradient id="glow3" cx="0" cy="0" r="1">
+      <stop offset="0" stop-color="#a78bfa" stop-opacity=".18"/>
+      <stop offset="1" stop-color="#a78bfa" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="480" height="270" fill="url(#bg3)"/>
+  <rect width="480" height="270" fill="url(#glow3)"/>
+  <!-- top bar -->
+  <rect x="0" y="0" width="480" height="32" fill="#0a0c12"/>
+  <g transform="translate(14 12)">
+    <circle r="4" cx="4" cy="4" fill="#ff5f57"/>
+    <circle r="4" cx="18" cy="4" fill="#febc2e"/>
+    <circle r="4" cx="32" cy="4" fill="#28c840"/>
+  </g>
+  <text x="60" y="20" fill="#94a3b8" font-family="system-ui,Segoe UI,sans-serif" font-size="9" letter-spacing="1">ANALYSIS / SETTINGS</text>
+  <!-- header -->
+  <text x="20" y="56" fill="#f8fafc" font-family="system-ui,Segoe UI,sans-serif" font-size="14" font-weight="700">分析参数</text>
+  <text x="20" y="70" fill="#94a3b8" font-family="system-ui,Segoe UI,sans-serif" font-size="9">为本次分析选择 LLM、Whisper 等级与导出格式</text>
+
+  <!-- two columns -->
+  <g transform="translate(20 84)">
+    <!-- left column: settings -->
+    <rect width="216" height="166" rx="10" fill="#12151f" stroke="#1f2937"/>
+    <g font-family="system-ui,Segoe UI,sans-serif">
+      <text x="14" y="20" fill="#cbd5e1" font-size="10" font-weight="600">模型 Provider</text>
+      <rect x="14" y="26" width="188" height="22" rx="6" fill="#070910" stroke="#22d3ee" stroke-opacity=".55"/>
+      <text x="22" y="41" fill="#e2e8f0" font-size="9">Ark · Doubao Seed 2.0 Pro</text>
+
+      <text x="14" y="62" fill="#cbd5e1" font-size="10" font-weight="600">Whisper 等级</text>
+      <rect x="14" y="68" width="188" height="22" rx="6" fill="#070910" stroke="#334155"/>
+      <text x="22" y="83" fill="#e2e8f0" font-size="9">base · 快速 · 平衡精度 ▾</text>
+
+      <text x="14" y="104" fill="#cbd5e1" font-size="10" font-weight="600">视觉增强次数</text>
+      <rect x="14" y="110" width="120" height="22" rx="6" fill="#070910" stroke="#334155"/>
+      <text x="22" y="125" fill="#e2e8f0" font-size="9">10</text>
+      <rect x="138" y="110" width="64" height="22" rx="6" fill="#070910" stroke="#334155"/>
+      <text x="170" y="125" text-anchor="middle" fill="#94a3b8" font-size="9">最大</text>
+    </g>
+    <!-- right column: toggles -->
+    <g transform="translate(232 0)">
+      <rect width="208" height="166" rx="10" fill="#12151f" stroke="#1f2937"/>
+      <g font-family="system-ui,Segoe UI,sans-serif">
+        <!-- toggles -->
+        <g>
+          <rect x="14" y="14" width="180" height="36" rx="8" fill="#0c1220" stroke="rgba(34,211,238,.4)"/>
+          <rect x="22" y="22" width="14" height="14" rx="3" fill="url(#acc3)"/>
+          <path d="M25 29 l3 3 6 -6" stroke="#031016" stroke-width="1.8" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+          <text x="44" y="32" fill="#e2e8f0" font-size="10" font-weight="600">字幕模式</text>
+          <text x="44" y="44" fill="#94a3b8" font-size="8">先用 Whisper 转写再让模型抽步骤</text>
+        </g>
+        <g>
+          <rect x="14" y="58" width="180" height="36" rx="8" fill="#0c1220" stroke="#1f2937"/>
+          <rect x="22" y="66" width="14" height="14" rx="3" fill="#0a0e18" stroke="#475569"/>
+          <text x="44" y="76" fill="#e2e8f0" font-size="10" font-weight="600">视频理解模式</text>
+          <text x="44" y="88" fill="#94a3b8" font-size="8">直接上传视频给模型 · 成本更高</text>
+        </g>
+        <g>
+          <rect x="14" y="102" width="180" height="48" rx="8" fill="#0c1220" stroke="rgba(34,211,238,.4)"/>
+          <text x="22" y="118" fill="#cbd5e1" font-size="10" font-weight="600">导出格式</text>
+          <g transform="translate(22 124)">
+            <rect width="48" height="20" rx="999" fill="rgba(34,211,238,.12)" stroke="rgba(34,211,238,.4)"/>
+            <text x="24" y="14" text-anchor="middle" fill="#a5f3fc" font-size="9">Markdown</text>
+            <rect x="54" width="34" height="20" rx="999" fill="rgba(34,211,238,.12)" stroke="rgba(34,211,238,.4)"/>
+            <text x="71" y="14" text-anchor="middle" fill="#a5f3fc" font-size="9">PDF</text>
+            <rect x="92" width="32" height="20" rx="999" fill="rgba(34,211,238,.12)" stroke="rgba(34,211,238,.4)"/>
+            <text x="108" y="14" text-anchor="middle" fill="#a5f3fc" font-size="9">SRT</text>
+          </g>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>

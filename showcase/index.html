@@ -1,0 +1,3122 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Video Insights · 项目效果展示 — AI 智能分析视频内容</title>
+    <meta
+      name="description"
+      content="Video Insights 项目效果展示：AI 自动分析视频，抓取关键截图、拆解操作步骤，输出结构清晰的 Markdown / PDF 总结文档。"
+    />
+    <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' x2='1' y1='0' y2='1'%3E%3Cstop offset='0' stop-color='%2367e8f9'/%3E%3Cstop offset='.5' stop-color='%2322d3ee'/%3E%3Cstop offset='1' stop-color='%2360a5fa'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='32' height='32' rx='8' fill='%230b0d14'/%3E%3Cpath d='M11 9l12 7-12 7z' fill='url(%23g)'/%3E%3C/svg%3E" />
+    <style>
+      /* ===== Design tokens ===== */
+      :root {
+        --vi-bg-0: #07080c;
+        --vi-bg-1: #0b0d14;
+        --vi-bg-2: #10131c;
+        --vi-surface: rgba(18, 22, 33, 0.72);
+        --vi-surface-solid: #12151f;
+        --vi-border: rgba(148, 163, 184, 0.14);
+        --vi-border-strong: rgba(148, 163, 184, 0.26);
+        --vi-text-0: #f8fafc;
+        --vi-text-1: #e2e8f0;
+        --vi-text-2: #94a3b8;
+        --vi-text-3: #64748b;
+        --vi-accent: #22d3ee;
+        --vi-accent-2: #2dd4bf;
+        --vi-accent-3: #60a5fa;
+        --vi-accent-soft: rgba(34, 211, 238, 0.12);
+        --vi-accent-ring: rgba(34, 211, 238, 0.32);
+        --vi-success: #34d399;
+        --vi-warn: #fbbf24;
+        --vi-danger: #fb7185;
+        --vi-radius: 0.75rem;
+        --vi-radius-lg: 1rem;
+        --vi-radius-xl: 1.25rem;
+        --vi-shadow: 0 10px 30px rgba(2, 6, 23, 0.45),
+          inset 0 1px 0 rgba(255, 255, 255, 0.03);
+        --vi-shadow-lg: 0 24px 60px -20px rgba(2, 6, 23, 0.7),
+          inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--vi-bg-0);
+        color: var(--vi-text-1);
+        font-family: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+          "Noto Sans SC", "Segoe UI", system-ui, -apple-system, sans-serif;
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+      }
+
+      body {
+        background:
+          radial-gradient(1200px 600px at 12% -10%, rgba(34, 211, 238, 0.1), transparent 60%),
+          radial-gradient(900px 500px at 110% 10%, rgba(96, 165, 250, 0.1), transparent 60%),
+          radial-gradient(800px 450px at 50% 110%, rgba(167, 139, 250, 0.06), transparent 60%),
+          var(--vi-bg-0);
+        min-height: 100vh;
+      }
+
+      a {
+        color: inherit;
+        text-decoration: none;
+      }
+
+      /* ===== Top nav ===== */
+      .nav {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        border-bottom: 1px solid var(--vi-border);
+        background: linear-gradient(
+          180deg,
+          rgba(10, 12, 18, 0.92),
+          rgba(10, 12, 18, 0.7)
+        );
+        backdrop-filter: saturate(140%) blur(14px);
+        -webkit-backdrop-filter: saturate(140%) blur(14px);
+      }
+      .nav-inner {
+        max-width: 1320px;
+        margin: 0 auto;
+        padding: 0 1.5rem;
+        min-height: 60px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.6rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        color: var(--vi-text-0);
+      }
+      .brand-logo {
+        width: 1.85rem;
+        height: 1.85rem;
+        border-radius: 0.55rem;
+        background: linear-gradient(135deg, #22d3ee, #60a5fa 55%, #a78bfa);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: #031016;
+        font-size: 1rem;
+        box-shadow: 0 6px 18px -8px rgba(34, 211, 238, 0.7),
+          inset 0 1px 0 rgba(255, 255, 255, 0.4);
+      }
+      .nav-links {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+      }
+      .nav-pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.42rem 0.85rem;
+        border-radius: 999px;
+        font-size: 0.82rem;
+        color: var(--vi-text-1);
+        border: 1px solid var(--vi-border);
+        background: rgba(255, 255, 255, 0.025);
+        transition: all 0.22s ease;
+      }
+      .nav-pill:hover {
+        color: var(--vi-text-0);
+        border-color: var(--vi-border-strong);
+        background: rgba(255, 255, 255, 0.05);
+        transform: translateY(-1px);
+      }
+      .nav-pill--accent {
+        color: rgba(165, 243, 252, 0.95);
+        border-color: rgba(34, 211, 238, 0.35);
+        background: rgba(34, 211, 238, 0.08);
+      }
+      .nav-pill--accent:hover {
+        border-color: rgba(34, 211, 238, 0.6);
+        background: rgba(34, 211, 238, 0.14);
+      }
+
+      /* ===== Layout ===== */
+      .container {
+        max-width: 1240px;
+        margin: 0 auto;
+        padding: 0 1.5rem;
+      }
+      section {
+        padding: 4.5rem 0;
+        position: relative;
+      }
+      section + section {
+        border-top: 1px solid var(--vi-border);
+      }
+
+      /* ===== Hero ===== */
+      .hero {
+        padding: 5.5rem 0 4rem;
+        text-align: center;
+        position: relative;
+        overflow: hidden;
+      }
+      .hero::before {
+        content: "";
+        position: absolute;
+        inset: -10% 0 -10% 0;
+        background: radial-gradient(
+          720px 360px at 50% 0%,
+          rgba(34, 211, 238, 0.18),
+          transparent 70%
+        );
+        pointer-events: none;
+      }
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.45rem;
+        padding: 0.38rem 0.9rem;
+        border-radius: 999px;
+        font-size: 0.74rem;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: rgba(165, 243, 252, 0.95);
+        border: 1px solid rgba(34, 211, 238, 0.3);
+        background: rgba(34, 211, 238, 0.06);
+      }
+      .eyebrow::before {
+        content: "";
+        width: 0.4rem;
+        height: 0.4rem;
+        border-radius: 999px;
+        background: var(--vi-accent);
+        box-shadow: 0 0 10px var(--vi-accent-ring);
+      }
+      .hero h1 {
+        margin: 1.1rem auto 0;
+        max-width: 22ch;
+        font-size: clamp(2.25rem, 4.4vw + 1rem, 4rem);
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        line-height: 1.1;
+        color: var(--vi-text-0);
+      }
+      .accent-text {
+        background: linear-gradient(
+          120deg,
+          #22d3ee 0%,
+          #60a5fa 22%,
+          #a78bfa 44%,
+          #f472b6 60%,
+          #22d3ee 82%,
+          #60a5fa 100%
+        );
+        background-size: 220% 220%;
+        background-position: 0% 50%;
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        -webkit-text-fill-color: transparent;
+        animation: accent-flow 8s linear infinite;
+        filter: drop-shadow(0 0 16px rgba(34, 211, 238, 0.18));
+      }
+      @keyframes accent-flow {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .accent-text { animation: none; }
+      }
+      .hero p.lead {
+        max-width: 46rem;
+        margin: 1rem auto 0;
+        color: var(--vi-text-2);
+        font-size: 1.02rem;
+        line-height: 1.78;
+      }
+      .hero-chips {
+        margin-top: 1.4rem;
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 0.5rem;
+      }
+      .chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.32rem 0.78rem;
+        font-size: 0.74rem;
+        letter-spacing: 0.02em;
+        color: var(--vi-text-2);
+        border: 1px solid var(--vi-border);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.025);
+      }
+      .chip-dot {
+        width: 0.42rem;
+        height: 0.42rem;
+        border-radius: 999px;
+        background: var(--vi-accent);
+        box-shadow: 0 0 8px var(--vi-accent-ring);
+      }
+      .hero-cta {
+        margin-top: 1.8rem;
+        display: inline-flex;
+        gap: 0.7rem;
+        flex-wrap: wrap;
+        justify-content: center;
+      }
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.68rem 1.15rem;
+        font-size: 0.88rem;
+        font-weight: 500;
+        line-height: 1;
+        border-radius: 0.7rem;
+        border: 1px solid var(--vi-border);
+        color: var(--vi-text-1);
+        background: rgba(255, 255, 255, 0.03);
+        cursor: pointer;
+        transition: all 0.18s ease;
+      }
+      .btn:hover {
+        color: var(--vi-text-0);
+        border-color: var(--vi-border-strong);
+        background: rgba(255, 255, 255, 0.06);
+        transform: translateY(-1px);
+      }
+      .btn--primary {
+        color: #031016;
+        border-color: transparent;
+        background: linear-gradient(120deg, #67e8f9, #22d3ee 48%, #60a5fa);
+        box-shadow: 0 10px 28px -12px rgba(34, 211, 238, 0.65);
+        font-weight: 600;
+      }
+      .btn--primary:hover {
+        color: #031016;
+        filter: brightness(1.06);
+      }
+
+      /* ===== Section header ===== */
+      .section-head {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        text-align: center;
+        gap: 0.6rem;
+        margin-bottom: 2.5rem;
+      }
+      .section-tag {
+        font-size: 0.72rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: rgba(165, 243, 252, 0.9);
+      }
+      .section-title {
+        font-size: clamp(1.5rem, 2.4vw + 0.6rem, 2.2rem);
+        font-weight: 700;
+        color: var(--vi-text-0);
+        letter-spacing: -0.01em;
+        margin: 0;
+      }
+      .section-sub {
+        max-width: 44rem;
+        color: var(--vi-text-2);
+        margin: 0;
+      }
+
+      /* ===== Cards / panels ===== */
+      .panel {
+        border-radius: var(--vi-radius-lg);
+        border: 1px solid var(--vi-border);
+        background: linear-gradient(
+            180deg,
+            rgba(255, 255, 255, 0.025),
+            rgba(255, 255, 255, 0)
+          ),
+          var(--vi-surface);
+        box-shadow: var(--vi-shadow);
+      }
+      .panel--glow {
+        position: relative;
+        overflow: hidden;
+      }
+      .panel--glow::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: linear-gradient(
+          120deg,
+          rgba(34, 211, 238, 0.06),
+          transparent 35%,
+          rgba(96, 165, 250, 0.05) 75%
+        );
+        opacity: 0.85;
+      }
+
+      /* ===== Workspace mockup ===== */
+      .workspace {
+        max-width: 1140px;
+        margin: 0 auto;
+        border-radius: var(--vi-radius-xl);
+        border: 1px solid var(--vi-border-strong);
+        background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0)),
+          var(--vi-surface-solid);
+        box-shadow: var(--vi-shadow-lg);
+        overflow: hidden;
+      }
+      .ws-titlebar {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.7rem 0.95rem;
+        border-bottom: 1px solid var(--vi-border);
+        background: linear-gradient(180deg, rgba(10,12,18,0.95), rgba(10,12,18,0.85));
+      }
+      .ws-traffic {
+        display: inline-flex;
+        gap: 0.42rem;
+      }
+      .ws-traffic span {
+        width: 0.65rem;
+        height: 0.65rem;
+        border-radius: 999px;
+        display: inline-block;
+      }
+      .ws-traffic span:nth-child(1) { background: #ff5f57; }
+      .ws-traffic span:nth-child(2) { background: #febc2e; }
+      .ws-traffic span:nth-child(3) { background: #28c840; }
+      .ws-url {
+        flex: 1;
+        text-align: center;
+        font-size: 0.78rem;
+        color: var(--vi-text-3);
+        letter-spacing: 0.01em;
+      }
+      .ws-body {
+        padding: 1.25rem;
+        display: grid;
+        gap: 1.1rem;
+      }
+      .ws-mock-nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 0.55rem 0.85rem;
+        border-radius: var(--vi-radius);
+        border: 1px solid var(--vi-border);
+        background: rgba(10, 12, 18, 0.72);
+      }
+      .ws-mock-nav-brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        font-size: 0.84rem;
+        letter-spacing: 0.1em;
+        font-weight: 600;
+        color: var(--vi-text-0);
+      }
+
+      /* ===== Hero block inside workspace ===== */
+      .ws-hero {
+        text-align: center;
+        padding: 1.5rem 1rem 0.5rem;
+      }
+      .ws-hero-title {
+        margin: 0.85rem 0 0;
+        font-size: clamp(1.6rem, 3vw + 0.4rem, 2.4rem);
+        font-weight: 700;
+        line-height: 1.18;
+        color: var(--vi-text-0);
+      }
+      .ws-hero-sub {
+        max-width: 42rem;
+        margin: 0.6rem auto 0;
+        color: var(--vi-text-2);
+        font-size: 0.92rem;
+      }
+
+      /* ===== Card head/title (shared) ===== */
+      .card-head {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.8rem;
+        margin-bottom: 0.85rem;
+      }
+      .card-title {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.55rem;
+        color: var(--vi-text-0);
+        font-size: 1rem;
+        font-weight: 600;
+      }
+      .card-title-ico {
+        display: inline-flex;
+        width: 1.7rem;
+        height: 1.7rem;
+        align-items: center;
+        justify-content: center;
+        border-radius: 0.55rem;
+        background: rgba(34, 211, 238, 0.1);
+        color: rgba(165, 243, 252, 0.95);
+        border: 1px solid rgba(34, 211, 238, 0.22);
+      }
+      .card-sub {
+        color: var(--vi-text-2);
+        font-size: 0.78rem;
+      }
+
+      /* ===== URL bar ===== */
+      .url-bar {
+        display: flex;
+        flex-direction: column;
+        gap: 0.55rem;
+        padding: 0.85rem;
+        border-radius: var(--vi-radius);
+        border: 1px solid rgba(96, 165, 250, 0.28);
+        background: linear-gradient(
+          140deg,
+          rgba(96, 165, 250, 0.1),
+          rgba(34, 211, 238, 0.06)
+        );
+      }
+      .url-bar-title {
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        font-size: 0.78rem;
+        font-weight: 600;
+        color: rgba(186, 230, 253, 0.95);
+      }
+      .url-bar-row {
+        display: flex;
+        gap: 0.5rem;
+        flex-wrap: wrap;
+      }
+      .input,
+      .select {
+        flex: 1;
+        min-width: 200px;
+        padding: 0.55rem 0.75rem;
+        font-size: 0.86rem;
+        color: var(--vi-text-0);
+        border: 1px solid var(--vi-border);
+        background: rgba(7, 9, 14, 0.7);
+        border-radius: 0.55rem;
+        font-family: inherit;
+      }
+
+      /* ===== Drop zone ===== */
+      .drop {
+        border: 1px dashed var(--vi-border-strong);
+        border-radius: var(--vi-radius);
+        padding: 1.6rem 1rem;
+        text-align: center;
+        background: radial-gradient(
+            600px 120px at 50% 0%,
+            rgba(34, 211, 238, 0.06),
+            transparent 70%
+          ),
+          rgba(255, 255, 255, 0.015);
+      }
+      .drop-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 3rem;
+        height: 3rem;
+        border-radius: 1rem;
+        color: rgba(186, 230, 253, 0.95);
+        background: rgba(34, 211, 238, 0.08);
+        border: 1px solid rgba(34, 211, 238, 0.24);
+        margin-bottom: 0.75rem;
+      }
+      .drop-title {
+        color: var(--vi-text-0);
+        font-weight: 600;
+        font-size: 0.95rem;
+      }
+      .drop-hint {
+        color: var(--vi-text-3);
+        font-size: 0.75rem;
+        margin-top: 0.35rem;
+      }
+
+      /* ===== KV grid ===== */
+      .kv-grid {
+        display: grid;
+        gap: 0.55rem;
+        grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+      }
+      .kv-cell {
+        padding: 0.7rem 0.78rem;
+        border-radius: 0.6rem;
+        border: 1px solid var(--vi-border);
+        background: rgba(255, 255, 255, 0.025);
+      }
+      .kv-label {
+        font-size: 0.7rem;
+        color: var(--vi-text-3);
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+      }
+      .kv-value {
+        margin-top: 0.32rem;
+        color: var(--vi-text-0);
+        font-size: 0.9rem;
+        font-weight: 600;
+      }
+      .kv-help {
+        margin: 0.35rem 0 0;
+        color: var(--vi-text-3);
+        font-size: 0.74rem;
+      }
+
+      /* ===== Status pills ===== */
+      .status {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.32rem;
+        padding: 0.18rem 0.55rem;
+        border-radius: 999px;
+        font-size: 0.7rem;
+        border: 1px solid var(--vi-border);
+        color: var(--vi-text-2);
+        background: rgba(255, 255, 255, 0.03);
+      }
+      .status--ok {
+        color: #a7f3d0;
+        border-color: rgba(16, 185, 129, 0.4);
+        background: rgba(16, 185, 129, 0.12);
+      }
+      .status--fail {
+        color: #fecdd3;
+        border-color: rgba(244, 63, 94, 0.4);
+        background: rgba(244, 63, 94, 0.12);
+      }
+      .status--run {
+        color: #bae6fd;
+        border-color: rgba(59, 130, 246, 0.4);
+        background: rgba(59, 130, 246, 0.14);
+      }
+      .status-dot {
+        width: 0.45rem;
+        height: 0.45rem;
+        border-radius: 999px;
+        background: currentColor;
+      }
+
+      /* ===== File list ===== */
+      .files {
+        display: grid;
+        gap: 0.5rem;
+      }
+      .file-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.6rem;
+        padding: 0.6rem 0.7rem;
+        border-radius: 0.6rem;
+        border: 1px solid var(--vi-border);
+        background: rgba(255, 255, 255, 0.018);
+      }
+      .file-row--ok {
+        border-color: rgba(16, 185, 129, 0.32);
+        background: rgba(16, 185, 129, 0.06);
+      }
+      .file-row--run {
+        border-color: rgba(59, 130, 246, 0.32);
+        background: rgba(59, 130, 246, 0.06);
+      }
+      .file-meta {
+        display: flex;
+        gap: 0.6rem;
+        align-items: flex-start;
+        min-width: 0;
+        flex: 1;
+      }
+      .file-meta-icon {
+        width: 1.05rem;
+        height: 1.05rem;
+        margin-top: 0.18rem;
+        flex-shrink: 0;
+        color: var(--vi-text-2);
+      }
+      .file-row--ok .file-meta-icon { color: #6ee7b7; }
+      .file-row--run .file-meta-icon { color: #93c5fd; }
+      .file-name {
+        font-size: 0.86rem;
+        color: var(--vi-text-0);
+        font-weight: 500;
+        margin: 0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .file-info {
+        font-size: 0.74rem;
+        color: var(--vi-text-3);
+        margin: 0.18rem 0 0;
+      }
+
+      /* ===== CTA button area ===== */
+      .cta-row {
+        margin-top: 0.5rem;
+        display: flex;
+        gap: 0.6rem;
+      }
+      .cta-row .btn--primary {
+        flex: 1;
+        padding: 0.85rem;
+        font-size: 0.95rem;
+        border-radius: 0.85rem;
+      }
+
+      /* ===== Pipeline ===== */
+      .pipeline-wrap {
+        position: relative;
+      }
+      /* Animated rail layer behind the cards */
+      .pipeline-rail {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 0;
+        opacity: 0.85;
+      }
+      .pipeline-rail svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+      .pipeline {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        gap: 1rem 1.1rem;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+      }
+      @media (max-width: 1100px) {
+        .pipeline { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+      }
+      @media (max-width: 820px) {
+        .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+      @media (max-width: 520px) {
+        .pipeline { grid-template-columns: 1fr; }
+      }
+      .step {
+        position: relative;
+        padding: 1.1rem 1.15rem 1.2rem;
+        border-radius: var(--vi-radius-lg);
+        border: 1px solid var(--vi-border);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
+          rgba(12, 14, 20, 0.7);
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+        overflow: hidden;
+        transition:
+          transform 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+          border-color 0.28s ease,
+          box-shadow 0.28s ease;
+      }
+      .step::before {
+        /* gradient border highlight on hover */
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        padding: 1px;
+        background: linear-gradient(
+          135deg,
+          rgba(34, 211, 238, 0.45),
+          rgba(96, 165, 250, 0.35) 50%,
+          rgba(167, 139, 250, 0.32)
+        );
+        -webkit-mask:
+          linear-gradient(#000 0 0) content-box,
+          linear-gradient(#000 0 0);
+        mask:
+          linear-gradient(#000 0 0) content-box,
+          linear-gradient(#000 0 0);
+        -webkit-mask-composite: xor;
+        mask-composite: exclude;
+        opacity: 0;
+        transition: opacity 0.28s ease;
+        pointer-events: none;
+      }
+      .step::after {
+        /* soft top sheen */
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        background: radial-gradient(120% 80% at 50% 0%, rgba(34, 211, 238, 0.1), transparent 55%);
+        opacity: 0.55;
+        pointer-events: none;
+      }
+      .step:hover {
+        transform: translateY(-3px);
+        border-color: rgba(34, 211, 238, 0.4);
+        box-shadow:
+          0 18px 36px -18px rgba(34, 211, 238, 0.45),
+          0 0 0 1px rgba(34, 211, 238, 0.18);
+      }
+      .step:hover::before { opacity: 1; }
+
+      /* connector arrow on the right edge — drawn via ::after on a wrapper to keep markup simple */
+      .step .step-connector {
+        position: absolute;
+        right: -0.9rem;
+        top: 50%;
+        width: 1rem;
+        height: 1rem;
+        transform: translateY(-50%);
+        z-index: 2;
+        pointer-events: none;
+        color: rgba(94, 234, 212, 0.55);
+      }
+      @media (max-width: 1100px) {
+        .step .step-connector { display: none; }
+      }
+      .step .step-connector svg {
+        width: 100%;
+        height: 100%;
+        filter: drop-shadow(0 0 6px rgba(34, 211, 238, 0.45));
+        animation: step-arrow-pulse 2.4s ease-in-out infinite;
+      }
+      @keyframes step-arrow-pulse {
+        0%, 100% { transform: translateX(0); opacity: 0.8; }
+        50%      { transform: translateX(2px); opacity: 1; }
+      }
+
+      .step-head {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        position: relative;
+        z-index: 1;
+      }
+      .step-num {
+        position: relative;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 2.1rem;
+        height: 2.1rem;
+        flex-shrink: 0;
+        border-radius: 0.6rem;
+        font-size: 0.84rem;
+        font-weight: 700;
+        font-variant-numeric: tabular-nums;
+        color: #031016;
+        background: linear-gradient(135deg, #67e8f9, #22d3ee 55%, #60a5fa);
+        box-shadow:
+          0 8px 20px -10px rgba(34, 211, 238, 0.7),
+          inset 0 1px 0 rgba(255, 255, 255, 0.45);
+      }
+      .step-num--final {
+        background: linear-gradient(135deg, #5eead4, #34d399 55%, #22d3ee);
+      }
+      .step-num::after {
+        /* subtle ring */
+        content: "";
+        position: absolute;
+        inset: -3px;
+        border-radius: 0.85rem;
+        border: 1px solid rgba(34, 211, 238, 0.32);
+        opacity: 0;
+        transition: opacity 0.28s ease;
+      }
+      .step:hover .step-num::after { opacity: 1; }
+
+      .step-stage-tag {
+        font-size: 0.66rem;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: rgba(165, 243, 252, 0.85);
+        padding: 0.2rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid rgba(34, 211, 238, 0.28);
+        background: rgba(34, 211, 238, 0.08);
+        font-weight: 600;
+      }
+      .step-stage-tag--final {
+        color: #6ee7b7;
+        border-color: rgba(16, 185, 129, 0.35);
+        background: rgba(16, 185, 129, 0.1);
+      }
+      .step-title {
+        position: relative;
+        z-index: 1;
+        margin: 0.85rem 0 0.4rem;
+        font-size: 1rem;
+        font-weight: 600;
+        letter-spacing: 0.005em;
+        color: var(--vi-text-0);
+      }
+      .step-desc {
+        position: relative;
+        z-index: 1;
+        margin: 0;
+        font-size: 0.84rem;
+        color: var(--vi-text-2);
+        line-height: 1.7;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .step .step-connector svg,
+        .pipeline-rail .pipeline-flow {
+          animation: none !important;
+        }
+      }
+
+      /* ===== Result steps ===== */
+      .result-grid {
+        display: grid;
+        gap: 1.25rem;
+        grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+      }
+      @media (max-width: 960px) {
+        .result-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+      .result-card {
+        padding: 1.1rem;
+        border-radius: var(--vi-radius-lg);
+        border: 1px solid var(--vi-border);
+        background: linear-gradient(180deg, rgba(255,255,255,0.025), rgba(255,255,255,0)),
+          var(--vi-surface);
+        box-shadow: var(--vi-shadow);
+      }
+      .steps-list {
+        display: grid;
+        gap: 0.7rem;
+        max-height: 540px;
+        overflow: auto;
+        padding-right: 0.4rem;
+      }
+      .steps-list::-webkit-scrollbar {
+        width: 8px;
+      }
+      .steps-list::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, rgba(45,212,191,0.4), rgba(96,165,250,0.4));
+        border-radius: 999px;
+      }
+      .step-item {
+        display: grid;
+        grid-template-columns: 132px 1fr;
+        gap: 0.9rem;
+        padding: 0.7rem;
+        border-radius: 0.7rem;
+        border: 1px solid var(--vi-border);
+        background: rgba(255, 255, 255, 0.02);
+        transition: all 0.2s ease;
+      }
+      @media (max-width: 520px) {
+        .step-item {
+          grid-template-columns: 1fr;
+        }
+        .step-thumb {
+          width: 100% !important;
+          aspect-ratio: 16 / 9;
+          height: auto !important;
+        }
+      }
+      .step-item:hover {
+        border-color: rgba(34, 211, 238, 0.4);
+        background: rgba(255, 255, 255, 0.035);
+      }
+      .step-thumb {
+        width: 132px;
+        aspect-ratio: 16 / 9;
+        border-radius: 0.55rem;
+        object-fit: cover;
+        background: #0b0d14;
+        border: 1px solid var(--vi-border);
+        display: block;
+      }
+      .step-meta {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.5rem;
+      }
+      .step-tag {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        padding: 0.18rem 0.55rem;
+        border-radius: 999px;
+        font-size: 0.72rem;
+        color: rgba(186, 230, 253, 0.95);
+        border: 1px solid rgba(34, 211, 238, 0.3);
+        background: rgba(34, 211, 238, 0.08);
+      }
+      .step-time {
+        font-size: 0.74rem;
+        color: var(--vi-text-3);
+        font-variant-numeric: tabular-nums;
+      }
+      .step-h {
+        margin: 0.45rem 0 0.3rem;
+        font-size: 0.94rem;
+        font-weight: 600;
+        color: var(--vi-text-0);
+      }
+      .step-p {
+        margin: 0;
+        font-size: 0.82rem;
+        line-height: 1.65;
+        color: var(--vi-text-2);
+      }
+
+      /* ===== Markdown preview ===== */
+      .md {
+        max-height: 540px;
+        overflow: auto;
+        padding-right: 0.4rem;
+        color: var(--vi-text-1);
+        line-height: 1.78;
+        letter-spacing: 0.003em;
+      }
+      .md::-webkit-scrollbar { width: 8px; }
+      .md::-webkit-scrollbar-thumb {
+        background: linear-gradient(180deg, rgba(45,212,191,0.4), rgba(96,165,250,0.4));
+        border-radius: 999px;
+      }
+      .md h1, .md h2, .md h3, .md h4 {
+        margin-top: 1.15em;
+        margin-bottom: 0.5em;
+        line-height: 1.35;
+        color: var(--vi-text-0);
+      }
+      .md h1 { font-size: 1.18rem; }
+      .md h2 { font-size: 1.08rem; }
+      .md h3 { font-size: 0.98rem; }
+      .md h4 { font-size: 0.92rem; color: rgba(186, 230, 253, 0.95); }
+      .md p { margin: 0.55em 0; color: var(--vi-text-1); }
+      .md ul, .md ol { padding-left: 1.2rem; margin: 0.5em 0 0.7em; }
+      .md li { margin: 0.2em 0; }
+      .md li::marker { color: rgba(94, 234, 212, 0.85); }
+      .md strong { color: var(--vi-text-0); }
+      .md code {
+        font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+        font-size: 0.85em;
+        border: 1px solid var(--vi-border);
+        background: rgba(2, 6, 23, 0.6);
+        color: rgba(186, 230, 253, 0.96);
+        border-radius: 0.34rem;
+        padding: 0.1em 0.4em;
+      }
+      .md blockquote {
+        margin: 0.65em 0;
+        padding: 0.55em 0.78em;
+        border-left: 3px solid rgba(45, 212, 191, 0.55);
+        background: rgba(15, 23, 42, 0.4);
+        color: rgba(203, 213, 225, 0.95);
+        border-radius: 0.4rem;
+      }
+      .md hr {
+        border: 0;
+        border-top: 1px dashed var(--vi-border-strong);
+        margin: 1.4em 0;
+      }
+
+      /* ===== Subtitle workbench ===== */
+      .subtitles {
+        display: grid;
+        gap: 0.45rem;
+        max-height: 280px;
+        overflow: auto;
+        padding-right: 0.4rem;
+      }
+      .subtitles::-webkit-scrollbar { width: 8px; }
+      .subtitles::-webkit-scrollbar-thumb {
+        background: rgba(94, 234, 212, 0.45);
+        border-radius: 999px;
+      }
+      .sub-row {
+        display: flex;
+        gap: 0.7rem;
+        padding: 0.55rem 0.7rem;
+        border-radius: 0.55rem;
+        border: 1px solid var(--vi-border);
+        background: rgba(255, 255, 255, 0.018);
+        transition: all 0.18s ease;
+        cursor: pointer;
+      }
+      .sub-row:hover {
+        border-color: rgba(34, 211, 238, 0.45);
+        background: rgba(34, 211, 238, 0.06);
+      }
+      .sub-time {
+        flex-shrink: 0;
+        font-family: "JetBrains Mono", "Fira Code", monospace;
+        font-size: 0.74rem;
+        color: rgba(165, 243, 252, 0.95);
+        min-width: 100px;
+      }
+      .sub-text {
+        font-size: 0.82rem;
+        color: var(--vi-text-1);
+        margin: 0;
+      }
+
+      /* ===== Capabilities (3x3 matrix with animated grid background) ===== */
+      .caps-wrap {
+        position: relative;
+        isolation: isolate;
+      }
+      .caps-bg {
+        position: absolute;
+        inset: -1.5rem;
+        z-index: 0;
+        pointer-events: none;
+        background-image:
+          linear-gradient(rgba(34, 211, 238, 0.06) 1px, transparent 1px),
+          linear-gradient(90deg, rgba(34, 211, 238, 0.06) 1px, transparent 1px);
+        background-size: 56px 56px;
+        mask-image: radial-gradient(ellipse 80% 70% at 50% 50%, #000 35%, transparent 80%);
+        -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 50%, #000 35%, transparent 80%);
+      }
+      .caps-bg::after {
+        /* slow drift highlight */
+        content: "";
+        position: absolute;
+        inset: 0;
+        background:
+          radial-gradient(380px 220px at 18% 22%, rgba(34, 211, 238, 0.18), transparent 65%),
+          radial-gradient(380px 220px at 82% 78%, rgba(96, 165, 250, 0.16), transparent 65%);
+        animation: caps-bg-drift 18s ease-in-out infinite alternate;
+      }
+      @keyframes caps-bg-drift {
+        0%   { transform: translate(0, 0); opacity: 0.85; }
+        100% { transform: translate(30px, -20px); opacity: 1; }
+      }
+      .caps {
+        position: relative;
+        z-index: 1;
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      @media (max-width: 1100px) {
+        .caps { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+      @media (max-width: 640px) {
+        .caps { grid-template-columns: 1fr; }
+      }
+      .cap {
+        position: relative;
+        padding: 1.5rem 1.5rem 1.55rem;
+        border-radius: var(--vi-radius-lg);
+        border: 1px solid var(--vi-border);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
+          rgba(12, 14, 20, 0.65);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        overflow: hidden;
+        isolation: isolate;
+        transition:
+          transform 0.32s cubic-bezier(0.22, 1, 0.36, 1),
+          border-color 0.32s ease,
+          box-shadow 0.32s ease;
+      }
+      /* shimmering gradient border on hover */
+      .cap::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        padding: 1px;
+        background: conic-gradient(
+          from 180deg,
+          rgba(34, 211, 238, 0.55),
+          rgba(96, 165, 250, 0.45),
+          rgba(167, 139, 250, 0.4),
+          rgba(45, 212, 191, 0.5),
+          rgba(34, 211, 238, 0.55)
+        );
+        -webkit-mask:
+          linear-gradient(#000 0 0) content-box,
+          linear-gradient(#000 0 0);
+        mask:
+          linear-gradient(#000 0 0) content-box,
+          linear-gradient(#000 0 0);
+        -webkit-mask-composite: xor;
+        mask-composite: exclude;
+        opacity: 0;
+        transition: opacity 0.32s ease;
+        animation: cap-border-spin 6s linear infinite;
+        pointer-events: none;
+      }
+      @keyframes cap-border-spin {
+        to { transform: rotate(360deg); }
+      }
+      /* spotlight that follows cursor (CSS variables driven by JS) */
+      .cap::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        background: radial-gradient(
+          200px 200px at var(--mx, 50%) var(--my, 50%),
+          rgba(34, 211, 238, 0.16),
+          transparent 65%
+        );
+        opacity: 0;
+        transition: opacity 0.3s ease;
+        pointer-events: none;
+        z-index: 0;
+      }
+      .cap:hover {
+        transform: translateY(-4px);
+        border-color: rgba(34, 211, 238, 0.4);
+        box-shadow:
+          0 22px 44px -22px rgba(34, 211, 238, 0.5),
+          0 0 0 1px rgba(34, 211, 238, 0.2);
+      }
+      .cap:hover::before { opacity: 1; }
+      .cap:hover::after { opacity: 1; }
+
+      .cap-icon {
+        position: relative;
+        z-index: 1;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 2.6rem;
+        height: 2.6rem;
+        border-radius: 0.75rem;
+        font-size: 1.1rem;
+        margin-bottom: 0.95rem;
+        background: linear-gradient(135deg, rgba(34, 211, 238, 0.18), rgba(96, 165, 250, 0.12));
+        border: 1px solid rgba(34, 211, 238, 0.32);
+        color: rgba(186, 230, 253, 0.98);
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.1),
+          0 8px 18px -10px rgba(34, 211, 238, 0.55);
+        transition: transform 0.32s cubic-bezier(0.22, 1, 0.36, 1);
+      }
+      .cap-icon::before {
+        /* faint glowing aura */
+        content: "";
+        position: absolute;
+        inset: -6px;
+        border-radius: 1rem;
+        background: radial-gradient(circle, rgba(34, 211, 238, 0.32), transparent 70%);
+        opacity: 0;
+        transition: opacity 0.32s ease;
+        pointer-events: none;
+        z-index: -1;
+      }
+      .cap:hover .cap-icon {
+        transform: translateY(-2px) rotate(-4deg) scale(1.04);
+      }
+      .cap:hover .cap-icon::before { opacity: 1; }
+
+      .cap-tag {
+        position: absolute;
+        top: 1.1rem;
+        right: 1.1rem;
+        z-index: 1;
+        font-size: 0.66rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        padding: 0.18rem 0.55rem;
+        border-radius: 999px;
+        color: rgba(165, 243, 252, 0.9);
+        border: 1px solid rgba(34, 211, 238, 0.28);
+        background: rgba(34, 211, 238, 0.06);
+        font-weight: 600;
+      }
+      .cap h3 {
+        position: relative;
+        z-index: 1;
+        margin: 0 0 0.45rem;
+        font-size: 1.05rem;
+        font-weight: 600;
+        color: var(--vi-text-0);
+        letter-spacing: 0.005em;
+      }
+      .cap p {
+        position: relative;
+        z-index: 1;
+        margin: 0 0 1rem;
+        font-size: 0.86rem;
+        line-height: 1.72;
+        color: var(--vi-text-2);
+      }
+      .cap-meta {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin-top: auto;
+        padding-top: 0.7rem;
+        border-top: 1px dashed var(--vi-border);
+      }
+      .cap-meta span {
+        font-size: 0.7rem;
+        padding: 0.18rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid var(--vi-border);
+        color: var(--vi-text-2);
+        background: rgba(255, 255, 255, 0.025);
+      }
+      .cap-meta span.accent {
+        color: rgba(165, 243, 252, 0.95);
+        border-color: rgba(34, 211, 238, 0.32);
+        background: rgba(34, 211, 238, 0.08);
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .caps-bg::after,
+        .cap::before {
+          animation: none !important;
+        }
+      }
+
+      /* ===== Tech stack (3x2 layered card matrix) ===== */
+      .tech-grid {
+        display: grid;
+        gap: 1.05rem;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+      }
+      @media (max-width: 1100px) {
+        .tech-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      }
+      @media (max-width: 640px) {
+        .tech-grid { grid-template-columns: 1fr; }
+      }
+      .tech-card {
+        position: relative;
+        padding: 1.4rem 1.45rem 1.45rem;
+        border-radius: var(--vi-radius-lg);
+        border: 1px solid var(--vi-border);
+        background:
+          linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
+          rgba(12, 14, 20, 0.7);
+        backdrop-filter: blur(8px);
+        -webkit-backdrop-filter: blur(8px);
+        overflow: hidden;
+        isolation: isolate;
+        transition:
+          transform 0.32s cubic-bezier(0.22, 1, 0.36, 1),
+          border-color 0.32s ease,
+          box-shadow 0.32s ease;
+      }
+      /* top accent stripe (per-card colorable via --tc-from / --tc-to) */
+      .tech-card::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        left: 0;
+        right: 0;
+        height: 3px;
+        background: linear-gradient(
+          90deg,
+          var(--tc-from, #22d3ee),
+          var(--tc-to, #60a5fa)
+        );
+        opacity: 0.85;
+        z-index: 1;
+      }
+      /* moving sheen */
+      .tech-card::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+          120deg,
+          transparent 35%,
+          rgba(186, 230, 253, 0.08) 50%,
+          transparent 65%
+        );
+        transform: translateX(-100%);
+        transition: transform 0.8s ease;
+        pointer-events: none;
+        z-index: 0;
+      }
+      .tech-card:hover {
+        transform: translateY(-3px);
+        border-color: rgba(34, 211, 238, 0.4);
+        box-shadow:
+          0 22px 44px -22px rgba(34, 211, 238, 0.45),
+          0 0 0 1px rgba(34, 211, 238, 0.18);
+      }
+      .tech-card:hover::after {
+        transform: translateX(100%);
+      }
+      .tech-head {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.6rem;
+        margin-bottom: 0.45rem;
+      }
+      .tech-head-left {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.7rem;
+      }
+      .tech-emoji {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 2.4rem;
+        height: 2.4rem;
+        flex-shrink: 0;
+        font-size: 1.15rem;
+        border-radius: 0.7rem;
+        background: linear-gradient(
+          135deg,
+          color-mix(in srgb, var(--tc-from, #22d3ee) 22%, transparent),
+          color-mix(in srgb, var(--tc-to, #60a5fa) 18%, transparent)
+        );
+        border: 1px solid color-mix(in srgb, var(--tc-from, #22d3ee) 38%, transparent);
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.1);
+      }
+      .tech-card h3 {
+        margin: 0;
+        font-size: 0.82rem;
+        color: rgba(186, 230, 253, 0.96);
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        font-weight: 700;
+      }
+      .tech-card-name {
+        font-size: 1rem;
+        color: var(--vi-text-0);
+        margin: 0.1rem 0 0;
+        font-weight: 600;
+        letter-spacing: 0.005em;
+      }
+      .tech-count {
+        font-size: 0.7rem;
+        color: var(--vi-text-3);
+        padding: 0.18rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid var(--vi-border);
+        background: rgba(255, 255, 255, 0.025);
+        font-variant-numeric: tabular-nums;
+      }
+      .tech-summary {
+        position: relative;
+        z-index: 1;
+        margin: 0.5rem 0 0.85rem;
+        font-size: 0.82rem;
+        line-height: 1.7;
+        color: var(--vi-text-2);
+      }
+      .tech-list {
+        position: relative;
+        z-index: 1;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.4rem;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+      .tech-list li {
+        font-size: 0.76rem;
+        padding: 0.3rem 0.65rem;
+        border-radius: 999px;
+        border: 1px solid var(--vi-border);
+        color: var(--vi-text-1);
+        background: rgba(255, 255, 255, 0.028);
+        transition: border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
+      }
+      .tech-list li:hover {
+        border-color: var(--vi-border-strong);
+        transform: translateY(-1px);
+      }
+      .tech-list li.accent {
+        color: rgba(165, 243, 252, 0.96);
+        border-color: color-mix(in srgb, var(--tc-from, #22d3ee) 45%, transparent);
+        background: color-mix(in srgb, var(--tc-from, #22d3ee) 12%, transparent);
+      }
+      /* per-card color tokens */
+      .tech-card.tc-frontend  { --tc-from: #22d3ee; --tc-to: #60a5fa; }
+      .tech-card.tc-backend   { --tc-from: #34d399; --tc-to: #22d3ee; }
+      .tech-card.tc-video     { --tc-from: #f472b6; --tc-to: #60a5fa; }
+      .tech-card.tc-doc       { --tc-from: #fbbf24; --tc-to: #f472b6; }
+      .tech-card.tc-url       { --tc-from: #a78bfa; --tc-to: #22d3ee; }
+      .tech-card.tc-llm       { --tc-from: #60a5fa; --tc-to: #a78bfa; }
+      /* color-mix() polyfill fallback (browsers without color-mix) */
+      @supports not (background: color-mix(in srgb, red, blue)) {
+        .tech-list li.accent {
+          background: rgba(34, 211, 238, 0.1);
+          border-color: rgba(34, 211, 238, 0.45);
+        }
+        .tech-emoji {
+          background: rgba(34, 211, 238, 0.12);
+          border-color: rgba(34, 211, 238, 0.32);
+        }
+      }
+
+      /* ===== Engineering subsection ===== */
+      .engr-head {
+        text-align: center;
+        margin: 4rem 0 2rem;
+      }
+      .engr-head h3 {
+        margin: 0.4rem 0 0.5rem;
+        font-size: clamp(1.3rem, 2vw + 0.4rem, 1.7rem);
+        font-weight: 700;
+        color: var(--vi-text-0);
+      }
+      .engr-head p {
+        max-width: 44rem;
+        margin: 0 auto;
+        color: var(--vi-text-2);
+        font-size: 0.92rem;
+      }
+      .engr-grid {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      }
+      .engr-card {
+        position: relative;
+        padding: 1.25rem 1.3rem 1.35rem;
+        border-radius: var(--vi-radius-lg);
+        border: 1px solid var(--vi-border);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0)),
+          rgba(12, 14, 20, 0.55);
+        overflow: hidden;
+        transition: all 0.24s ease;
+      }
+      .engr-card::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background: linear-gradient(
+          120deg,
+          rgba(34, 211, 238, 0.045),
+          transparent 30%,
+          rgba(96, 165, 250, 0.04) 70%
+        );
+        opacity: 0;
+        transition: opacity 0.24s ease;
+      }
+      .engr-card:hover {
+        transform: translateY(-3px);
+        border-color: rgba(34, 211, 238, 0.35);
+        box-shadow: 0 18px 36px -18px rgba(34, 211, 238, 0.4);
+      }
+      .engr-card:hover::before { opacity: 1; }
+      .engr-head-row {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        margin-bottom: 0.7rem;
+        position: relative;
+      }
+      .engr-icon {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 2.2rem;
+        height: 2.2rem;
+        border-radius: 0.6rem;
+        font-size: 1.05rem;
+        background: rgba(34, 211, 238, 0.12);
+        color: rgba(186, 230, 253, 0.96);
+        border: 1px solid rgba(34, 211, 238, 0.28);
+        flex-shrink: 0;
+      }
+      .engr-title {
+        font-size: 0.98rem;
+        font-weight: 600;
+        color: var(--vi-text-0);
+        letter-spacing: 0.01em;
+      }
+      .engr-card ul {
+        position: relative;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+        display: grid;
+        gap: 0.55rem;
+      }
+      .engr-card li {
+        position: relative;
+        padding-left: 1.1rem;
+        font-size: 0.84rem;
+        line-height: 1.65;
+        color: var(--vi-text-1);
+      }
+      .engr-card li::before {
+        content: "";
+        position: absolute;
+        left: 0.18rem;
+        top: 0.7rem;
+        width: 0.4rem;
+        height: 0.4rem;
+        border-radius: 999px;
+        background: linear-gradient(135deg, #67e8f9, #60a5fa);
+        box-shadow: 0 0 8px rgba(34, 211, 238, 0.45);
+      }
+      .engr-card li code,
+      .engr-card li b {
+        font-family: "JetBrains Mono", "Fira Code", "Consolas", monospace;
+        font-size: 0.78em;
+        color: rgba(186, 230, 253, 0.96);
+        background: rgba(2, 6, 23, 0.55);
+        border: 1px solid var(--vi-border);
+        border-radius: 0.32rem;
+        padding: 0.06em 0.36em;
+        font-weight: 500;
+      }
+      .engr-card li b {
+        background: rgba(34, 211, 238, 0.08);
+        border-color: rgba(34, 211, 238, 0.3);
+        color: rgba(165, 243, 252, 0.96);
+      }
+      .engr-tag-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin-top: 0.85rem;
+        padding-top: 0.75rem;
+        border-top: 1px dashed var(--vi-border);
+      }
+      .engr-tag {
+        font-size: 0.7rem;
+        padding: 0.18rem 0.55rem;
+        border-radius: 999px;
+        border: 1px solid var(--vi-border);
+        color: var(--vi-text-2);
+        background: rgba(255, 255, 255, 0.02);
+      }
+      .engr-tag.accent {
+        color: rgba(165, 243, 252, 0.96);
+        border-color: rgba(34, 211, 238, 0.32);
+        background: rgba(34, 211, 238, 0.08);
+      }
+      .engr-tag.warn {
+        color: #fde68a;
+        border-color: rgba(251, 191, 36, 0.4);
+        background: rgba(251, 191, 36, 0.1);
+      }
+      .engr-tag.success {
+        color: #a7f3d0;
+        border-color: rgba(16, 185, 129, 0.4);
+        background: rgba(16, 185, 129, 0.1);
+      }
+
+      /* ===== Stats ===== */
+      .stats {
+        display: grid;
+        gap: 1rem;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      }
+      .stat {
+        text-align: center;
+        padding: 1.4rem 1rem;
+        border-radius: var(--vi-radius-lg);
+        border: 1px solid var(--vi-border);
+        background: linear-gradient(180deg, rgba(34, 211, 238, 0.04), rgba(96, 165, 250, 0.02));
+      }
+      .stat-num {
+        font-size: 2rem;
+        font-weight: 700;
+        background: linear-gradient(120deg, #22d3ee, #60a5fa);
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        letter-spacing: -0.01em;
+      }
+      .stat-label {
+        margin-top: 0.25rem;
+        color: var(--vi-text-2);
+        font-size: 0.84rem;
+      }
+
+      /* ===== Footer ===== */
+      footer {
+        padding: 2.5rem 0;
+        border-top: 1px solid var(--vi-border);
+        text-align: center;
+        color: var(--vi-text-3);
+        font-size: 0.82rem;
+      }
+      footer .brand {
+        justify-content: center;
+        margin-bottom: 0.6rem;
+      }
+
+      /* ===== Animations ===== */
+      .fade-up {
+        opacity: 0;
+        transform: translateY(18px);
+        animation: fade-up 0.8s cubic-bezier(0.22, 1, 0.36, 1) both;
+      }
+      .fade-up.delay-1 { animation-delay: 0.08s; }
+      .fade-up.delay-2 { animation-delay: 0.16s; }
+      .fade-up.delay-3 { animation-delay: 0.24s; }
+      @keyframes fade-up {
+        to { opacity: 1; transform: translateY(0); }
+      }
+
+      .pulse {
+        position: relative;
+      }
+      .pulse::after {
+        content: "";
+        position: absolute;
+        inset: 0;
+        border-radius: inherit;
+        box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.5);
+        animation: pulse 2.4s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+      }
+      @keyframes pulse {
+        0% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0.45); }
+        70% { box-shadow: 0 0 0 14px rgba(34, 211, 238, 0); }
+        100% { box-shadow: 0 0 0 0 rgba(34, 211, 238, 0); }
+      }
+
+      /* ===== Progress dialog ===== */
+      .progress-card {
+        max-width: 30rem;
+        margin: 1.5rem auto 0;
+        padding: 1.2rem 1.3rem;
+        border-radius: var(--vi-radius-lg);
+        border: 1px solid var(--vi-border-strong);
+        background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0)),
+          var(--vi-surface-solid);
+        box-shadow: var(--vi-shadow-lg);
+      }
+      .progress-track {
+        position: relative;
+        height: 0.55rem;
+        margin: 0.85rem 0 0.6rem;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.05);
+        overflow: hidden;
+      }
+      .progress-bar {
+        height: 100%;
+        width: 72%;
+        background: linear-gradient(90deg, #22d3ee, #60a5fa);
+        border-radius: 999px;
+        box-shadow: 0 0 14px var(--vi-accent-ring);
+        animation: bar-flow 2.6s ease-in-out infinite;
+      }
+      @keyframes bar-flow {
+        0%, 100% { width: 72%; }
+        50% { width: 78%; }
+      }
+
+      /* ===== Misc ===== */
+      .divider {
+        height: 1px;
+        background: linear-gradient(
+          90deg,
+          transparent,
+          var(--vi-border-strong),
+          transparent
+        );
+        margin: 1.5rem 0;
+      }
+
+      /* Inline icon helper using box drawing not needed: we'll use SVG inline */
+      .ico { width: 1rem; height: 1rem; flex-shrink: 0; }
+      .ico-sm { width: 0.85rem; height: 0.85rem; }
+
+      /* Layout for two-col mockup top region */
+      @media (min-width: 980px) {
+        .ws-body--row {
+          grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+          align-items: start;
+        }
+      }
+      .ws-grid {
+        display: grid;
+        gap: 1.1rem;
+      }
+      @media (min-width: 980px) {
+        .ws-grid--two {
+          grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+        }
+      }
+    </style>
+  </head>
+
+  <body>
+    <!-- Top Nav -->
+    <nav class="nav">
+      <div class="nav-inner">
+        <a href="#hero" class="brand">
+          <span class="brand-logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          </span>
+          <span>VIDEO INSIGHTS</span>
+        </a>
+        <div class="nav-links">
+          <a href="#capabilities" class="nav-pill">能力</a>
+          <a href="#workspace" class="nav-pill">工作台</a>
+          <a href="#pipeline" class="nav-pill">处理链路</a>
+          <a href="#result" class="nav-pill">分析结果</a>
+          <a href="#tech" class="nav-pill nav-pill--accent">技术栈与工程化</a>
+        </div>
+      </div>
+    </nav>
+
+    <!-- Hero -->
+    <section id="hero" class="hero">
+      <div class="container">
+        <span class="eyebrow fade-up">AI · 视频理解工作台</span>
+        <h1 class="fade-up delay-1">
+          视频转文档，<br />
+          <span class="accent-text">不止提取，更是理解</span>
+        </h1>
+        <p class="lead fade-up delay-2">
+          AI 自动分析视频内容，抓取关键截图，拆解核心步骤，输出结构清晰、重点明确的总结文档。<br />
+          让信息沉淀更高效 — Turn insights into docs.
+        </p>
+        <div class="hero-chips fade-up delay-3">
+          <span class="chip"><span class="chip-dot"></span>Whisper ASR</span>
+          <span class="chip"><span class="chip-dot"></span>批量处理</span>
+          <span class="chip"><span class="chip-dot"></span>Markdown · PDF 导出</span>
+          <span class="chip"><span class="chip-dot"></span>链接直达分析</span>
+          <span class="chip"><span class="chip-dot"></span>多模型路由</span>
+          <span class="chip"><span class="chip-dot"></span>四层风控</span>
+        </div>
+        <div class="hero-cta fade-up delay-3">
+          <a href="#workspace" class="btn btn--primary">
+            <svg viewBox="0 0 24 24" class="ico" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+            查看工作台预览
+          </a>
+          <a href="#result" class="btn">查看分析效果</a>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats" style="margin-top: 3rem;">
+          <div class="stat fade-up">
+            <div class="stat-num">8+</div>
+            <div class="stat-label">支持视频格式</div>
+          </div>
+          <div class="stat fade-up delay-1">
+            <div class="stat-num">4</div>
+            <div class="stat-label">LLM Provider 路由</div>
+          </div>
+          <div class="stat fade-up delay-2">
+            <div class="stat-num">3</div>
+            <div class="stat-label">导出格式 · MD / PDF / SRT</div>
+          </div>
+          <div class="stat fade-up delay-3">
+            <div class="stat-num">500MB</div>
+            <div class="stat-label">单文件上传上限</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Capabilities -->
+    <section id="capabilities">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-tag">CORE CAPABILITIES</span>
+          <h2 class="section-title">围绕"教程视频与操作录屏"打造</h2>
+          <p class="section-sub">
+            从上传、风控、分析到导出，每一步都为长流程视频做了优化。
+          </p>
+        </div>
+        <div class="caps-wrap">
+          <div class="caps-bg" aria-hidden="true"></div>
+          <div class="caps">
+            <div class="cap fade-up">
+              <span class="cap-tag">输入</span>
+              <div class="cap-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              </div>
+              <h3>多通道上传</h3>
+              <p>本地文件、批量、分片续传与远程链接四路并行；大文件 8MB 一片，断网刷新都能从断点继续传。</p>
+              <div class="cap-meta">
+                <span class="accent">断点续传</span>
+                <span>批量</span>
+                <span>URL 直达</span>
+              </div>
+            </div>
+
+            <div class="cap fade-up delay-1">
+              <span class="cap-tag">安全</span>
+              <div class="cap-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              </div>
+              <h3>四层内容风控</h3>
+              <p>指纹黑名单 → 视觉抽帧 → 备用视觉模型 → 关键词词库，逐层校验。上传前与分析前各跑一次，命中即隔离。</p>
+              <div class="cap-meta">
+                <span class="accent">四层校验</span>
+                <span>结果缓存</span>
+                <span>自动隔离</span>
+              </div>
+            </div>
+
+            <div class="cap fade-up delay-2">
+              <span class="cap-tag">分析</span>
+              <div class="cap-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+              </div>
+              <h3>结构化步骤输出</h3>
+              <p>标准步骤识别失败会自动退到候选步骤，再退到时间线摘要；置信度低的步骤会再让模型"看图说话"补强。</p>
+              <div class="cap-meta">
+                <span class="accent">三级降级</span>
+                <span>看图增强</span>
+                <span>质量打分</span>
+              </div>
+            </div>
+
+            <div class="cap fade-up">
+              <span class="cap-tag">字幕</span>
+              <div class="cap-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+              </div>
+              <h3>字幕工作台</h3>
+              <p>Whisper 常驻 + CLI 兜底，一键导出 SRT / VTT / TXT；可关键词检索字幕，点哪行视频跳哪行。</p>
+              <div class="cap-meta">
+                <span class="accent">SRT · VTT · TXT</span>
+                <span>关键词检索</span>
+                <span>点选跳转</span>
+              </div>
+            </div>
+
+            <div class="cap fade-up delay-1">
+              <span class="cap-tag">导出</span>
+              <div class="cap-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+              </div>
+              <h3>Markdown · PDF 双导出</h3>
+              <p>AI 输出经过安全清洗再渲染；PDF 自动适配 Windows / Linux 中文字体；结果包内含截图、字幕、原视频与步骤数据。</p>
+              <div class="cap-meta">
+                <span class="accent">Markdown</span>
+                <span class="accent">PDF</span>
+                <span>步骤 JSON</span>
+              </div>
+            </div>
+
+            <div class="cap fade-up delay-2">
+              <span class="cap-tag">模型</span>
+              <div class="cap-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15 15 0 0 1 4 10 15 15 0 0 1-4 10 15 15 0 0 1-4-10 15 15 0 0 1 4-10z"/></svg>
+              </div>
+              <h3>多模型平台路由</h3>
+              <p>同一套调用代码自动适配 Ark / OpenAI / DeepSeek / Qwen 等平台；不支持的能力会自动降级到字幕分析路线。</p>
+              <div class="cap-meta">
+                <span class="accent">Ark</span>
+                <span>OpenAI</span>
+                <span>DeepSeek</span>
+                <span>Qwen</span>
+              </div>
+            </div>
+
+            <div class="cap fade-up">
+              <span class="cap-tag">链接</span>
+              <div class="cap-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>
+              </div>
+              <h3>智能 URL 导入</h3>
+              <p>B 站、抖音、小红书有专属解析；通用页面靠浏览器抓取 + 模型识别 + yt-dlp 兜底，多层回退保下载成功率。</p>
+              <div class="cap-meta">
+                <span class="accent">B站 / 抖音 / 小红书</span>
+                <span>反爬兜底</span>
+                <span>Cookie 复用</span>
+              </div>
+            </div>
+
+            <div class="cap fade-up delay-1">
+              <span class="cap-tag">历史</span>
+              <div class="cap-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+              </div>
+              <h3>历史与自动清理</h3>
+              <p>无登录系统也能多人共存：每个浏览器独立隔离历史。后台定时回收：上传 24 小时清，输出与历史 72 小时清。</p>
+              <div class="cap-meta">
+                <span class="accent">无登录隔离</span>
+                <span>定时清理</span>
+                <span>磁盘可控</span>
+              </div>
+            </div>
+
+            <div class="cap fade-up delay-2">
+              <span class="cap-tag">编辑</span>
+              <div class="cap-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+              </div>
+              <h3>步骤可编辑重生成</h3>
+              <p>结果支持拖拽排序、改写、增删步骤。保存后会按你编辑后的版本重新生成 Markdown 与 PDF，文档永远跟编辑一致。</p>
+              <div class="cap-meta">
+                <span class="accent">拖拽排序</span>
+                <span>一键重生成</span>
+                <span>所改即所得</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Workspace mockup -->
+    <section id="workspace">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-tag">WORKSPACE PREVIEW</span>
+          <h2 class="section-title">前端工作台 · 实际界面预览</h2>
+          <p class="section-sub">
+            React 19 + TypeScript + Vite + Tailwind 4 构建。深色科技感视觉，支持移动性能模式自动降级。
+          </p>
+        </div>
+
+        <div class="workspace fade-up">
+          <div class="ws-titlebar">
+            <div class="ws-traffic"><span></span><span></span><span></span></div>
+            <div class="ws-url">https://localhost — Video Insights · AI 视频理解工作台</div>
+            <div style="width: 60px"></div>
+          </div>
+          <div class="ws-body">
+            <!-- Mocked nav -->
+            <div class="ws-mock-nav">
+              <span class="ws-mock-nav-brand">
+                <span class="brand-logo" style="width: 1.6rem; height: 1.6rem; border-radius: 0.45rem;">
+                  <svg viewBox="0 0 24 24" width="11" height="11" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                </span>
+                Video Insights
+              </span>
+              <div class="nav-links">
+                <span class="nav-pill">
+                  <svg viewBox="0 0 24 24" class="ico-sm" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.05a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.05a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+                  设置
+                </span>
+                <span class="nav-pill nav-pill--accent">
+                  <svg viewBox="0 0 24 24" class="ico-sm" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                  历史
+                </span>
+              </div>
+            </div>
+
+            <!-- Hero block -->
+            <div class="ws-hero">
+              <span class="eyebrow">AI · 视频理解工作台</span>
+              <h2 class="ws-hero-title">
+                视频转文档，<span class="accent-text">不止提取，更是理解</span>
+              </h2>
+              <p class="ws-hero-sub">
+                AI 自动分析视频内容，抓取关键截图，拆解核心步骤，输出结构清晰、重点明确的总结文档。
+              </p>
+              <div class="hero-chips" style="margin-top: 1.1rem;">
+                <span class="chip"><span class="chip-dot"></span>Whisper ASR</span>
+                <span class="chip"><span class="chip-dot"></span>批量处理</span>
+                <span class="chip"><span class="chip-dot"></span>Markdown · PDF</span>
+                <span class="chip"><span class="chip-dot"></span>链接直达</span>
+              </div>
+            </div>
+
+            <!-- Two-col layout: upload card + (optional)result -->
+            <div class="ws-grid ws-grid--two">
+              <!-- Upload card -->
+              <div class="panel" style="padding: 1.1rem;">
+                <div class="card-head">
+                  <div class="card-title">
+                    <span class="card-title-ico">
+                      <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+                    </span>
+                    上传视频
+                  </div>
+                  <span class="card-sub">拖拽 · 点击 · 链接 · 批量</span>
+                </div>
+
+                <div class="url-bar" style="margin-bottom: 0.85rem;">
+                  <div class="url-bar-title">
+                    <span aria-hidden="true">🔗</span> 视频链接直达分析
+                  </div>
+                  <div class="url-bar-row">
+                    <input
+                      class="input"
+                      placeholder="粘贴视频链接（http/https）"
+                      value="https://www.bilibili.com/video/BV1xx411c7mD"
+                      readonly
+                    />
+                    <button class="btn" style="font-size: 0.78rem; padding: 0.5rem 0.85rem;">导入链接</button>
+                    <button class="btn btn--primary" style="font-size: 0.78rem; padding: 0.5rem 0.85rem;">链接直达分析</button>
+                  </div>
+                  <p style="margin: 0; color: rgba(186, 230, 253, 0.78); font-size: 0.72rem;">
+                    只需提供链接即可下载并分析；平台播放页链接建议安装 <code style="background: rgba(2,6,23,0.5); padding: 0.05em 0.32em; border-radius: 0.25rem; border: 1px solid var(--vi-border);">yt-dlp</code> 提升兼容性。
+                  </p>
+                </div>
+
+                <div class="drop">
+                  <div class="drop-icon">
+                    <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11v3a2 2 0 0 1-2 2h-7l-3 3-3-3H2v-3"/><path d="M22 6V3a2 2 0 0 0-2-2H2v9h20"/><line x1="12" y1="11" x2="12" y2="17"/><line x1="9" y1="14" x2="15" y2="14"/></svg>
+                  </div>
+                  <p class="drop-title">点击选择 · 或拖拽视频到这里</p>
+                  <p class="drop-hint">支持 MP4 / AVI / MOV / MKV / WMV / FLV / WebM / M4V 等</p>
+                </div>
+
+                <div class="kv-grid" style="margin-top: 0.9rem;">
+                  <div class="kv-cell">
+                    <div class="kv-label">标准推荐</div>
+                    <div class="kv-value">20 分钟 · 250 MB 以内</div>
+                    <p class="kv-help">处理速度与稳定性最佳</p>
+                  </div>
+                  <div class="kv-cell">
+                    <div class="kv-label">长视频模式</div>
+                    <div class="kv-value">自动切片 · 自动压缩</div>
+                    <p class="kv-help">20 分钟 / 250 MB+ 自动进入</p>
+                  </div>
+                  <div class="kv-cell">
+                    <div class="kv-label">超长视频</div>
+                    <div class="kv-value">建议先裁剪</div>
+                    <p class="kv-help">90 分钟+ 请拆分</p>
+                  </div>
+                  <div class="kv-cell">
+                    <div class="kv-label">批量上限</div>
+                    <div class="kv-value">5 个 / 含长视频 ≤ 2</div>
+                    <p class="kv-help">稳定性优先</p>
+                  </div>
+                </div>
+
+                <div class="files" style="margin-top: 0.85rem;">
+                  <div class="file-row file-row--ok">
+                    <div class="file-meta">
+                      <svg class="file-meta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+                      <div style="min-width:0; flex:1;">
+                        <p class="file-name">tutorial_setup_walkthrough.mp4</p>
+                        <p class="file-info">分析完成 · 6 步骤 · 4 张截图 · 字幕 132 行</p>
+                      </div>
+                    </div>
+                    <span class="status status--ok">
+                      <svg viewBox="0 0 24 24" class="ico-sm" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                      成功
+                    </span>
+                  </div>
+                  <div class="file-row file-row--run">
+                    <div class="file-meta">
+                      <svg class="file-meta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+                      <div style="min-width:0; flex:1;">
+                        <p class="file-name">product_demo_release_notes.mp4</p>
+                        <p class="file-info">阶段：视觉增强中 · 进度 64%</p>
+                      </div>
+                    </div>
+                    <span class="status status--run pulse"><span class="status-dot"></span>处理中</span>
+                  </div>
+                  <div class="file-row">
+                    <div class="file-meta">
+                      <svg class="file-meta-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+                      <div style="min-width:0; flex:1;">
+                        <p class="file-name">onboarding_screencast_v3.mov</p>
+                        <p class="file-info">已上传 · 等待批次启动</p>
+                      </div>
+                    </div>
+                    <span class="status">待处理</span>
+                  </div>
+                </div>
+
+                <div class="cta-row">
+                  <button class="btn btn--primary">
+                    <svg viewBox="0 0 24 24" class="ico" fill="currentColor"><path d="M8 5v14l11-7z" /></svg>
+                    开始分析（3 个文件）
+                  </button>
+                </div>
+              </div>
+
+              <!-- Right column: progress & analysis options preview -->
+              <div class="panel" style="padding: 1.1rem;">
+                <div class="card-head">
+                  <div class="card-title">
+                    <span class="card-title-ico">
+                      <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                    </span>
+                    分析进度
+                  </div>
+                  <span class="status status--run">运行中</span>
+                </div>
+
+                <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom: 0.45rem;">
+                  <span style="font-size: 0.84rem; color: var(--vi-text-1); font-weight: 600;">批量分析进行中</span>
+                  <span style="font-size: 0.86rem; color: rgba(165, 243, 252, 0.95); font-weight: 600;">64%</span>
+                </div>
+                <p style="margin: 0; color: var(--vi-text-2); font-size: 0.82rem;">当前阶段：低置信度步骤视觉增强 · 2/3 文件</p>
+                <div class="progress-track" style="margin-top: 0.85rem;">
+                  <div class="progress-bar" style="width: 64%; animation: none;"></div>
+                </div>
+
+                <div class="kv-grid" style="margin-top: 0.85rem;">
+                  <div class="kv-cell">
+                    <div class="kv-label">阶段</div>
+                    <div class="kv-value">vision_enhance</div>
+                    <p class="kv-help">视觉增强标题与描述</p>
+                  </div>
+                  <div class="kv-cell">
+                    <div class="kv-label">已完成</div>
+                    <div class="kv-value" style="color: #6ee7b7;">2 个</div>
+                    <p class="kv-help">输出包就绪可下载</p>
+                  </div>
+                  <div class="kv-cell">
+                    <div class="kv-label">失败</div>
+                    <div class="kv-value" style="color: #fda4af;">0 个</div>
+                    <p class="kv-help">超长视频会自动降级</p>
+                  </div>
+                  <div class="kv-cell">
+                    <div class="kv-label">当前文件</div>
+                    <div class="kv-value" style="font-size: 0.8rem; color: rgba(165, 243, 252, 0.95);">product_demo…</div>
+                    <p class="kv-help">视觉增强 · 第 4/6 步</p>
+                  </div>
+                </div>
+
+                <div class="divider"></div>
+
+                <div class="card-head" style="margin-bottom: 0.7rem;">
+                  <div class="card-title" style="font-size: 0.92rem;">
+                    <span class="card-title-ico">
+                      <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+                    </span>
+                    分析参数
+                  </div>
+                </div>
+                <div class="kv-grid">
+                  <div class="kv-cell">
+                    <div class="kv-label">Provider</div>
+                    <div class="kv-value">Ark · Doubao</div>
+                  </div>
+                  <div class="kv-cell">
+                    <div class="kv-label">Whisper</div>
+                    <div class="kv-value">base</div>
+                  </div>
+                  <div class="kv-cell">
+                    <div class="kv-label">视觉增强</div>
+                    <div class="kv-value">最多 10 次</div>
+                  </div>
+                  <div class="kv-cell">
+                    <div class="kv-label">视频模式</div>
+                    <div class="kv-value">字幕分析</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Pipeline -->
+    <section id="pipeline">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-tag">END-TO-END PIPELINE</span>
+          <h2 class="section-title">从上传到导出 · 七步法处理链路</h2>
+          <p class="section-sub">
+            每一步都做了失败兜底与降级方案；长视频自动压缩切片，违规内容上传前就被拦下，最终交付清晰的文档与历史回看。
+          </p>
+        </div>
+
+        <div class="pipeline-wrap">
+          <!-- Animated rail behind cards -->
+          <div class="pipeline-rail" aria-hidden="true">
+            <svg viewBox="0 0 1200 360" preserveAspectRatio="none">
+              <defs>
+                <linearGradient id="pipeRail" x1="0" x2="1" y1="0" y2="0">
+                  <stop offset="0" stop-color="rgba(34,211,238,0)"/>
+                  <stop offset=".3" stop-color="rgba(34,211,238,0.35)"/>
+                  <stop offset=".7" stop-color="rgba(96,165,250,0.35)"/>
+                  <stop offset="1" stop-color="rgba(96,165,250,0)"/>
+                </linearGradient>
+                <linearGradient id="pipeFlow" x1="0" x2="1" y1="0" y2="0">
+                  <stop offset="0" stop-color="rgba(255,255,255,0)"/>
+                  <stop offset=".5" stop-color="rgba(186,230,253,0.95)"/>
+                  <stop offset="1" stop-color="rgba(255,255,255,0)"/>
+                </linearGradient>
+              </defs>
+              <!-- top row track (under row 1) -->
+              <path d="M 60 90 H 1140" stroke="url(#pipeRail)" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 6" fill="none"/>
+              <!-- bottom row track (under row 2) -->
+              <path d="M 60 270 H 1140" stroke="url(#pipeRail)" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 6" fill="none"/>
+              <!-- right-edge curve from row 1 to row 2 (rightward bend) -->
+              <path d="M 1140 90 C 1180 90 1180 270 1140 270" stroke="url(#pipeRail)" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 6" fill="none"/>
+              <!-- left-edge curve loop (continuity hint) -->
+              <path d="M 60 270 C 20 270 20 90 60 90" stroke="url(#pipeRail)" stroke-width="2" stroke-linecap="round" stroke-dasharray="4 6" fill="none" opacity=".5"/>
+
+              <!-- moving light pulse along the whole pipe -->
+              <g class="pipeline-flow">
+                <circle r="3" fill="url(#pipeFlow)">
+                  <animateMotion dur="8s" repeatCount="indefinite" rotate="auto"
+                    path="M 60 90 H 1140 C 1180 90 1180 270 1140 270 H 60 C 20 270 20 90 60 90 Z"/>
+                </circle>
+                <circle r="2" fill="rgba(186,230,253,0.7)">
+                  <animateMotion dur="8s" begin="-2.6s" repeatCount="indefinite" rotate="auto"
+                    path="M 60 90 H 1140 C 1180 90 1180 270 1140 270 H 60 C 20 270 20 90 60 90 Z"/>
+                </circle>
+                <circle r="2" fill="rgba(167,139,250,0.7)">
+                  <animateMotion dur="8s" begin="-5.2s" repeatCount="indefinite" rotate="auto"
+                    path="M 60 90 H 1140 C 1180 90 1180 270 1140 270 H 60 C 20 270 20 90 60 90 Z"/>
+                </circle>
+              </g>
+            </svg>
+          </div>
+
+          <div class="pipeline">
+            <!-- Row 1 -->
+            <div class="step fade-up">
+              <div class="step-head">
+                <span class="step-num">1</span>
+                <span class="step-stage-tag">入口</span>
+              </div>
+              <h3 class="step-title">上传 / 导入</h3>
+              <p class="step-desc">本地单文件、批量、分片续传，或粘贴远程视频链接。文件先进入暂存区，等待安全检测。</p>
+              <span class="step-connector" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/>
+                </svg>
+              </span>
+            </div>
+
+            <div class="step fade-up delay-1">
+              <div class="step-head">
+                <span class="step-num">2</span>
+                <span class="step-stage-tag">安全</span>
+              </div>
+              <h3 class="step-title">上传前风控</h3>
+              <p class="step-desc">指纹黑名单 → 视觉抽帧 → 备用视觉模型 → 字幕关键词，逐层校验。命中即拒绝，不会落到正式存储区。</p>
+              <span class="step-connector" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/>
+                </svg>
+              </span>
+            </div>
+
+            <div class="step fade-up delay-2">
+              <div class="step-head">
+                <span class="step-num">3</span>
+                <span class="step-stage-tag">复检</span>
+              </div>
+              <h3 class="step-title">分析前风控</h3>
+              <p class="step-desc">对正式入库的视频再做一次校验，命中违规直接进入隔离目录，并把结果写入缓存避免重复扣费。</p>
+              <span class="step-connector" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/>
+                </svg>
+              </span>
+            </div>
+
+            <div class="step fade-up delay-3">
+              <div class="step-head">
+                <span class="step-num">4</span>
+                <span class="step-stage-tag">预处理</span>
+              </div>
+              <h3 class="step-title">长视频自适应</h3>
+              <p class="step-desc">按时长 / 体积自动压缩、必要时切片重拼。处理副本独立保存，原始视频不动，超长会自动收紧参数。</p>
+              <!-- no right connector on row end (visually wraps via SVG rail) -->
+            </div>
+
+            <!-- Row 2 -->
+            <div class="step fade-up">
+              <div class="step-head">
+                <span class="step-num">5</span>
+                <span class="step-stage-tag">分析</span>
+              </div>
+              <h3 class="step-title">内容分析</h3>
+              <p class="step-desc">Whisper 转写字幕 → 模型抽取步骤；或开启视频理解直分析。失败自动降级为候选步骤或时间线摘要。</p>
+              <span class="step-connector" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/>
+                </svg>
+              </span>
+            </div>
+
+            <div class="step fade-up delay-1">
+              <div class="step-head">
+                <span class="step-num">6</span>
+                <span class="step-stage-tag">视觉增强</span>
+              </div>
+              <h3 class="step-title">截图与看图增强</h3>
+              <p class="step-desc">为每个步骤抽取关键截图；置信度低的步骤再次让模型"看图说话"，补强标题与描述。</p>
+              <span class="step-connector" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/>
+                </svg>
+              </span>
+            </div>
+
+            <div class="step fade-up delay-2">
+              <div class="step-head">
+                <span class="step-num">7</span>
+                <span class="step-stage-tag">生成</span>
+              </div>
+              <h3 class="step-title">文档与字幕导出</h3>
+              <p class="step-desc">输出 Markdown 操作指南、PDF、步骤 JSON、关键截图，同时一键导出 SRT / VTT / TXT 字幕。</p>
+              <span class="step-connector" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="5" y1="12" x2="19" y2="12"/><polyline points="13 6 19 12 13 18"/>
+                </svg>
+              </span>
+            </div>
+
+            <!-- Final / terminal card to fill the 8th slot -->
+            <div class="step fade-up delay-3">
+              <div class="step-head">
+                <span class="step-num step-num--final">✓</span>
+                <span class="step-stage-tag step-stage-tag--final">交付</span>
+              </div>
+              <h3 class="step-title">结果与历史</h3>
+              <p class="step-desc">分析结果写入历史抽屉，按浏览器隔离查看。72 小时自动清理，支持单结果或批量打包下载 ZIP。</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Sample Result -->
+    <section id="result">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-tag">REAL OUTPUT SAMPLE</span>
+          <h2 class="section-title">分析结果 · 真实输出样例</h2>
+          <p class="section-sub">
+            一份典型的"产品操作演示"分析结果：步骤、截图、Markdown 文档与字幕工作台一站式呈现。
+          </p>
+        </div>
+
+        <div class="result-grid">
+          <!-- Steps + screenshots -->
+          <div class="result-card">
+            <div class="card-head">
+              <div class="card-title">
+                <span class="card-title-ico">
+                  <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+                </span>
+                识别到的步骤
+              </div>
+              <span class="status status--ok">
+                <svg viewBox="0 0 24 24" class="ico-sm" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+                质量分 0.92
+              </span>
+            </div>
+
+            <div class="steps-list">
+              <div class="step-item">
+                <img class="step-thumb" src="assets/step_01.svg" alt="步骤 1 模拟界面：账号登录" loading="lazy" />
+                <div>
+                  <div class="step-meta">
+                    <span class="step-tag">#1 · 准备工作</span>
+                    <span class="step-time">00:00:08</span>
+                  </div>
+                  <h4 class="step-h">打开应用并完成账号登录</h4>
+                  <p class="step-p">
+                    启动客户端后，使用注册邮箱与密码完成首次登录。系统会自动检测并提示绑定多设备，可按需在设置中开启。
+                  </p>
+                </div>
+              </div>
+              <div class="step-item">
+                <img class="step-thumb" src="assets/step_02.svg" alt="步骤 2 模拟界面：新建项目导入素材" loading="lazy" />
+                <div>
+                  <div class="step-meta">
+                    <span class="step-tag">#2 · 项目创建</span>
+                    <span class="step-time">00:00:31</span>
+                  </div>
+                  <h4 class="step-h">新建项目并导入素材</h4>
+                  <p class="step-p">
+                    进入主面板，点击"新建项目"，命名后从本地或云端拖入视频源文件。左侧预览窗会即时刷新缩略图。
+                  </p>
+                </div>
+              </div>
+              <div class="step-item">
+                <img class="step-thumb" src="assets/step_03.svg" alt="步骤 3 模拟界面：分析参数配置" loading="lazy" />
+                <div>
+                  <div class="step-meta">
+                    <span class="step-tag">#3 · 分析配置</span>
+                    <span class="step-time">00:01:04</span>
+                  </div>
+                  <h4 class="step-h">勾选分析参数与导出格式</h4>
+                  <p class="step-p">
+                    根据视频类型选择"字幕模式"或"视频理解"，并设定 Whisper 等级。导出格式可同时勾选 Markdown / PDF。
+                  </p>
+                </div>
+              </div>
+              <div class="step-item">
+                <img class="step-thumb" src="assets/step_04.svg" alt="步骤 4 模拟界面：启动分析查看进度" loading="lazy" />
+                <div>
+                  <div class="step-meta">
+                    <span class="step-tag">#4 · 启动分析</span>
+                    <span class="step-time">00:01:42</span>
+                  </div>
+                  <h4 class="step-h">点击开始分析并查看实时进度</h4>
+                  <p class="step-p">
+                    点击右下角"开始分析"，进度面板展示当前阶段（上传 / 字幕 / 抽帧 / 视觉增强）。完成后可直接预览或下载 ZIP。
+                  </p>
+                </div>
+              </div>
+              <div class="step-item">
+                <img class="step-thumb" src="assets/step_05.svg" alt="步骤 5 模拟界面：历史抽屉" loading="lazy" />
+                <div>
+                  <div class="step-meta">
+                    <span class="step-tag">#5 · 结果回看</span>
+                    <span class="step-time">00:02:18</span>
+                  </div>
+                  <h4 class="step-h">在历史抽屉中复用分析结果</h4>
+                  <p class="step-p">
+                    顶部导航点击"历史"打开抽屉，可按时间排序、关键字检索，快速回到任一历史结果。
+                  </p>
+                </div>
+              </div>
+              <div class="step-item">
+                <img class="step-thumb" src="assets/step_06.svg" alt="步骤 6 模拟界面：编辑步骤后重新生成" loading="lazy" />
+                <div>
+                  <div class="step-meta">
+                    <span class="step-tag">#6 · 编辑导出</span>
+                    <span class="step-time">00:03:01</span>
+                  </div>
+                  <h4 class="step-h">手动编辑步骤后重新生成文档</h4>
+                  <p class="step-p">
+                    点击"编辑"进入排序与改写模式，保存后后端按编辑结果重新生成 Markdown 与 PDF，保证文档与编辑一致。
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- Markdown preview -->
+          <div class="result-card">
+            <div class="card-head">
+              <div class="card-title">
+                <span class="card-title-ico">
+                  <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                </span>
+                生成的总结文档
+              </div>
+              <button class="btn" style="font-size: 0.76rem; padding: 0.4rem 0.7rem;">
+                <svg viewBox="0 0 24 24" class="ico-sm" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+                下载 ZIP
+              </button>
+            </div>
+            <div class="md">
+              <h1>产品操作演示 · 完整使用指南</h1>
+              <blockquote>
+                本文档由 <strong>Video Insights</strong> 自动生成。原视频时长约 <code>03:24</code>，识别 6 个核心操作步骤，附 4 张关键截图。
+              </blockquote>
+
+              <h2>📖 概述</h2>
+              <p>本视频演示了如何使用客户端从零完成首次项目分析，覆盖账号登录、项目创建、分析参数配置、结果回看与编辑导出五个主要场景。</p>
+
+              <h2>🎯 关键要点</h2>
+              <ul>
+                <li>登录后建议立即在设置中开启 <strong>多设备绑定</strong>，避免后续切换设备频繁验证。</li>
+                <li>素材导入后会自动生成预览缩略图，<strong>缩略图加载即代表素材就绪</strong>。</li>
+                <li>分析参数中"视频理解"成本更高但准确度更好，<strong>建议短视频开启</strong>。</li>
+                <li>历史抽屉按客户端隔离，本机历史不会与其他设备混淆。</li>
+              </ul>
+
+              <h2>📝 操作步骤</h2>
+
+              <h3>步骤 1 · 打开应用并完成账号登录</h3>
+              <p>启动客户端后，使用注册邮箱与密码完成首次登录。系统会自动检测并提示绑定多设备，可按需在设置中开启。</p>
+              <p><code>📍 时间点：00:00:08</code></p>
+
+              <h3>步骤 2 · 新建项目并导入素材</h3>
+              <p>进入主面板，点击"新建项目"，命名后从本地或云端拖入视频源文件。左侧预览窗会即时刷新缩略图。</p>
+              <p><code>📍 时间点：00:00:31</code></p>
+
+              <h3>步骤 3 · 勾选分析参数与导出格式</h3>
+              <p>根据视频类型选择"字幕模式"或"视频理解"，并设定 Whisper 等级。导出格式可同时勾选 Markdown / PDF。</p>
+              <p><code>📍 时间点：00:01:04</code></p>
+
+              <h3>步骤 4 · 点击开始分析并查看实时进度</h3>
+              <p>点击右下角"开始分析"，进度面板展示当前阶段（上传 / 字幕 / 抽帧 / 视觉增强）。完成后可直接预览或下载 ZIP。</p>
+              <p><code>📍 时间点：00:01:42</code></p>
+
+              <hr />
+
+              <h2>🧾 文档信息</h2>
+              <ul>
+                <li>生成时间：<code>2026-05-13 21:54</code></li>
+                <li>分析模式：字幕模式 + 视觉增强</li>
+                <li>输出目录：<code>outputs/&lt;video&gt;_&lt;timestamp&gt;/</code></li>
+                <li>包含资源：operation_guide.md · operation_guide.pdf · steps.json · 4 张截图 · 字幕 SRT / VTT / TXT</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+
+        <!-- Subtitle workbench preview -->
+        <div class="result-card" style="margin-top: 1.4rem;">
+          <div class="card-head">
+            <div class="card-title">
+              <span class="card-title-ico">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+              </span>
+              字幕工作台
+            </div>
+            <div style="display:flex; gap: 0.45rem;">
+              <button class="btn" style="font-size: 0.74rem; padding: 0.36rem 0.65rem;">导出 SRT</button>
+              <button class="btn" style="font-size: 0.74rem; padding: 0.36rem 0.65rem;">导出 VTT</button>
+              <button class="btn" style="font-size: 0.74rem; padding: 0.36rem 0.65rem;">导出 TXT</button>
+            </div>
+          </div>
+          <div style="display:flex; align-items: center; justify-content: space-between; gap: 0.7rem; margin-bottom: 0.7rem; flex-wrap: wrap;">
+            <input class="input" style="max-width: 320px; min-width: 200px;" placeholder="搜索字幕内容或时间点" value="点击" />
+            <p style="margin: 0; color: var(--vi-text-3); font-size: 0.78rem;">
+              共 132 行 · 匹配 <span style="color: rgba(165, 243, 252, 0.95); font-weight: 600;">7</span> 行
+            </p>
+          </div>
+          <div class="subtitles">
+            <div class="sub-row">
+              <span class="sub-time">00:00:08,120</span>
+              <p class="sub-text">大家好，今天我们来看一下如何完成首次项目分析的全流程。</p>
+            </div>
+            <div class="sub-row">
+              <span class="sub-time">00:00:21,540</span>
+              <p class="sub-text">登录后第一件事是确认账号信息，然后在右上角开启多设备绑定。</p>
+            </div>
+            <div class="sub-row">
+              <span class="sub-time">00:00:31,008</span>
+              <p class="sub-text">接下来 <mark style="background: rgba(34,211,238,0.22); color: #f0f9ff; padding: 0 0.2em; border-radius: 0.25rem;">点击</mark>主面板的"新建项目"，命名为 demo-001。</p>
+            </div>
+            <div class="sub-row">
+              <span class="sub-time">00:01:04,322</span>
+              <p class="sub-text">在分析参数面板里，根据视频类型勾选字幕模式或视频理解。</p>
+            </div>
+            <div class="sub-row">
+              <span class="sub-time">00:01:42,640</span>
+              <p class="sub-text"><mark style="background: rgba(34,211,238,0.22); color: #f0f9ff; padding: 0 0.2em; border-radius: 0.25rem;">点击</mark>开始分析后，进度面板会实时显示当前阶段。</p>
+            </div>
+            <div class="sub-row">
+              <span class="sub-time">00:02:18,910</span>
+              <p class="sub-text">分析结束后，可以在历史抽屉里随时回到这次结果。</p>
+            </div>
+            <div class="sub-row">
+              <span class="sub-time">00:03:01,180</span>
+              <p class="sub-text">如果模型识别有偏差，可以<mark style="background: rgba(34,211,238,0.22); color: #f0f9ff; padding: 0 0.2em; border-radius: 0.25rem;">点击</mark>编辑按钮手动调整步骤后再保存。</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Progress dialog preview -->
+        <div class="progress-card">
+          <div style="display:flex; align-items:center; justify-content:space-between; gap: 0.6rem;">
+            <h3 style="margin: 0; font-size: 0.98rem; font-weight: 600; color: var(--vi-text-0);">
+              处理中...
+            </h3>
+            <span class="status status--run">72%</span>
+          </div>
+          <p style="margin: 0.3rem 0 0; color: var(--vi-text-2); font-size: 0.86rem;">正在执行视觉增强 · 提升低置信度步骤的标题与描述...</p>
+          <div class="progress-track">
+            <div class="progress-bar"></div>
+          </div>
+          <div style="display:grid; gap: 0.3rem; font-size: 0.78rem; color: var(--vi-text-3);">
+            <p style="margin: 0;">阶段：vision_enhance · 第 4/6 步</p>
+            <p style="margin: 0; color: rgba(94, 234, 212, 0.9);">当前文件：tutorial_setup_walkthrough.mp4</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tech stack & engineering -->
+    <section id="tech">
+      <div class="container">
+        <div class="section-head">
+          <span class="section-tag">TECH STACK · ENGINEERING</span>
+          <h2 class="section-title">技术栈与工程化</h2>
+          <p class="section-sub">
+            前端 React 19 + TypeScript + Tailwind 4；后端 Flask + Whisper + ffmpeg；多 LLM Provider 路由 + 多层降级。下面同时呈现真实落地的工程化优化点。
+          </p>
+        </div>
+
+        <!-- Tech badges -->
+        <div class="tech-grid">
+          <div class="tech-card tc-frontend">
+            <div class="tech-head">
+              <div class="tech-head-left">
+                <span class="tech-emoji" aria-hidden="true">🖥️</span>
+                <div>
+                  <h3>FRONTEND</h3>
+                  <p class="tech-card-name">前端工作台</p>
+                </div>
+              </div>
+              <span class="tech-count">9</span>
+            </div>
+            <p class="tech-summary">React 19 + TypeScript 全量类型化；Tailwind 4 与原生 CSS 变量并存的设计系统。</p>
+            <ul class="tech-list">
+              <li class="accent">React 19</li>
+              <li class="accent">TypeScript 5</li>
+              <li>Vite 5</li>
+              <li>Tailwind CSS 4</li>
+              <li>marked</li>
+              <li>DOMPurify</li>
+              <li>motion / react</li>
+              <li>localStorage</li>
+              <li>X-Client-ID</li>
+            </ul>
+          </div>
+
+          <div class="tech-card tc-backend">
+            <div class="tech-head">
+              <div class="tech-head-left">
+                <span class="tech-emoji" aria-hidden="true">🧠</span>
+                <div>
+                  <h3>BACKEND</h3>
+                  <p class="tech-card-name">后端 API 服务</p>
+                </div>
+              </div>
+              <span class="tech-count">7</span>
+            </div>
+            <p class="tech-summary">Flask 主框架 + Waitress 生产级 WSGI；分片续传、会话管理、自动清理一应俱全。</p>
+            <ul class="tech-list">
+              <li class="accent">Flask</li>
+              <li class="accent">Waitress</li>
+              <li>python-dotenv</li>
+              <li>分片续传</li>
+              <li>会话管理</li>
+              <li>请求级隔离</li>
+              <li>定时清理</li>
+            </ul>
+          </div>
+
+          <div class="tech-card tc-video">
+            <div class="tech-head">
+              <div class="tech-head-left">
+                <span class="tech-emoji" aria-hidden="true">🎞️</span>
+                <div>
+                  <h3>VIDEO</h3>
+                  <p class="tech-card-name">视频处理引擎</p>
+                </div>
+              </div>
+              <span class="tech-count">7</span>
+            </div>
+            <p class="tech-summary">Whisper 常驻模型转写 + FFmpeg 抽帧 / 压缩 / 切片；长视频自适应预处理。</p>
+            <ul class="tech-list">
+              <li class="accent">openai-whisper</li>
+              <li class="accent">ffmpeg-python</li>
+              <li>imageio-ffmpeg</li>
+              <li>动态抽帧</li>
+              <li>长视频压缩</li>
+              <li>常驻模型</li>
+              <li>CLI 兜底</li>
+            </ul>
+          </div>
+
+          <div class="tech-card tc-doc">
+            <div class="tech-head">
+              <div class="tech-head-left">
+                <span class="tech-emoji" aria-hidden="true">🧩</span>
+                <div>
+                  <h3>DOCUMENT</h3>
+                  <p class="tech-card-name">文档生成</p>
+                </div>
+              </div>
+              <span class="tech-count">6</span>
+            </div>
+            <p class="tech-summary">Markdown / PDF / 字幕 / 步骤 JSON 全套输出；中文字体跨平台自适配。</p>
+            <ul class="tech-list">
+              <li class="accent">markdown</li>
+              <li class="accent">fpdf2</li>
+              <li>中文字体自适配</li>
+              <li>steps.json</li>
+              <li>SRT · VTT · TXT</li>
+              <li>确定性兜底</li>
+            </ul>
+          </div>
+
+          <div class="tech-card tc-url">
+            <div class="tech-head">
+              <div class="tech-head-left">
+                <span class="tech-emoji" aria-hidden="true">🌐</span>
+                <div>
+                  <h3>URL IMPORT</h3>
+                  <p class="tech-card-name">智能链接导入</p>
+                </div>
+              </div>
+              <span class="tech-count">6</span>
+            </div>
+            <p class="tech-summary">B 站 / 抖音 / 小红书专属解析；通用页面靠浏览器抓取 + 模型识别 + yt-dlp 多层兜底。</p>
+            <ul class="tech-list">
+              <li class="accent">scrapling</li>
+              <li class="accent">yt-dlp</li>
+              <li>平台下载器</li>
+              <li>Playwright 隐身会话</li>
+              <li>JSON-LD / meta 解析</li>
+              <li>Cookies / 代理</li>
+            </ul>
+          </div>
+
+          <div class="tech-card tc-llm">
+            <div class="tech-head">
+              <div class="tech-head-left">
+                <span class="tech-emoji" aria-hidden="true">🔌</span>
+                <div>
+                  <h3>LLM</h3>
+                  <p class="tech-card-name">多模型平台路由</p>
+                </div>
+              </div>
+              <span class="tech-count">6</span>
+            </div>
+            <p class="tech-summary">能力声明驱动的统一抽象；同一段调用代码自动适配 4 大平台，不支持的能力自动降级。</p>
+            <ul class="tech-list">
+              <li class="accent">Ark · Doubao</li>
+              <li class="accent">OpenAI</li>
+              <li>DeepSeek</li>
+              <li>Qwen</li>
+              <li>能力声明路由</li>
+              <li>错误归一化</li>
+            </ul>
+          </div>
+        </div>
+
+        <!-- Engineering optimizations -->
+        <div class="engr-head">
+          <span class="section-tag">ENGINEERING DETAILS</span>
+          <h3>工程化优化与落地实践</h3>
+          <p>从前端渲染、网络层、上传链路、长视频处理到 LLM 调用、风控与可观测性，每一处都做了真实的取舍与回退方案。</p>
+        </div>
+
+        <div class="engr-grid">
+          <!-- 1 · 前端渲染性能 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+              </span>
+              <span class="engr-title">前端渲染性能</span>
+            </div>
+            <ul>
+              <li>历史抽屉走<b>自研虚拟列表</b>：只渲染当前可见的几行，上下各预留一点缓冲，万条记录滚动也不掉帧</li>
+              <li>结果区与超长 Markdown 区<b>滚动到才渲染</b>，离屏部分不占用渲染线程</li>
+              <li>关键容器声明独立的渲染边界，让浏览器把它们放进单独的合成层，避免改动一处导致整页重排</li>
+              <li>动画走 GPU 合成（位移 / 透明度），不走重排路径，主线程不卡顿</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">虚拟列表</span>
+              <span class="engr-tag">按需渲染</span>
+              <span class="engr-tag">GPU 合成</span>
+            </div>
+          </div>
+
+          <!-- 2 · 自适应降级 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 22h12"/><path d="M12 18v4"/></svg>
+              </span>
+              <span class="engr-title">移动 / 弱设备自适应</span>
+            </div>
+            <ul>
+              <li>启动时自动识别<b>移动端、低端机、省流量模式、关闭动画偏好</b>，命中任一即切到性能模式</li>
+              <li>性能模式下 Hero 动画、流光按钮、平滑滚动等装饰性效果<b>自动降级为静态</b>，避免低端机帧率塌陷</li>
+              <li>分析进度的轮询频率自适应：桌面 5 秒 / 移动 9 秒，节流网络与电量</li>
+              <li>所有动画都尊重系统的"减少动效"偏好，无障碍优先</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">设备识别</span>
+              <span class="engr-tag">无障碍</span>
+              <span class="engr-tag">省电策略</span>
+            </div>
+          </div>
+
+          <!-- 3 · 上传链路 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+              </span>
+              <span class="engr-title">分片上传与断点续传</span>
+            </div>
+            <ul>
+              <li>大文件默认按 <b>8MB 一片</b>分块上传，单文件最大支持 500MB</li>
+              <li>后端会告诉前端"已经收到了哪些片"，前端只补传缺口，<b>已上传的部分永远不会重传</b></li>
+              <li>上传会话记在浏览器本地，<b>刷新页面、切网络、临时断电都能从断点继续</b>，传完自动清理</li>
+              <li>小文件走内存缓冲提速，大文件落到磁盘临时文件，避免高并发吃光内存</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">断点续传</span>
+              <span class="engr-tag">8MB 分片</span>
+              <span class="engr-tag">内存 / 磁盘混合</span>
+            </div>
+          </div>
+
+          <!-- 4 · 长视频处理 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+              </span>
+              <span class="engr-title">长视频自动预处理</span>
+            </div>
+            <ul>
+              <li>按视频时长 + 体积分四档：<b>标准 / 长视频 / 超长 / 必须先裁剪</b></li>
+              <li>长视频自动压缩、必要时切片重拼，处理副本只用一次，原始视频不动</li>
+              <li>超长档自动关掉视频理解、关掉联网搜索、强制只生成摘要版，确保不超时不爆显存</li>
+              <li>超过 90 分钟或 500MB 直接拒绝，并明确告诉用户"建议先裁剪"，比中途失败更友好</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">自动切片</span>
+              <span class="engr-tag">参数自动收紧</span>
+              <span class="engr-tag warn">早拒绝早友好</span>
+            </div>
+          </div>
+
+          <!-- 5 · LLM 抽象 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15 15 0 0 1 4 10 15 15 0 0 1-4 10 15 15 0 0 1-4-10 15 15 0 0 1 4-10z"/></svg>
+              </span>
+              <span class="engr-title">多模型平台统一接入</span>
+            </div>
+            <ul>
+              <li>每个模型平台<b>显式声明自己支持什么</b>：能聊天、能上传文件、能看视频、能联网搜索</li>
+              <li>同一段调用代码，根据配置自动路由到 Ark · OpenAI · DeepSeek · Qwen，业务代码不感知差异</li>
+              <li>切到不支持视频理解的平台，系统<b>自动改走"字幕抽取"路线</b>，并在前端如实展示当前用了哪条链路</li>
+              <li>用户调用了平台不支持的能力时，返回的不是 500 报错，而是"当前平台不支持视频理解，请切换或关闭"这种可读提示</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">能力声明</span>
+              <span class="engr-tag">自动选路</span>
+              <span class="engr-tag">可读错误</span>
+            </div>
+          </div>
+
+          <!-- 6 · 风控 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+              </span>
+              <span class="engr-title">四层内容风控 + 结果缓存</span>
+            </div>
+            <ul>
+              <li>四层逐级校验：<b>文件指纹黑名单 → 视觉抽帧识别 → 备用视觉模型 → 字幕关键词词库</b>，前一层不行就回退到下一层</li>
+              <li>上传时与开始分析前<b>各跑一次风控</b>，命中违规的视频被移到隔离目录，不会污染正常分析流程</li>
+              <li>对"同一个视频 + 同一份模型配置"的判定结果做缓存，<b>重复分析不再消耗模型 API 费用</b></li>
+              <li>风控结果统一输出"放行 / 限流 / 阻断 + 风险等级 + 命中规则码"，前后端共用同一份契约</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">指纹黑名单</span>
+              <span class="engr-tag accent">视觉风控</span>
+              <span class="engr-tag">省 API 费</span>
+            </div>
+          </div>
+
+          <!-- 7 · 渲染安全 + 状态持久化 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+              </span>
+              <span class="engr-title">渲染安全 & 状态持久化</span>
+            </div>
+            <ul>
+              <li>所有 AI 输出都先经过<b>清洗管线</b>再渲染，杜绝 XSS 与脚本注入，对外展示可放心信任</li>
+              <li>不需要登录系统，靠每个浏览器一份匿名 ID 做<b>多用户历史隔离</b>，自己只看到自己的记录</li>
+              <li>API Key、模型选择、Whisper 等级、抽帧频率等用户偏好<b>本地持久化</b>，下次打开自动还原</li>
+              <li>分片上传的进度也存在浏览器本地，断网或关页都能续传</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">输出清洗</span>
+              <span class="engr-tag">本地偏好</span>
+              <span class="engr-tag">无登录隔离</span>
+            </div>
+          </div>
+
+          <!-- 8 · 错误处理 + UX -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+              </span>
+              <span class="engr-title">错误处理 & 引导式 UX</span>
+            </div>
+            <ul>
+              <li>统一错误层把后端的状态码、风控原因、分段策略等信息<b>拼成一句完整可读的错误说明</b>，避免"请求失败"这种黑盒提示</li>
+              <li>用户漏填 API Key 或模型配置时，<b>自动展开对应抽屉、聚焦输入框，并配脉冲光圈引导</b>视线，比红字提示更直观</li>
+              <li>风险与策略提示分级展示：阻断卡片放到最显眼、长视频建议放在结果上方、自动降级在结果上注明原因</li>
+              <li>成功 / 错误 toast 互斥显示，避免反复弹消息打扰用户</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">引导式聚焦</span>
+              <span class="engr-tag">分级提示</span>
+              <span class="engr-tag">错误归因</span>
+            </div>
+          </div>
+
+          <!-- 9 · 后端并发 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="12" x2="18" y2="12"/><line x1="6" y1="12" x2="2" y2="12"/><line x1="12" y1="6" x2="12" y2="2"/><line x1="12" y1="22" x2="12" y2="18"/><circle cx="12" cy="12" r="6"/></svg>
+              </span>
+              <span class="engr-title">后端并发与资源治理</span>
+            </div>
+            <ul>
+              <li>截图生成、批量分析、Whisper 推理的<b>并发线程数都可配置</b>，按机器配置随时调整</li>
+              <li>Whisper 模型常驻内存，避免每次分析都重新加载；字幕结果做缓存，相同视频重复分析直接命中</li>
+              <li>生产环境用 Waitress 替代 Flask 自带服务器，多线程不会被 Python GIL 卡住</li>
+              <li>后台清理线程定期回收：<b>上传文件 24 小时清，输出与历史 72 小时清</b>，磁盘永远不会爆</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">参数化并发</span>
+              <span class="engr-tag">模型常驻</span>
+              <span class="engr-tag success">自动清理</span>
+            </div>
+          </div>
+
+          <!-- 10 · 可观测性 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+              </span>
+              <span class="engr-title">进度可观测 & 质量评分</span>
+            </div>
+            <ul>
+              <li>分析过程拆成 <b>上传 → 预处理 → 字幕识别 → 视觉增强 → 起草 → 收尾</b> 多个阶段，前端实时显示当前在哪一步</li>
+              <li>每份结果都打一个 0–1 的<b>质量分</b>，综合考量步骤完整度、时间顺序、置信度、来源可靠性、数量是否合理</li>
+              <li>当模型识别效果不好时，结果会<b>自动降级</b>：识别不出标准步骤就退到候选步骤，再退就给时间线摘要，最坏情况给一张"无法分析"的说明卡——用户永远不会拿到空白页</li>
+              <li>每次请求都带一个<b>唯一编号</b>，出错时贴给开发者就能定位完整调用链</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">阶段化进度</span>
+              <span class="engr-tag">质量分</span>
+              <span class="engr-tag">请求追踪</span>
+            </div>
+          </div>
+
+          <!-- 11 · 工程基础设施 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/></svg>
+              </span>
+              <span class="engr-title">工程基础设施</span>
+            </div>
+            <ul>
+              <li>提交代码前自动跑一系列检查：<b>行尾空格、文件末尾换行、合并冲突标记、中文乱码扫描、Python 语法体检</b>，问题在本地就被拦下来</li>
+              <li>前端使用最新的 ESLint 配置，TypeScript 与 React Hooks 规则全开，不规范的代码无法合并</li>
+              <li>前端开发时所有后端接口走<b>本地代理转发</b>，零跨域配置，开箱即用</li>
+              <li>常量、类型、工具函数、组件分层清晰，路径别名统一，长期维护也不会乱</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">提交前体检</span>
+              <span class="engr-tag">类型检查</span>
+              <span class="engr-tag">分层清晰</span>
+            </div>
+          </div>
+
+          <!-- 12 · 视觉与设计系统 -->
+          <div class="engr-card">
+            <div class="engr-head-row">
+              <span class="engr-icon">
+                <svg viewBox="0 0 24 24" class="ico" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.83 0 1.5-.67 1.5-1.5 0-.39-.15-.74-.39-1.01-.23-.26-.38-.61-.38-1 0-.83.67-1.5 1.5-1.5H16c3.31 0 6-2.69 6-6 0-4.97-4.48-9-10-9z"/></svg>
+              </span>
+              <span class="engr-title">设计系统 & 视觉一致性</span>
+            </div>
+            <ul>
+              <li>颜色、圆角、阴影、间距等视觉规范统一定义在<b>设计变量</b>里，需要换肤或微调时只改一处</li>
+              <li>组件层用 utility 写样式（小巧灵活），主题层走变量（统一可换），两者并存不冲突</li>
+              <li>所有交互动效共用同一组缓动曲线和时长区间，避免有的动画弹、有的动画僵的凌乱感</li>
+              <li>滚动条预留固定宽度，避免内容出现 / 消失时整页轻微抖动</li>
+            </ul>
+            <div class="engr-tag-row">
+              <span class="engr-tag accent">设计变量</span>
+              <span class="engr-tag">样式分层</span>
+              <span class="engr-tag">动效节奏统一</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+      <div class="container">
+        <div class="brand">
+          <span class="brand-logo" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+              <path d="M8 5v14l11-7z" />
+            </svg>
+          </span>
+          <span>VIDEO INSIGHTS</span>
+        </div>
+        <p style="margin: 0.3rem 0;">
+          AI 视频内容分析 · 自动生成结构化 Markdown / PDF 文档
+        </p>
+        <p style="margin: 0.3rem 0; color: var(--vi-text-3);">
+          基于 Flask + React 19 + Whisper + LLM 多 Provider 抽象 · 静态效果展示页面
+        </p>
+      </div>
+    </footer>
+
+    <script>
+      // Smooth scroll for anchor links + simple scroll-reveal nudge
+      document.querySelectorAll('a[href^="#"]').forEach((link) => {
+        link.addEventListener("click", (e) => {
+          const id = link.getAttribute("href");
+          if (!id || id === "#") return;
+          const target = document.querySelector(id);
+          if (!target) return;
+          e.preventDefault();
+          target.scrollIntoView({ behavior: "smooth", block: "start" });
+        });
+      });
+
+      // Re-trigger animations on scroll for fade-up elements outside initial viewport
+      if ("IntersectionObserver" in window) {
+        const observer = new IntersectionObserver(
+          (entries) => {
+            entries.forEach((entry) => {
+              if (entry.isIntersecting) {
+                entry.target.style.animationPlayState = "running";
+                observer.unobserve(entry.target);
+              }
+            });
+          },
+          { threshold: 0.12 }
+        );
+        document.querySelectorAll(".fade-up").forEach((el) => {
+          observer.observe(el);
+        });
+      }
+
+      // Cursor-following spotlight on capability cards
+      document.querySelectorAll(".cap").forEach((card) => {
+        card.addEventListener("pointermove", (e) => {
+          const rect = card.getBoundingClientRect();
+          const x = ((e.clientX - rect.left) / rect.width) * 100;
+          const y = ((e.clientY - rect.top) / rect.height) * 100;
+          card.style.setProperty("--mx", x + "%");
+          card.style.setProperty("--my", y + "%");
+        });
+        card.addEventListener("pointerleave", () => {
+          card.style.removeProperty("--mx");
+          card.style.removeProperty("--my");
+        });
+      });
+    </script>
+  </body>
+</html>
