@@ -33,7 +33,7 @@
 - `Flask`：API 服务
 - `Waitress`：生产模式 WSGI 服务
 - `python-dotenv`：`.env` 配置加载
-- `openai-whisper`：字幕转写
+- `faster-whisper`：字幕转写（CTranslate2，CPU/显存友好）
 - `ffmpeg-python` + `imageio-ffmpeg`：抽帧、转码、截图
 - `markdown` + `fpdf2`：文档与 PDF 生成
 - `yt-dlp`：平台播放页下载兜底
@@ -63,6 +63,11 @@
 │  ├─ ark_client.py                 # Ark 实现，支持视频理解 / 文件上传 / 联网搜索
 │  ├─ openai_compat_client.py       # OpenAI 兼容实现（OpenAI / DeepSeek / Qwen 等）
 │  └─ factory.py                    # 根据 MODEL_PROVIDER / base_url 构建对应 client
+├─ asr/                             # ASR 后端抽象（faster-whisper）
+│  ├─ base.py                       # TranscriberBackend 抽象基类 + 错误类型
+│  ├─ srt_writer.py                 # 共享 SRT 序列化器
+│  ├─ faster_whisper_backend.py     # faster-whisper 实现（CTranslate2）
+│  └─ factory.py                    # 构建 TranscriberBackend 实例
 ├─ Scrapling_download/              # B站 / 抖音 / 小红书平台链接下载器与共享 LLM 配置
 ├─ web-react/                       # React + TypeScript 前端工作台
 ├─ scripts/
@@ -172,6 +177,34 @@ code=provider_feature_unsupported
 ```
 
 前端会自动翻译为：「当前模型平台不支持该能力（视频理解 / 联网搜索 / 文件上传）。请切换平台，或关闭对应选项后重试」。
+
+---
+
+## 🎙️ ASR 字幕识别
+
+字幕生成统一走 `faster-whisper`（CTranslate2 实现），`VideoAnalyzerAgent`
+通过 `asr/` 抽象层调用 ASR，但当前只提供这一种实现。
+
+### 调优参数
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `WHISPER_MODE` / `WHISPER_MODEL` | `base` | 模型大小：`tiny` / `base` / `small` / `medium` / `large` |
+| `WHISPER_THREADS` | CPU 核数（1-8） | CPU 推理线程数 |
+| `WHISPER_DEVICE` | `auto` | 推理设备：`cpu` / `cuda` / `auto` |
+| `WHISPER_COMPUTE_TYPE` | `int8` | 精度：`int8` / `int8_float16` / `float16` / `float32` |
+| `WHISPER_BEAM_SIZE` | `1` | beam search 宽度，越大越准但越慢（1-10） |
+| `WHISPER_VAD_FILTER` | `1` | 是否启用 VAD 过滤静音段 |
+
+### 字幕缓存
+
+缓存键包含模型大小、精度、beam size、VAD 等参数（例如
+`faster_whisper:base:int8:1:1`），调整这些参数后旧缓存不会被错误复用。
+
+### 输出格式
+
+ASR 结果统一通过 `asr/srt_writer.py` 写为 SRT，文件名 / 时间戳格式与下游
+导出（VTT / TXT）保持一致。
 
 ---
 
@@ -473,6 +506,8 @@ outputs/<video_stem>_<timestamp>/
 pip install -r requirements.txt
 ```
 
+`faster-whisper` 已写入 `requirements.txt`，无需额外安装。
+
 ### 2. 启动后端
 
 ```bash
@@ -534,6 +569,11 @@ WEB_SEARCH=0
 
 # ===== 性能相关 =====
 WHISPER_THREADS=4
+# faster-whisper 调优（默认 int8，CPU 友好）
+WHISPER_DEVICE=auto              # cpu / cuda / auto
+WHISPER_COMPUTE_TYPE=int8        # int8 / int8_float16 / float16 / float32
+WHISPER_BEAM_SIZE=1              # 1-10，越大越准但越慢
+WHISPER_VAD_FILTER=1             # 是否启用 VAD（语音活动检测）
 SCREENSHOT_MAX_WORKERS=2
 BATCH_ANALYZE_MAX_WORKERS=2
 LONG_VIDEO_PREPROCESS_ENABLED=1
@@ -620,6 +660,10 @@ WAITRESS_CONNECTION_LIMIT=100
 | 变量 | 作用 | 默认 |
 | --- | --- | --- |
 | `WHISPER_THREADS` | Whisper 推理线程数（1-16） | CPU 核数（1-8） |
+| `WHISPER_DEVICE` | 推理设备：`cpu` / `cuda` / `auto` | `auto` |
+| `WHISPER_COMPUTE_TYPE` | 精度：`int8` / `int8_float16` / `float16` / `float32` | `int8` |
+| `WHISPER_BEAM_SIZE` | beam search 宽度（1-10） | `1` |
+| `WHISPER_VAD_FILTER` | 是否启用语音活动检测 | `1` |
 | `SCREENSHOT_MAX_WORKERS` | 截图生成并发数 | `2` |
 | `BATCH_ANALYZE_MAX_WORKERS` | 批量分析并发数（1-16） | `2` |
 | `LONG_VIDEO_PREPROCESS_ENABLED` | 长视频自动压缩/切片预处理开关 | `1` |

@@ -25,10 +25,8 @@ try:
 except Exception:  # pragma: no cover - 兜底兼容
     ffmpeg = None
 
-try:
-    import whisper as whisper_lib
-except Exception:  # pragma: no cover - 兜底兼容
-    whisper_lib = None
+from asr import build_transcriber, write_srt_file
+from asr.base import TranscriberBackend, TranscriberError
 
 # 配置日志
 logging.basicConfig(
@@ -42,9 +40,6 @@ class VideoAnalyzerAgent:
     DEFAULT_CHAT_TEMPERATURE = 0.2
     SUBTITLE_CACHE_ROOT = (Path(__file__).resolve().parent / "outputs" / ".subtitle_cache").resolve()
     _subtitle_cache_lock = RLock()
-    _whisper_model_cache_lock = RLock()
-    _whisper_infer_lock = RLock()
-    _whisper_model_cache: Dict[str, Any] = {}
     FONT_PATHS = [
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\simsun.ttc",
@@ -64,16 +59,18 @@ class VideoAnalyzerAgent:
         model_base_url: str = None,
         provider: str = None,
         llm_client: LLMClient = None,
+        transcriber: "TranscriberBackend | None" = None,
     ):
         """
         初始化视频分析AI Agent
         :param api_key: 模型 API Key，None 时从 .env 读取
-        :param whisper_model: Whisper 模型名称，默认 "base"
+        :param whisper_model: faster-whisper 模型大小（tiny/base/small/medium/large）
         :param model_name: 模型名称，None 时从 .env 读取
         :param model_base_url: 模型接口 Base URL，None 时从 .env 读取
         :param provider: 可选的 provider 提示（ark / openai / openai_compatible），
             未提供时按 MODEL_PROVIDER 或 base_url 自动路由
         :param llm_client: 可选的 LLMClient 实例（主要用于测试注入）
+        :param transcriber: 可选的 :class:`TranscriberBackend` 实例（用于测试注入）。
         """
         load_dotenv()
 
@@ -121,6 +118,15 @@ class VideoAnalyzerAgent:
         self.client = self.llm_client
         self.whisper_model = whisper_model
         self.whisper_threads = self._resolve_whisper_threads()
+        if transcriber is not None:
+            self.transcriber = transcriber
+        else:
+            self.transcriber = build_transcriber(
+                model_size=str(self.whisper_model or "base"),
+                threads=int(self.whisper_threads),
+                language="zh",
+            )
+        self.whisper_backend = getattr(self.transcriber, "name", "faster_whisper")
         self._parsed_srt_cache_key: tuple[str, int, int] | None = None
         self._parsed_srt_cache_value: List[Dict[str, Any]] | None = None
         self.ffmpeg_cmd = self._prepare_ffmpeg_command()
@@ -293,118 +299,30 @@ class VideoAnalyzerAgent:
 
     # ========== Whisper 字幕生成 ==========
 
-    def _get_resident_whisper_model(self):
-        model_name = str(self.whisper_model or "").strip().lower() or "base"
-        if whisper_lib is None:
-            raise RuntimeError("openai-whisper Python 包不可用")
-
-        with self._whisper_model_cache_lock:
-            cached_model = self._whisper_model_cache.get(model_name)
-            if cached_model is not None:
-                return cached_model
-
-            # 使用 CPU 时，尽量将线程数控制在配置值内，避免过度占用。
-            try:
-                import torch
-
-                torch.set_num_threads(int(self.whisper_threads))
-            except Exception:
-                pass
-
-            try:
-                model = whisper_lib.load_model(model_name, device="cpu")
-            except TypeError:
-                model = whisper_lib.load_model(model_name)
-
-            self._whisper_model_cache[model_name] = model
-            logging.info("Whisper 常驻模型已加载: %s", model_name)
-            return model
-
-    def _generate_subtitles_with_resident_whisper(
-        self,
-        video_file: Path,
-        output_dir: Path,
-        srt_path: Path,
-    ) -> tuple[bool, str]:
-        if whisper_lib is None:
-            return False, "openai-whisper Python 包不可用"
-
-        try:
-            model = self._get_resident_whisper_model()
-        except Exception as exc:
-            return False, str(exc)
-
-        try:
-            with self._whisper_infer_lock:
-                result = model.transcribe(
-                    str(video_file),
-                    language="zh",
-                    task="transcribe",
-                    fp16=False,
-                    verbose=False,
-                )
-
-            writer = whisper_lib.utils.get_writer("srt", str(output_dir))
-            writer(result, str(video_file))
-        except Exception as exc:
-            return False, str(exc)
-
-        if not srt_path.exists() or srt_path.stat().st_size <= 0:
-            return False, f"Whisper 常驻模式未生成字幕文件: {srt_path}"
-        return True, ""
-
-    def _generate_subtitles_with_whisper_cli(
-        self,
-        video_file: Path,
-        output_dir: Path,
-        srt_path: Path,
-    ) -> tuple[bool, str]:
-        cmd = [
-            "whisper",
-            str(video_file),
-            "--model",
-            self.whisper_model,
-            "--language",
-            "zh",
-            "--task",
-            "transcribe",
-            "--fp16",
-            "False",
-            "--threads",
-            str(self.whisper_threads),
-            "--output_format",
-            "srt",
-            "--output_dir",
-            str(output_dir),
-        ]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-        )
-        if result.returncode != 0:
-            return False, str(result.stderr or "").strip()
-        if not srt_path.exists() or srt_path.stat().st_size <= 0:
-            return False, f"Whisper CLI 未生成字幕文件: {srt_path}"
-        return True, ""
-
     def _build_subtitle_cache_key(
         self,
         video_path: Path,
         cache_identity: Optional[str] = None,
     ) -> str:
+        backend_signature = ""
+        try:
+            backend_signature = self.transcriber.cache_signature()
+        except Exception:
+            backend_signature = getattr(self.transcriber, "name", "faster_whisper")
+
         normalized_identity = str(cache_identity or "").strip()
         if normalized_identity:
-            raw_key = f"cache_identity:{normalized_identity}|{self.whisper_model}|zh"
+            raw_key = (
+                f"cache_identity:{normalized_identity}|{self.whisper_model}|zh|"
+                f"{backend_signature}"
+            )
             return hashlib.sha256(raw_key.encode("utf-8", errors="ignore")).hexdigest()
 
         stat_info = video_path.stat()
         mtime_ns = int(getattr(stat_info, "st_mtime_ns", int(stat_info.st_mtime * 1e9)))
         raw_key = (
             f"{video_path.resolve(strict=False)}|{stat_info.st_size}|{mtime_ns}|"
-            f"{self.whisper_model}|zh"
+            f"{self.whisper_model}|zh|{backend_signature}"
         )
         return hashlib.sha256(raw_key.encode("utf-8", errors="ignore")).hexdigest()
 
@@ -457,7 +375,8 @@ class VideoAnalyzerAgent:
         cache_identity: Optional[str] = None,
     ) -> str:
         """
-        调用本地 whisper 命令行从视频生成 SRT 字幕文件
+        通过当前配置的 ASR 后端从视频生成 SRT 字幕文件。
+
         :param video_path: 视频文件路径
         :param output_dir: 字幕输出目录
         :param cache_identity: 跨目录复用字幕缓存的身份标识（如视频 SHA-256）
@@ -479,25 +398,21 @@ class VideoAnalyzerAgent:
             print(f"字幕缓存命中: {srt_path}")
             return str(srt_path)
 
-        print(f"正在使用 Whisper ({self.whisper_model}) 常驻模型生成字幕...")
-        resident_ok, resident_error = self._generate_subtitles_with_resident_whisper(
-            video_file,
-            output_dir,
-            srt_path,
+        backend_name = getattr(self.transcriber, "name", self.whisper_backend)
+        print(
+            f"正在使用 {backend_name} ({self.whisper_model}) 生成字幕..."
         )
-        if not resident_ok:
-            logging.warning("Whisper 常驻模式失败，回退命令行模式: %s", resident_error)
-            print("Whisper 常驻模式失败，正在回退命令行模式...")
-            cli_ok, cli_error = self._generate_subtitles_with_whisper_cli(
-                video_file,
-                output_dir,
-                srt_path,
-            )
-            if not cli_ok:
-                raise RuntimeError(f"Whisper 字幕生成失败: {cli_error}")
+        try:
+            result = self.transcriber.transcribe(video_file, language="zh")
+        except TranscriberError as exc:
+            raise RuntimeError(f"字幕生成失败: {exc}") from exc
+        except Exception as exc:  # pragma: no cover - defensive
+            raise RuntimeError(f"字幕生成失败: {exc}") from exc
 
-        if not srt_path.exists():
-            raise FileNotFoundError(f"Whisper 未生成字幕文件: {srt_path}")
+        write_srt_file(srt_path, result.segments)
+
+        if not srt_path.exists() or srt_path.stat().st_size <= 0:
+            raise FileNotFoundError(f"字幕文件未生成: {srt_path}")
 
         self._save_subtitle_to_cache(video_file, srt_path, cache_identity=cache_identity)
         print(f"字幕已生成: {srt_path}")

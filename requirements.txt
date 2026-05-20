@@ -24,9 +24,9 @@ yt-dlp>=2025.1.0
 scrapling[fetchers]>=0.4.0
 
 # =========================
-# Speech-to-text
+# Speech-to-text (faster-whisper / CTranslate2)
 # =========================
-openai-whisper>=20231117
+faster-whisper>=1.0.0
 
 # =========================
 # Document generation
