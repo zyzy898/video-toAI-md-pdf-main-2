@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 270" role="img" aria-label="Mock UI: 历史抽屉中复用结果">
+  <defs>
+    <linearGradient id="bg5" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0b0d14"/>
+      <stop offset="1" stop-color="#10131c"/>
+    </linearGradient>
+    <linearGradient id="acc5" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#60a5fa"/>
+    </linearGradient>
+  </defs>
+  <rect width="480" height="270" fill="url(#bg5)"/>
+  <!-- backdrop dim -->
+  <rect width="480" height="270" fill="#000" opacity=".25"/>
+  <!-- top bar -->
+  <rect x="0" y="0" width="480" height="32" fill="#0a0c12"/>
+  <g transform="translate(14 12)">
+    <circle r="4" cx="4" cy="4" fill="#ff5f57"/>
+    <circle r="4" cx="18" cy="4" fill="#febc2e"/>
+    <circle r="4" cx="32" cy="4" fill="#28c840"/>
+  </g>
+  <text x="60" y="20" fill="#94a3b8" font-family="system-ui,Segoe UI,sans-serif" font-size="9" letter-spacing="1">HISTORY · DRAWER</text>
+
+  <!-- main content faded -->
+  <g opacity=".45">
+    <rect x="20" y="48" width="240" height="14" rx="4" fill="#1f2937"/>
+    <rect x="20" y="68" width="180" height="10" rx="4" fill="#1f2937"/>
+    <rect x="20" y="92" width="240" height="80" rx="8" fill="#12151f" stroke="#1f2937"/>
+    <rect x="20" y="180" width="240" height="64" rx="8" fill="#12151f" stroke="#1f2937"/>
+  </g>
+
+  <!-- right drawer -->
+  <g>
+    <rect x="276" y="32" width="204" height="238" fill="#0e1320" stroke="#1f2937"/>
+    <!-- header -->
+    <text x="290" y="52" fill="#f8fafc" font-family="system-ui,Segoe UI,sans-serif" font-size="12" font-weight="700">历史记录</text>
+    <text x="290" y="65" fill="#94a3b8" font-family="system-ui,Segoe UI,sans-serif" font-size="8">已隔离至本机 · 共 12 条</text>
+    <g transform="translate(442 42)">
+      <rect width="22" height="18" rx="5" fill="rgba(34,211,238,.12)" stroke="rgba(34,211,238,.4)"/>
+      <path d="M5 9 a6 6 0 1 1 12 0 a6 6 0 1 1 -12 0 M11 5 v4 l3 2" stroke="#a5f3fc" stroke-width="1.2" fill="none" stroke-linecap="round"/>
+    </g>
+    <!-- search -->
+    <rect x="290" y="74" width="174" height="22" rx="6" fill="#070910" stroke="#334155"/>
+    <text x="298" y="89" fill="#64748b" font-family="system-ui,Segoe UI,sans-serif" font-size="9">🔍 搜索历史标题或时间</text>
+
+    <!-- list items -->
+    <g font-family="system-ui,Segoe UI,sans-serif">
+      <!-- item 1 active -->
+      <g>
+        <rect x="290" y="106" width="174" height="44" rx="8" fill="#12151f" stroke="rgba(34,211,238,.6)"/>
+        <rect x="298" y="114" width="38" height="28" rx="4" fill="url(#acc5)" opacity=".75"/>
+        <polygon points="312,122 312,134 322,128" fill="#031016"/>
+        <text x="342" y="124" fill="#e2e8f0" font-size="10" font-weight="600">tutorial_setup</text>
+        <text x="342" y="138" fill="#94a3b8" font-size="8">6 步骤 · 4 截图 · 03:24</text>
+      </g>
+      <!-- item 2 -->
+      <g>
+        <rect x="290" y="156" width="174" height="44" rx="8" fill="#12151f" stroke="#1f2937"/>
+        <rect x="298" y="164" width="38" height="28" rx="4" fill="#0f766e" opacity=".75"/>
+        <polygon points="312,172 312,184 322,178" fill="#031016"/>
+        <text x="342" y="174" fill="#e2e8f0" font-size="10" font-weight="600">product_demo</text>
+        <text x="342" y="188" fill="#94a3b8" font-size="8">8 步骤 · 6 截图 · 05:12</text>
+      </g>
+      <!-- item 3 -->
+      <g>
+        <rect x="290" y="206" width="174" height="44" rx="8" fill="#12151f" stroke="#1f2937"/>
+        <rect x="298" y="214" width="38" height="28" rx="4" fill="#312e81" opacity=".75"/>
+        <polygon points="312,222 312,234 322,228" fill="#031016"/>
+        <text x="342" y="224" fill="#e2e8f0" font-size="10" font-weight="600">onboarding_v3</text>
+        <text x="342" y="238" fill="#94a3b8" font-size="8">5 步骤 · 3 截图 · 02:08</text>
+      </g>
+    </g>
+  </g>
+</svg>

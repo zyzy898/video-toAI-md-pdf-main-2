@@ -1,0 +1,17 @@
+.text-type {
+  display: inline-block;
+  white-space: pre-wrap;
+}
+
+.text-type__cursor {
+  margin-left: 0.15rem;
+  display: inline-block;
+  opacity: 1;
+  /* 让光标基线与文字一致，避免大字号下错位 */
+  vertical-align: baseline;
+  font-weight: 500;
+}
+
+.text-type__cursor--hidden {
+  display: none;
+}

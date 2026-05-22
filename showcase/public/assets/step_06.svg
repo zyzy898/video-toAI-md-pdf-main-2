@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 480 270" role="img" aria-label="Mock UI: 编辑步骤后重新生成文档">
+  <defs>
+    <linearGradient id="bg6" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#0b0d14"/>
+      <stop offset="1" stop-color="#10131c"/>
+    </linearGradient>
+    <linearGradient id="acc6" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#67e8f9"/>
+      <stop offset="1" stop-color="#60a5fa"/>
+    </linearGradient>
+    <linearGradient id="warn6" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#fbbf24"/>
+      <stop offset="1" stop-color="#f97316"/>
+    </linearGradient>
+  </defs>
+  <rect width="480" height="270" fill="url(#bg6)"/>
+  <!-- top bar -->
+  <rect x="0" y="0" width="480" height="32" fill="#0a0c12"/>
+  <g transform="translate(14 12)">
+    <circle r="4" cx="4" cy="4" fill="#ff5f57"/>
+    <circle r="4" cx="18" cy="4" fill="#febc2e"/>
+    <circle r="4" cx="32" cy="4" fill="#28c840"/>
+  </g>
+  <text x="60" y="20" fill="#94a3b8" font-family="system-ui,Segoe UI,sans-serif" font-size="9" letter-spacing="1">RESULT / EDIT</text>
+
+  <!-- title row -->
+  <text x="20" y="56" fill="#f8fafc" font-family="system-ui,Segoe UI,sans-serif" font-size="13" font-weight="700">编辑步骤</text>
+  <g transform="translate(280 44)">
+    <rect width="80" height="22" rx="6" fill="rgba(34,211,238,.12)" stroke="rgba(34,211,238,.4)"/>
+    <text x="40" y="15" text-anchor="middle" fill="#a5f3fc" font-family="system-ui,Segoe UI,sans-serif" font-size="9" font-weight="600">保存并重生成</text>
+  </g>
+  <g transform="translate(366 44)">
+    <rect width="56" height="22" rx="6" fill="#070910" stroke="#334155"/>
+    <text x="28" y="15" text-anchor="middle" fill="#cbd5e1" font-family="system-ui,Segoe UI,sans-serif" font-size="9">取消</text>
+  </g>
+  <text x="20" y="69" fill="#94a3b8" font-family="system-ui,Segoe UI,sans-serif" font-size="8">支持拖拽排序 · 删除 · 修改标题与描述</text>
+
+  <!-- step cards -->
+  <g font-family="system-ui,Segoe UI,sans-serif">
+    <!-- step 1 (being dragged) -->
+    <g transform="translate(20 80)">
+      <rect width="440" height="48" rx="8" fill="#12151f" stroke="rgba(34,211,238,.55)" stroke-dasharray="4 3"/>
+      <rect x="8" y="14" width="14" height="20" rx="3" fill="#1f2937"/>
+      <line x1="11" y1="20" x2="19" y2="20" stroke="#94a3b8" stroke-width="1.5"/>
+      <line x1="11" y1="24" x2="19" y2="24" stroke="#94a3b8" stroke-width="1.5"/>
+      <line x1="11" y1="28" x2="19" y2="28" stroke="#94a3b8" stroke-width="1.5"/>
+      <rect x="30" y="14" width="36" height="20" rx="999" fill="rgba(34,211,238,.12)" stroke="rgba(34,211,238,.4)"/>
+      <text x="48" y="28" text-anchor="middle" fill="#a5f3fc" font-size="9">#1</text>
+      <text x="74" y="22" fill="#e2e8f0" font-size="10" font-weight="600">打开应用并完成账号登录</text>
+      <text x="74" y="34" fill="#94a3b8" font-size="8">00:00:08 · 启动客户端，使用注册邮箱与密码登录</text>
+    </g>
+    <!-- step 2 -->
+    <g transform="translate(20 134)">
+      <rect width="440" height="48" rx="8" fill="#12151f" stroke="#1f2937"/>
+      <rect x="8" y="14" width="14" height="20" rx="3" fill="#1f2937"/>
+      <line x1="11" y1="20" x2="19" y2="20" stroke="#94a3b8" stroke-width="1.5"/>
+      <line x1="11" y1="24" x2="19" y2="24" stroke="#94a3b8" stroke-width="1.5"/>
+      <line x1="11" y1="28" x2="19" y2="28" stroke="#94a3b8" stroke-width="1.5"/>
+      <rect x="30" y="14" width="36" height="20" rx="999" fill="rgba(34,211,238,.12)" stroke="rgba(34,211,238,.4)"/>
+      <text x="48" y="28" text-anchor="middle" fill="#a5f3fc" font-size="9">#2</text>
+      <text x="74" y="22" fill="#e2e8f0" font-size="10" font-weight="600">新建项目并导入素材（已修改）</text>
+      <text x="74" y="34" fill="#94a3b8" font-size="8">00:00:31 · 命名为 demo-001，从本地拖入视频源文件</text>
+      <!-- edited badge -->
+      <g transform="translate(384 14)">
+        <rect width="48" height="20" rx="999" fill="url(#warn6)" opacity=".18" stroke="rgba(251,191,36,.5)"/>
+        <text x="24" y="14" text-anchor="middle" fill="#fde68a" font-size="8">已编辑</text>
+      </g>
+    </g>
+    <!-- step 3 (drop indicator above) -->
+    <g transform="translate(20 188)">
+      <rect width="440" height="2" fill="rgba(34,211,238,.65)"/>
+      <rect y="6" width="440" height="48" rx="8" fill="#12151f" stroke="#1f2937"/>
+      <rect x="8" y="20" width="14" height="20" rx="3" fill="#1f2937"/>
+      <line x1="11" y1="26" x2="19" y2="26" stroke="#94a3b8" stroke-width="1.5"/>
+      <line x1="11" y1="30" x2="19" y2="30" stroke="#94a3b8" stroke-width="1.5"/>
+      <line x1="11" y1="34" x2="19" y2="34" stroke="#94a3b8" stroke-width="1.5"/>
+      <rect x="30" y="20" width="36" height="20" rx="999" fill="rgba(34,211,238,.12)" stroke="rgba(34,211,238,.4)"/>
+      <text x="48" y="34" text-anchor="middle" fill="#a5f3fc" font-size="9">#3</text>
+      <text x="74" y="28" fill="#e2e8f0" font-size="10" font-weight="600">勾选分析参数与导出格式</text>
+      <text x="74" y="40" fill="#94a3b8" font-size="8">00:01:04 · 字幕模式 + Markdown / PDF 双导出</text>
+    </g>
+    <!-- add new step button -->
+    <g transform="translate(20 248)">
+      <rect width="440" height="14" rx="6" fill="rgba(34,211,238,.06)" stroke="rgba(34,211,238,.35)" stroke-dasharray="3 3"/>
+      <text x="220" y="11" text-anchor="middle" fill="#a5f3fc" font-size="8">+ 添加新步骤</text>
+    </g>
+  </g>
+</svg>
