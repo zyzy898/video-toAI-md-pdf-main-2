@@ -15,6 +15,7 @@ from werkzeug.utils import secure_filename
 from config import ALLOWED_EXTENSIONS, OUTPUT_ROOT, allowed_file
 from path_utils import _assert_within
 from utils import _safe_float
+from asr.zh_simplify import to_simplified
 
 
 def _format_seconds_to_mmss(value: Any) -> str:
@@ -86,7 +87,7 @@ def _parse_srt_file_entries(srt_path: Path) -> List[Dict[str, Any]]:
             continue
 
         text_lines = lines[time_line_index + 1 :]
-        text = "\n".join(text_lines).strip()
+        text = to_simplified("\n".join(text_lines).strip())
         entries.append(
             {
                 "index": len(entries) + 1,
@@ -179,11 +180,32 @@ def _render_txt_from_entries(entries: List[Dict[str, Any]]) -> str:
     return "\n".join(lines).strip() + ("\n" if lines else "")
 
 
+def _ensure_subtitle_simplified(srt_path: Path) -> None:
+    """Rewrite the SRT file in Simplified Chinese if it contains Traditional.
+
+    Covers SRT files that did not pass through the ASR backend (e.g. uploaded
+    by the user). Character-level conversion preserves the SRT layout exactly.
+    """
+
+    try:
+        content = srt_path.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return
+    converted = to_simplified(content)
+    if converted != content:
+        try:
+            srt_path.write_text(converted, encoding="utf-8")
+        except OSError:
+            return
+
+
 def _ensure_subtitle_exports(output_dir: Path, srt_path: Path) -> Dict[str, Path]:
     output_dir_resolved = output_dir.resolve(strict=False)
     srt_resolved = srt_path.resolve(strict=False)
     _assert_within(output_dir_resolved, OUTPUT_ROOT, "output_dir")
     _assert_within(srt_resolved, output_dir_resolved, "subtitle_file")
+
+    _ensure_subtitle_simplified(srt_resolved)
 
     entries = _parse_srt_file_entries(srt_resolved)
     vtt_path = srt_resolved.with_suffix(".vtt")

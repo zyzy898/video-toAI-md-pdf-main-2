@@ -1109,6 +1109,7 @@ IMPORTANT:
         """
         import markdown
         from fpdf import FPDF, XPos, YPos
+        from PIL import Image
 
         if not pdf_path:
             pdf_path = str(Path(md_path).with_suffix(".pdf"))
@@ -1129,9 +1130,14 @@ IMPORTANT:
 
         class PDF(FPDF):
             def header(self):
+                # 仅第一页保留 "Video Analysis" 标题，其余页面不重复标题，
+                # 内容直接从顶部边距开始，避免每页顶部留出大段空白。
+                if self.page_no() != 1:
+                    return
                 self.set_font(font_family, "B", 15)
-                self.cell(0, 10, "Video Analysis", border=False, align="C")
-                self.ln(20)
+                self.cell(0, 10, "Video Analysis", border=False, align="C",
+                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                self.ln(4)
 
         pdf = PDF()
 
@@ -1229,6 +1235,10 @@ IMPORTANT:
                 pdf.ln(5)
             elif line.startswith("=="):
                 title = line.strip("= ").strip()
+                # 每个步骤标题前另起一页，保证“步骤标题 + 截图 + 操作说明”
+                # 始终落在同一页，而不是截图与说明被拆到相邻两页。
+                if pdf.get_y() > pdf.t_margin + 1:
+                    pdf.add_page()
                 pdf.set_font(current_font, "B", 14)
                 pdf.set_text_color(44, 62, 80)
                 pdf.cell(0, 8, title, border=False, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
@@ -1246,7 +1256,22 @@ IMPORTANT:
                     img_full_path = base_dir / img_path
                     if img_full_path.exists():
                         try:
-                            pdf.image(str(img_full_path), w=170)
+                            # 同时按可用宽度与最大高度约束尺寸：竖屏手机截图
+                            # 很高，若只限宽会撑满整页把操作说明挤到下一页。
+                            # 这里限制图片高度，并水平居中，让标题/图/说明同页。
+                            epw = pdf.w - pdf.l_margin - pdf.r_margin
+                            max_w = min(epw, 90.0)
+                            max_h = 150.0
+                            with Image.open(img_full_path) as im:
+                                iw, ih = im.size
+                            ratio = (iw / ih) if ih else 1.0
+                            draw_w = max_w
+                            draw_h = draw_w / ratio if ratio else max_h
+                            if draw_h > max_h:
+                                draw_h = max_h
+                                draw_w = draw_h * ratio
+                            x = pdf.l_margin + (epw - draw_w) / 2.0
+                            pdf.image(str(img_full_path), x=x, w=draw_w, h=draw_h)
                             pdf.ln(3)
                         except Exception:
                             pdf.cell(

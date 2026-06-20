@@ -28,8 +28,13 @@ scrapling[fetchers]>=0.4.0
 # =========================
 faster-whisper>=1.0.0
 
+# Traditional -> Simplified Chinese normalisation for transcripts
+zhconv>=1.4.3
+
 # =========================
 # Document generation
 # =========================
 markdown>=3.5.0
 fpdf2>=2.7.0
+# Image sizing for PDF embedding (constrain screenshot height)
+Pillow>=10.0.0

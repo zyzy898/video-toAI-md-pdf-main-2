@@ -6,30 +6,36 @@
 const tourCards = [
   {
     num: '01',
+    href: '#showdown',
+    title: '输入↔输出对照',
+    desc: '真实源视频与自动生成文档并排，一眼看懂这个工具产出什么'
+  },
+  {
+    num: '02',
     href: '#capabilities',
     title: '核心能力',
     desc: '9 张卡片速览输入 · 安全 · 分析 · 字幕 · 导出 · 模型 · 链接 · 历史 · 编辑'
   },
   {
-    num: '02',
+    num: '03',
     href: '#workspace',
     title: '工作台预览',
     desc: '上传卡 · 链接直达 · 文件列表 · 进度面板 · 分析参数模拟界面'
   },
   {
-    num: '03',
+    num: '04',
     href: '#pipeline',
     title: '处理链路',
     desc: '从上传到导出 · 七步法 + 终态卡 · 背后流光轨道'
   },
   {
-    num: '04',
+    num: '05',
     href: '#result',
     title: '真实输出',
     desc: '识别步骤 · Markdown 文档 · 字幕工作台 · 进度对话框'
   },
   {
-    num: '05',
+    num: '06',
     href: '#tech',
     title: '技术栈与工程化',
     desc: '6 张技术栈卡 + 12 张工程化优化卡片，覆盖端到端落地实践'

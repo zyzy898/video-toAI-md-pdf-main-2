@@ -1228,6 +1228,104 @@ section + .section-reveal > section,
 }
 
 /* ===== Result steps ===== */
+/* ===== Showdown (输入↔输出对照) ===== */
+.showdown-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  gap: 1.25rem;
+}
+@media (max-width: 900px) {
+  .showdown-grid { grid-template-columns: 1fr; }
+}
+.showdown-card {
+  padding: 1.1rem;
+  border-radius: var(--vi-radius-lg);
+  border: 1px solid var(--vi-border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0)),
+    var(--vi-surface);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+.showdown-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.7rem;
+}
+.showdown-badge {
+  font-size: 0.74rem;
+  font-weight: 600;
+  padding: 0.2rem 0.6rem;
+  border-radius: 999px;
+  border: 1px solid var(--vi-border-strong);
+}
+.showdown-badge--in { color: var(--vi-text-accent); }
+.showdown-badge--out { color: var(--vi-text-accent-2); }
+.showdown-meta { font-size: 0.76rem; color: var(--vi-text-3); }
+.showdown-video-wrap {
+  border-radius: var(--vi-radius);
+  overflow: hidden;
+  border: 1px solid var(--vi-border);
+  background: #000;
+}
+.showdown-video {
+  display: block;
+  width: 100%;
+  max-height: 340px;
+  background: #000;
+}
+.showdown-caption {
+  margin: 0.6rem 0 0;
+  font-size: 0.8rem;
+  color: var(--vi-text-2);
+  text-align: center;
+}
+.showdown-arrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--vi-accent);
+}
+.showdown-arrow svg { width: 2rem; height: 2rem; }
+@media (max-width: 900px) {
+  .showdown-arrow { transform: rotate(90deg); }
+}
+.showdown-doc {
+  border-radius: var(--vi-radius);
+  border: 1px solid var(--vi-border);
+  background: var(--vi-surface);
+  padding: 0.9rem 1rem;
+}
+.showdown-doc-title {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--vi-text-0);
+  margin-bottom: 0.7rem;
+}
+.showdown-doc-title svg { color: var(--vi-text-accent-2); }
+.showdown-doc-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.4rem;
+}
+.showdown-doc-list li {
+  font-size: 0.84rem;
+  color: var(--vi-text-1);
+  line-height: 1.5;
+}
+.showdown-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1rem;
+}
+
 .result-grid {
   display: grid;
   gap: 1.25rem;
@@ -2090,6 +2188,36 @@ footer .brand {
 .ico { width: 1rem; height: 1rem; flex-shrink: 0; }
 .ico-sm { width: 0.85rem; height: 0.85rem; }
 
+/* ===== Workspace 处理阶段流 ===== */
+.ws-stage-flow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+.ws-stage-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.28rem;
+  font-size: 0.74rem;
+  padding: 0.26rem 0.6rem;
+  border-radius: 999px;
+  color: var(--vi-text-3);
+  border: 1px solid var(--vi-border);
+  background: var(--vi-surface);
+}
+.ws-stage-chip--done {
+  color: var(--vi-text-success);
+  border-color: rgba(16, 185, 129, 0.35);
+  background: rgba(16, 185, 129, 0.08);
+}
+.ws-stage-chip--active {
+  color: var(--vi-on-accent);
+  border-color: transparent;
+  background: linear-gradient(135deg, var(--vi-accent), var(--vi-accent-3));
+  font-weight: 600;
+  box-shadow: 0 4px 14px -6px var(--vi-accent-ring);
+}
+
 @media (min-width: 980px) {
   .ws-body--row {
     grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
@@ -2369,10 +2497,7 @@ footer .brand {
 .tour-grid {
   display: grid;
   gap: 1rem;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-}
-@media (max-width: 1100px) {
-  .tour-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 @media (max-width: 720px) {
   .tour-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -2978,6 +3103,17 @@ html, body {
 /* —— 着陆页文字：白字 + 深阴影 → 深字 + 柔阴影 —— */
 :root[data-theme="light"] .landing-main .eyebrow {
   color: var(--vi-accent);
+}
+/* 亮色下 eyebrow 胶囊：实色浅青底 + 清晰描边，文字不再发飘 */
+:root[data-theme="light"] .eyebrow {
+  color: #0e7490;
+  border: 1px solid rgba(14, 116, 144, 0.32);
+  background: linear-gradient(135deg, rgba(14, 116, 144, 0.14), rgba(29, 78, 216, 0.1));
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+}
+:root[data-theme="light"] .eyebrow::before {
+  background: #0e7490;
+  box-shadow: 0 0 8px rgba(14, 116, 144, 0.45);
 }
 :root[data-theme="light"] .landing-title {
   color: var(--vi-text-0);

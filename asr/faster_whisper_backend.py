@@ -20,6 +20,7 @@ from .base import (
     TranscriberInitError,
     TranscriberNotAvailable,
 )
+from .zh_simplify import to_simplified
 
 
 try:
@@ -65,7 +66,12 @@ class FasterWhisperBackend(TranscriberBackend):
         self.vad_filter = bool(vad_filter)
 
     def cache_signature(self) -> str:
-        return f"{self.name}:{self.model_size}:{self.compute_type}:{self.beam_size}:{int(self.vad_filter)}"
+        # ``zhcn`` marks Simplified-Chinese normalised output; bumping it
+        # invalidates older cached subtitles that may still be Traditional.
+        return (
+            f"{self.name}:{self.model_size}:{self.compute_type}:{self.beam_size}:"
+            f"{int(self.vad_filter)}:zhcn"
+        )
 
     def _model_cache_key(self) -> str:
         return f"{self.model_size}|{self.device}|{self.compute_type}|{self.threads}"
@@ -102,6 +108,7 @@ class FasterWhisperBackend(TranscriberBackend):
         if not video_path.exists():
             raise TranscriberError(f"视频文件不存在: {video_path}")
         lang = language or self.language
+        normalize_zh = str(lang).lower().startswith("zh")
 
         model = self._get_model()
         with self._infer_lock:
@@ -119,6 +126,8 @@ class FasterWhisperBackend(TranscriberBackend):
                 text = str(getattr(raw, "text", "") or "").strip()
                 if not text:
                     continue
+                if normalize_zh:
+                    text = to_simplified(text)
                 try:
                     start = float(getattr(raw, "start", 0.0) or 0.0)
                     end = float(getattr(raw, "end", start) or start)

@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import DarkVeil from '../components/DarkVeil/DarkVeil.jsx';
 import Footer from '../components/Footer.jsx';
 import ShowcaseIntro from '../components/sections/ShowcaseIntro.jsx';
+import Showdown from '../components/sections/Showdown.jsx';
 import Capabilities from '../components/sections/Capabilities.jsx';
 import Workspace from '../components/sections/Workspace.jsx';
 import Pipeline from '../components/sections/Pipeline.jsx';
@@ -38,6 +39,10 @@ export default function ShowcasePage() {
       </div>
 
       <ShowcaseIntro />
+
+      <SectionWrapper variant="scale">
+        <Showdown />
+      </SectionWrapper>
 
       <SectionWrapper variant="up">
         <Capabilities />
