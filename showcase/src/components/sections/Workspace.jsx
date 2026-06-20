@@ -11,13 +11,6 @@ import {
 
 const chips = ['Whisper ASR', '批量处理', 'Markdown · PDF', '链接直达'];
 
-const kvUpload = [
-  { label: '标准推荐', value: '20 分钟 · 250 MB 以内', help: '处理速度与稳定性最佳' },
-  { label: '长视频模式', value: '自动切片 · 自动压缩', help: '20 分钟 / 250 MB+ 自动进入' },
-  { label: '超长视频', value: '建议先裁剪', help: '90 分钟+ 请拆分' },
-  { label: '批量上限', value: '5 个 / 含长视频 ≤ 2', help: '稳定性优先' }
-];
-
 const kvProgress = [
   { label: '阶段', value: 'vision_enhance', help: '视觉增强标题与描述' },
   { label: '已完成', value: '2 个', help: '输出包就绪可下载', valueColor: '#6ee7b7' },
@@ -142,26 +135,6 @@ export default function Workspace() {
                       链接直达分析
                     </button>
                   </div>
-                  <p
-                    style={{
-                      margin: 0,
-                      color: 'rgba(186, 230, 253, 0.78)',
-                      fontSize: '0.72rem'
-                    }}
-                  >
-                    只需提供链接即可下载并分析；平台播放页链接建议安装{' '}
-                    <code
-                      style={{
-                        background: 'rgba(2,6,23,0.5)',
-                        padding: '0.05em 0.32em',
-                        borderRadius: '0.25rem',
-                        border: '1px solid var(--vi-border)'
-                      }}
-                    >
-                      yt-dlp
-                    </code>{' '}
-                    提升兼容性。
-                  </p>
                 </div>
 
                 <div className="drop">
@@ -170,16 +143,6 @@ export default function Workspace() {
                   </div>
                   <p className="drop-title">点击选择 · 或拖拽视频到这里</p>
                   <p className="drop-hint">支持 MP4 / AVI / MOV / MKV / WMV / FLV / WebM / M4V 等</p>
-                </div>
-
-                <div className="kv-grid" style={{ marginTop: '0.9rem' }}>
-                  {kvUpload.map((kv) => (
-                    <div key={kv.label} className="kv-cell">
-                      <div className="kv-label">{kv.label}</div>
-                      <div className="kv-value">{kv.value}</div>
-                      <p className="kv-help">{kv.help}</p>
-                    </div>
-                  ))}
                 </div>
 
                 <div className="files" style={{ marginTop: '0.85rem' }}>

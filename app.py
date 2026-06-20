@@ -2745,9 +2745,26 @@ def _check_upload_blacklist_precheck(
     return blacklist_risk, fingerprint
 
 
+def _build_deferred_upload_risk_result(fingerprint: str = "") -> Dict[str, Any]:
+    risk: Dict[str, Any] = {
+        "decision": "allow",
+        "risk_level": "low",
+        "reason_code": "UPLOAD_RISK_DEFERRED_TO_ANALYZE",
+        "reason": "上传阶段仅执行轻量安全校验，内容风控已延后到分析前执行。",
+        "confidence": 0.0,
+        "scores": {"nudity": 0.0, "violence": 0.0, "gore": 0.0},
+        "dimensions": {},
+        "frame_count": 0,
+        "deferred_to_analyze": True,
+    }
+    if fingerprint:
+        risk["hash_sha256"] = fingerprint
+    return risk
+
+
 def _run_upload_pre_risk_check(
     staged_video_path: Path,
-    risk_agent: VideoAnalyzerAgent,
+    risk_agent: VideoAnalyzerAgent | None,
     *,
     source: str,
     file_fingerprint: str = "",
@@ -2763,7 +2780,12 @@ def _run_upload_pre_risk_check(
         if blacklist_risk is not None:
             return blacklist_risk, fingerprint, "blacklist"
 
-    cache_model_key = _build_upload_risk_model_cache_key_from_agent(risk_agent)
+    cache_model_key = ""
+    if risk_agent is not None:
+        cache_model_key = _build_upload_risk_model_cache_key_from_agent(risk_agent)
+    else:
+        _, model_name, model_base_url = _read_shared_backend_model_options(require_api_key=False)
+        cache_model_key = _build_upload_risk_model_cache_key(model_name, model_base_url)
     if fingerprint and cache_model_key:
         cached_risk = _get_cached_upload_risk_result(fingerprint, cache_model_key)
         if cached_risk is not None:
@@ -2778,26 +2800,7 @@ def _run_upload_pre_risk_check(
                 cached_risk["hash_sha256"] = fingerprint
             return cached_risk, fingerprint, "cache"
 
-    risk = _moderate_staged_upload(
-        staged_video_path,
-        risk_agent,
-        file_fingerprint=fingerprint,
-    )
-    if fingerprint and not str(risk.get("hash_sha256", "")).strip():
-        risk["hash_sha256"] = fingerprint
-    if (
-        fingerprint
-        and cache_model_key
-        and not _is_risk_infra_failure(risk)
-        and not _should_block_by_risk(str(risk.get("decision", "")))
-    ):
-        _set_cached_upload_risk_result(fingerprint, cache_model_key, risk)
-        logger.info(
-            "上传前风控缓存写入: source=%s, sha256_prefix=%s",
-            source,
-            fingerprint[:12],
-        )
-    return risk, fingerprint, "model"
+    return _build_deferred_upload_risk_result(fingerprint), fingerprint, "deferred"
 
 
 def _read_shared_backend_model_options(require_api_key: bool = True) -> Tuple[str, str, str]:
@@ -3773,14 +3776,6 @@ def upload_file():
     if not allowed_file(file.filename):
         return jsonify({"error": "不支持的文件格式"}), 400
 
-    upload_api_key, upload_model_name, upload_model_base_url = _normalize_upload_model_options(
-        {
-            "api_key": request.form.get("api_key", ""),
-            "model_name": request.form.get("model_name", ""),
-            "model_base_url": request.form.get("model_base_url", ""),
-        }
-    )
-
     staged_path = _build_upload_staging_path(file.filename)
     try:
         file.save(str(staged_path))
@@ -3812,12 +3807,9 @@ def upload_file():
             _safe_remove_file(staged_path)
             return jsonify(_risk_reject_payload(blacklist_risk)), 403
 
-        risk_agent = _build_risk_agent_for_upload(
-            upload_api_key, upload_model_name, upload_model_base_url
-        )
         risk, file_fingerprint, _ = _run_upload_pre_risk_check(
             staged_video_path=staged_path,
-            risk_agent=risk_agent,
+            risk_agent=None,
             source="upload_single",
             file_fingerprint=file_fingerprint,
             skip_blacklist=True,
@@ -3869,9 +3861,6 @@ def upload_from_url():
     except ValueError as exc:
         return jsonify({"error": str(exc)}), 400
 
-    upload_api_key, upload_model_name, upload_model_base_url = _normalize_upload_model_options(
-        data
-    )
     requested_name = _safe_video_filename(
         str(data.get("filename", "")).strip()
         or _guess_video_filename_from_url(source_url, fallback="url_video.mp4"),
@@ -3914,12 +3903,9 @@ def upload_from_url():
             _safe_remove_file(staged_path)
             return jsonify(_risk_reject_payload(blacklist_risk)), 403
 
-        risk_agent = _build_risk_agent_for_upload(
-            upload_api_key, upload_model_name, upload_model_base_url
-        )
         risk, file_fingerprint, _ = _run_upload_pre_risk_check(
             staged_video_path=staged_path,
-            risk_agent=risk_agent,
+            risk_agent=None,
             source="upload_url",
             file_fingerprint=file_fingerprint,
             skip_blacklist=True,
@@ -4028,16 +4014,8 @@ def upload_chunk_init():
         MAX_UPLOAD_CHUNK_SIZE,
     )
     file_key = str(data.get("file_key", "")).strip()
-    try:
-        upload_api_key, upload_model_name, upload_model_base_url = (
-            _normalize_upload_model_options(
-                data,
-                require_api_key=True,
-                require_model_name=True,
-            )
-        )
-    except ValueError as exc:
-        return jsonify({"error": str(exc), "code": "risk_service_unavailable"}), 503
+    _, upload_model_name, upload_model_base_url = _normalize_upload_model_options(data)
+    upload_api_key = ""
 
     try:
         requested_upload_id = _normalize_upload_id(data.get("upload_id", ""))
@@ -4239,9 +4217,6 @@ def upload_chunk_finalize():
     filename = ""
     total_size = 0
     staging_path: Path | None = None
-    risk_api_key = ""
-    risk_model_name = ""
-    risk_model_base_url = ""
 
     with upload_session_lock:
         session = _load_upload_session(upload_id)
@@ -4251,9 +4226,6 @@ def upload_chunk_finalize():
         filename = str(session.get("filename", "")).strip()
         if not filename or not allowed_file(filename):
             return jsonify({"error": "原始文件名无效"}), 400
-        risk_api_key = str(session.get("risk_api_key", "")).strip()
-        risk_model_name = str(session.get("risk_model_name", "")).strip()
-        risk_model_base_url = str(session.get("risk_model_base_url", "")).strip()
 
         total_chunks = _safe_int(session.get("total_chunks"), 0, 1)
         total_size = _safe_int(session.get("total_size"), 0, 1)
@@ -4332,12 +4304,9 @@ def upload_chunk_finalize():
             _safe_remove_file(staging_path)
             return jsonify(_risk_reject_payload(blacklist_risk)), 403
 
-        risk_agent = _build_risk_agent_for_upload(
-            risk_api_key, risk_model_name, risk_model_base_url
-        )
         risk, file_fingerprint, _ = _run_upload_pre_risk_check(
             staged_video_path=staging_path,
-            risk_agent=risk_agent,
+            risk_agent=None,
             source="upload_chunk_finalize",
             file_fingerprint=file_fingerprint,
             skip_blacklist=True,
@@ -4725,6 +4694,123 @@ def download_subtitle(output_dir):
     )
 
 
+@app.route("/download_subtitles_zip/<output_dir>")
+def download_subtitles_zip(output_dir):
+    try:
+        output_path = _resolve_output_dir(output_dir, must_exist=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "输出目录不存在"}), 404
+
+    subtitle_file = _find_output_subtitle_file(output_path)
+    if subtitle_file is None:
+        return jsonify({"error": "未找到字幕文件"}), 404
+
+    subtitle_exports = _ensure_subtitle_exports(output_path, subtitle_file)
+    memory_file = BytesIO()
+    with zipfile.ZipFile(memory_file, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fmt in ("srt", "vtt", "txt"):
+            export_path = subtitle_exports.get(fmt)
+            if export_path is not None and export_path.exists():
+                zf.write(export_path, f"subtitle.{fmt}")
+
+    memory_file.seek(0)
+    return send_file(
+        memory_file,
+        mimetype="application/zip",
+        as_attachment=True,
+        download_name=f"{output_path.name}_subtitles.zip",
+    )
+
+
+@app.route("/refresh_subtitle/<output_dir>", methods=["POST"])
+def refresh_subtitle(output_dir):
+    try:
+        output_path = _resolve_output_dir(output_dir, must_exist=True)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except FileNotFoundError:
+        return jsonify({"error": "输出目录不存在"}), 404
+
+    preferred_video_name = ""
+    try:
+        for item in history_service.read_unlocked():
+            try:
+                item_output_dir = _resolve_output_dir(item.get("output_dir"), must_exist=False)
+            except ValueError:
+                continue
+            if item_output_dir.resolve(strict=False) == output_path.resolve(strict=False):
+                preferred_video_name = str(item.get("video_name", "")).strip()
+                break
+    except Exception:
+        preferred_video_name = ""
+
+    output_media = _build_output_media_bundle(
+        output_path,
+        preferred_video_name=preferred_video_name,
+    )
+    video_name = str(output_media.get("video_file_name", "")).strip()
+    if not video_name:
+        return jsonify({"error": "未找到可重新解析的视频文件"}), 404
+
+    video_path = (output_path / video_name).resolve(strict=False)
+    try:
+        _assert_within(video_path, output_path.resolve(strict=False), "video_file")
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not video_path.exists() or not video_path.is_file():
+        return jsonify({"error": "视频文件不存在"}), 404
+
+    # 移走旧字幕导出文件，确保 generate_subtitles 不会直接命中旧 SRT。
+    for path in output_path.glob(f"{video_path.stem}.*"):
+        if path.suffix.lower() in {".srt", ".vtt", ".txt"} and path.is_file() and not path.is_symlink():
+            try:
+                backup_path = output_path / f"{path.name}.bak-{int(time.time())}"
+                path.replace(backup_path)
+            except OSError:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+
+    try:
+        api_key, model_name, model_base_url = _read_shared_backend_model_options(require_api_key=True)
+        whisper_model, _, _, _, _ = _normalize_processing_options({})
+        agent = VideoAnalyzerAgent(
+            api_key,
+            whisper_model=whisper_model,
+            model_name=model_name,
+            model_base_url=model_base_url,
+        )
+        fresh_cache_identity = f"{video_path.name}:manual-refresh:{time.time_ns()}"
+        srt_path = agent.generate_subtitles(
+            str(video_path),
+            str(output_path),
+            cache_identity=fresh_cache_identity,
+        )
+        subtitle_file = Path(srt_path)
+        entries = _parse_srt_file_entries(subtitle_file)
+        output_media = _build_output_media_bundle(output_path, preferred_srt_path=str(subtitle_file))
+        return jsonify(
+            {
+                "success": True,
+                "output_dir": str(output_path),
+                "output_dir_name": output_path.name,
+                "subtitle_file": subtitle_file.name,
+                "line_count": len(entries),
+                "truncated": False,
+                "lines": entries[:12000],
+                "video_preview_url": str(output_media.get("video_preview_url", "")).strip(),
+                "subtitle_available": bool(output_media.get("subtitle_available", False)),
+                "subtitle_exports": output_media.get("subtitle_exports", {}),
+            }
+        )
+    except Exception as exc:
+        logger.exception("重新解析字幕失败: %s", exc)
+        return jsonify({"error": f"重新解析字幕失败：{exc}"}), 500
+
+
 @app.route("/regenerate", methods=["POST"])
 def regenerate_document():
     data = _json_payload()
@@ -4919,23 +5005,8 @@ def upload_batch_files():
     if not files:
         return jsonify({"error": "没有选择文件"}), 400
 
-    upload_api_key, upload_model_name, upload_model_base_url = _normalize_upload_model_options(
-        {
-            "api_key": request.form.get("api_key", ""),
-            "model_name": request.form.get("model_name", ""),
-            "model_base_url": request.form.get("model_base_url", ""),
-        }
-    )
-
     uploaded = []
     errors = []
-    try:
-        risk_agent = _build_risk_agent_for_upload(
-            upload_api_key, upload_model_name, upload_model_base_url
-        )
-    except ValueError as exc:
-        logger.warning("上传风控不可用（batch upload）: %s", exc)
-        return jsonify(_upload_risk_unavailable_payload()), 503
 
     for file in files:
         if not file or file.filename == "":
@@ -4965,7 +5036,7 @@ def upload_batch_files():
 
             risk, file_fingerprint, risk_source = _run_upload_pre_risk_check(
                 staged_video_path=staged_path,
-                risk_agent=risk_agent,
+                risk_agent=None,
                 source="upload_batch",
             )
             if risk_source == "blacklist":
@@ -5429,4 +5500,3 @@ if __name__ == "__main__":
             threads=waitress_threads,
             connection_limit=waitress_connection_limit,
         )
-

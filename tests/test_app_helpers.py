@@ -94,6 +94,60 @@ class TestRiskScoring:
     def test_level_from_decision(self, decision, level):
         assert app._risk_level_from_decision(decision) == level
 
+    def test_upload_pre_risk_check_defers_model_check_when_cache_misses(self, tmp_path, monkeypatch):
+        video_path = tmp_path / "safe.mp4"
+        video_path.write_bytes(b"\x00\x00\x00\x20ftypisom" + b"\x00" * 32)
+        fingerprint = "a" * 64
+
+        monkeypatch.setattr(app, "_compute_video_fingerprint_safely", lambda path, source: fingerprint)
+        monkeypatch.setattr(app, "_check_upload_blacklist_precheck", lambda **kwargs: (None, fingerprint))
+        monkeypatch.setattr(app, "_build_upload_risk_model_cache_key_from_agent", lambda agent: "b" * 64)
+        monkeypatch.setattr(app, "_get_cached_upload_risk_result", lambda fp, key: None)
+
+        def fail_if_model_called(*args, **kwargs):
+            raise AssertionError("upload precheck should not call model moderation")
+
+        monkeypatch.setattr(app, "_moderate_staged_upload", fail_if_model_called)
+
+        risk, returned_fingerprint, source = app._run_upload_pre_risk_check(
+            staged_video_path=video_path,
+            risk_agent=object(),
+            source="test_upload",
+        )
+
+        assert returned_fingerprint == fingerprint
+        assert source == "deferred"
+        assert risk["decision"] == "allow"
+        assert risk["reason_code"] == "UPLOAD_RISK_DEFERRED_TO_ANALYZE"
+
+    def test_upload_pre_risk_check_still_blocks_blacklist(self, tmp_path, monkeypatch):
+        video_path = tmp_path / "blocked.mp4"
+        video_path.write_bytes(b"\x00\x00\x00\x20ftypisom" + b"\x00" * 32)
+        fingerprint = "c" * 64
+        blacklist_risk = {
+            "decision": "block",
+            "risk_level": "high",
+            "reason_code": "BLACKLIST_EXACT_HASH_MATCH",
+        }
+
+        monkeypatch.setattr(app, "_compute_video_fingerprint_safely", lambda path, source: fingerprint)
+        monkeypatch.setattr(app, "_check_upload_blacklist_precheck", lambda **kwargs: (blacklist_risk, fingerprint))
+
+        def fail_if_model_called(*args, **kwargs):
+            raise AssertionError("blacklist precheck should short-circuit model moderation")
+
+        monkeypatch.setattr(app, "_moderate_staged_upload", fail_if_model_called)
+
+        risk, returned_fingerprint, source = app._run_upload_pre_risk_check(
+            staged_video_path=video_path,
+            risk_agent=object(),
+            source="test_upload",
+        )
+
+        assert returned_fingerprint == fingerprint
+        assert source == "blacklist"
+        assert risk is blacklist_risk
+
 
 class TestFileHelpers:
     @pytest.mark.parametrize(

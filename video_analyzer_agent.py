@@ -1,4 +1,5 @@
-﻿import os
+﻿import asyncio
+import os
 import json
 import logging
 import subprocess
@@ -757,22 +758,31 @@ class VideoAnalyzerAgent:
         if srt_path and os.path.exists(srt_path):
             subtitles = self.parse_srt(srt_path)
 
+        raw_concurrency = str(os.getenv("VISION_MAX_CONCURRENCY", "")).strip()
+        try:
+            vision_concurrency = int(raw_concurrency) if raw_concurrency else 4
+        except (TypeError, ValueError):
+            vision_concurrency = 4
+        vision_concurrency = max(1, min(vision_concurrency, 8))
+        vision_semaphore = asyncio.Semaphore(vision_concurrency)
+
         print(
-            f"将对 {len(to_enhance)} 个低自信度步骤进行 AI 看图增强（最多 {max_calls} 次）"
+            f"将对 {len(to_enhance)} 个低自信度步骤进行 AI 看图增强"
+            f"（最多 {max_calls} 次，并发 {vision_concurrency}）"
         )
 
-        for idx, step in to_enhance:
+        async def _enhance_one(idx, step):
             step_num = step.get("step", idx + 1)
             confidence = step.get("confidence", 0)
             img_path = Path(image_dir) / f"step_{step_num:02d}.jpg"
 
             if not img_path.exists():
                 print(f"  步骤{step_num}: 截图不存在，跳过")
-                continue
+                return None
 
             if not step.get("title") or not step.get("description"):
                 print(f"  步骤{step_num}: 缺少 title 或 description，跳过")
-                continue
+                return None
 
             # 读取图片转 base64
             with open(img_path, "rb") as f:
@@ -815,7 +825,7 @@ class VideoAnalyzerAgent:
 
             print(f"  步骤{step_num} (confidence={confidence:.1f}): AI 看图分析中...")
 
-            try:
+            async with vision_semaphore:
                 result = await self._chat_completion_text(
                     [
                         {
@@ -825,17 +835,29 @@ class VideoAnalyzerAgent:
                         {"role": "user", "content": user_content},
                     ]
                 )
-                enhanced = self._parse_json_object_response(result)
+            enhanced = self._parse_json_object_response(result)
+            return idx, enhanced
 
-                old_title = steps[idx]["title"]
-                steps[idx]["title"] = enhanced.get("title", steps[idx]["title"])
-                steps[idx]["description"] = enhanced.get(
-                    "description", steps[idx]["description"]
-                )
-                steps[idx]["enhanced"] = True
-                print(f"    ✓ 已增强: 「{old_title}」→「{steps[idx]['title']}」")
-            except Exception as e:
-                print(f"    解析增强结果失败: {e}，保留原始结果")
+        enhance_results = await asyncio.gather(
+            *(_enhance_one(idx, step) for idx, step in to_enhance),
+            return_exceptions=True,
+        )
+        for item in enhance_results:
+            if isinstance(item, Exception):
+                print(f"    解析增强结果失败: {item}，保留原始结果")
+                continue
+            if not item:
+                continue
+            idx, enhanced = item
+            if not isinstance(enhanced, dict):
+                continue
+            old_title = steps[idx]["title"]
+            steps[idx]["title"] = enhanced.get("title", steps[idx]["title"])
+            steps[idx]["description"] = enhanced.get(
+                "description", steps[idx]["description"]
+            )
+            steps[idx]["enhanced"] = True
+            print(f"    ✓ 已增强: 「{old_title}」→「{steps[idx]['title']}」")
 
         return steps
 

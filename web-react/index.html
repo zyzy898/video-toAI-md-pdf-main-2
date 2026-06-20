@@ -5,6 +5,20 @@
     <link rel="icon" type="image/svg+xml" href="/vite.ico" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Video Insights — AI 智能分析视频内容并提炼清晰结构化的总结</title>
+    <script>
+      // Apply persisted theme before first paint to avoid a flash of the wrong theme.
+      (function () {
+        try {
+          var stored = localStorage.getItem("video-insights-theme-v1");
+          document.documentElement.setAttribute(
+            "data-theme",
+            stored === "light" ? "light" : "dark"
+          );
+        } catch (e) {
+          document.documentElement.setAttribute("data-theme", "dark");
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,15 +1,18 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
+import { motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { BackgroundBeams } from "@/components/ui/background-beams";
 import { CanvasText } from "@/components/ui/canvas-text";
+import { LayoutTextFlip } from "@/components/ui/layout-text-flip";
 import { NoiseBackground } from "@/components/ui/noise-background";
 import { cn } from "@/lib/utils";
 
 import {
   ALIYUN_APIKEY_DOC_URL,
   ANALYZE_BUTTON_GRADIENT_COLORS,
+  ANALYZE_BUTTON_LIGHT_GRADIENT_COLORS,
   CONTENT_POLICY_BLOCK_MESSAGE,
   DEFAULT_PROGRESS_BOARD,
   DEFAULT_UPLOAD_CHUNK_SIZE,
@@ -41,6 +44,7 @@ import {
   STAGE_PERCENT,
   UPLOAD_RESUME_KEY_PREFIX,
   USER_SETTINGS_STORAGE_KEY_PREFIX,
+  THEME_STORAGE_KEY,
   VALID_VIDEO_EXTENSIONS,
   WEB_SEARCH_ACTIVATION_URL,
   WEB_SEARCH_ERROR_HINTS,
@@ -114,6 +118,7 @@ import {
   FolderPlusIcon,
   HistoryEmptyIllustration,
   HistoryIcon,
+  MoonIcon,
   PlayIcon,
   RefreshIcon,
   SettingsIcon,
@@ -121,6 +126,7 @@ import {
   StatusFailedIcon,
   StatusSuccessIcon,
   StepsIcon,
+  SunIcon,
   TrashIcon,
   UploadIcon,
 } from "./components/icons";
@@ -243,33 +249,30 @@ export type {
 };
 
 export default function App() {
-  const [apiKey, setApiKey] = useState("");
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [modelPreset, setModelPreset] = useState<ModelPreset>("ark");
-  const [modelName, setModelName] = useState("");
-  const [modelBaseUrl, setModelBaseUrl] = useState("https://ark.cn-beijing.volces.com/api/v3");
-  const [whisperModel, setWhisperModel] = useState("base");
-  const [maxVision, setMaxVision] = useState(10);
-  const [useVideo, setUseVideo] = useState(false);
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    if (typeof window === "undefined") return "dark";
+    try {
+      const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+      if (stored === "light" || stored === "dark") return stored;
+    } catch {
+      // ignore storage read failure
+    }
+    return "dark";
+  });
+  const [maxVision] = useState(10);
   const [webSearch, setWebSearch] = useState(false);
-  const [fps, setFps] = useState(1);
-  const [summaryOnly, setSummaryOnly] = useState(false);
+  const [summaryOnly] = useState(false);
   const [sourceUrl, setSourceUrl] = useState("");
   const [importingUrl, setImportingUrl] = useState(false);
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
-  const [, setTestingModel] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [deletingHistoryId, setDeletingHistoryId] = useState("");
   const [pendingDeleteHistory, setPendingDeleteHistory] = useState<HistoryItem | null>(null);
   const [showClearHistoryConfirm, setShowClearHistoryConfirm] = useState(false);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
-  const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
-  const [apiKeyGuideActive, setApiKeyGuideActive] = useState(false);
-  const [modelConfigGuideActive, setModelConfigGuideActive] = useState(false);
-  const [, setModelTestGuideActive] = useState(false);
 
   const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
@@ -277,6 +280,7 @@ export default function App() {
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [subtitleWorkbench, setSubtitleWorkbench] = useState<SubtitleWorkbenchData | null>(null);
   const [subtitleLoading, setSubtitleLoading] = useState(false);
+  const [subtitleRefreshing, setSubtitleRefreshing] = useState(false);
   const [subtitleKeyword, setSubtitleKeyword] = useState("");
   const [subtitleLoadError, setSubtitleLoadError] = useState("");
 
@@ -299,26 +303,13 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sourceUrlInputRef = useRef<HTMLInputElement | null>(null);
-  const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
-  const modelBaseUrlInputRef = useRef<HTMLInputElement | null>(null);
-  const modelNameInputRef = useRef<HTMLInputElement | null>(null);
-  const modelTestButtonRef = useRef<HTMLButtonElement | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const apiKeyGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const apiKeyGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const modelConfigGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const modelConfigGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const modelTestGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const modelTestGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const singleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progressVisibleRef = useRef(false);
   const batchFilesRef = useRef<BatchFileItem[]>([]);
-  const verifiedModelConfigSignatureRef = useRef("");
-  const userSettingsStorageKeyRef = useRef("");
-  const [userSettingsLoaded, setUserSettingsLoaded] = useState(false);
   const subtitleVideoRef = useRef<HTMLVideoElement | null>(null);
   const progressPollIntervalMs = mobilePerfMode
     ? PROGRESS_POLL_INTERVAL_MOBILE_MS
@@ -334,71 +325,18 @@ export default function App() {
   }, [batchFiles]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-
-    const clientId = getOrCreateHistoryClientId() || "anonymous";
-    const storageKey = `${USER_SETTINGS_STORAGE_KEY_PREFIX}:${clientId}`;
-    userSettingsStorageKeyRef.current = storageKey;
+    if (typeof document === "undefined") return;
+    document.documentElement.setAttribute("data-theme", theme);
     try {
-      const raw = window.localStorage.getItem(storageKey);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as PersistedUserSettings;
-      if (!parsed || typeof parsed !== "object") return;
-
-      const presetText = String(parsed.modelPreset || "").trim().toLowerCase();
-      if (MODEL_PRESET_VALUES.includes(presetText as ModelPreset)) {
-        setModelPreset(presetText as ModelPreset);
-      }
-
-      const whisperText = String(parsed.whisperModel || "").trim().toLowerCase();
-      if (WHISPER_MODEL_VALUES.has(whisperText)) {
-        setWhisperModel(whisperText);
-      }
-
-      setApiKey(safeString(parsed.apiKey, 500, ""));
-      setModelName(safeString(parsed.modelName, 200, ""));
-      setModelBaseUrl(safeString(parsed.modelBaseUrl, 300, "https://ark.cn-beijing.volces.com/api/v3"));
-      setMaxVision(Math.round(clampNumber(parsed.maxVision, 10, MAX_VISION_MIN, MAX_VISION_MAX)));
-      setFps(Number(clampNumber(parsed.fps, 1, FPS_MIN, FPS_MAX).toFixed(1)));
-
-      if (typeof parsed.useVideo === "boolean") setUseVideo(parsed.useVideo);
-      if (typeof parsed.webSearch === "boolean") setWebSearch(parsed.webSearch);
-      if (typeof parsed.summaryOnly === "boolean") setSummaryOnly(parsed.summaryOnly);
-    } catch {
-      // ignore malformed local data
-    } finally {
-      setUserSettingsLoaded(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (!userSettingsLoaded) return;
-
-    const storageKey =
-      userSettingsStorageKeyRef.current ||
-      `${USER_SETTINGS_STORAGE_KEY_PREFIX}:${getOrCreateHistoryClientId() || "anonymous"}`;
-    userSettingsStorageKeyRef.current = storageKey;
-    const payload: PersistedUserSettings = {
-      version: 1,
-      apiKey: safeString(apiKey, 500, ""),
-      modelPreset,
-      modelName: safeString(modelName, 200, ""),
-      modelBaseUrl: safeString(modelBaseUrl, 300, ""),
-      whisperModel,
-      maxVision: Math.round(clampNumber(maxVision, 10, MAX_VISION_MIN, MAX_VISION_MAX)),
-      useVideo: Boolean(useVideo),
-      webSearch: Boolean(webSearch),
-      fps: Number(clampNumber(fps, 1, FPS_MIN, FPS_MAX).toFixed(1)),
-      summaryOnly: Boolean(summaryOnly),
-      updatedAt: new Date().toISOString(),
-    };
-    try {
-      window.localStorage.setItem(storageKey, JSON.stringify(payload));
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {
       // ignore storage write failure
     }
-  }, [apiKey, fps, maxVision, modelBaseUrl, modelName, modelPreset, summaryOnly, useVideo, userSettingsLoaded, webSearch, whisperModel]);
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -441,19 +379,13 @@ export default function App() {
     return () => {
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
       if (successTimerRef.current) clearTimeout(successTimerRef.current);
-      if (apiKeyGuideTimerRef.current) clearTimeout(apiKeyGuideTimerRef.current);
-      if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
-      if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
-      if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
-      if (modelTestGuideTimerRef.current) clearTimeout(modelTestGuideTimerRef.current);
-      if (modelTestGuideFocusTimerRef.current) clearTimeout(modelTestGuideFocusTimerRef.current);
       if (batchTimerRef.current) clearInterval(batchTimerRef.current);
       if (singleTimerRef.current) clearInterval(singleTimerRef.current);
     };
   }, []);
 
   useEffect(() => {
-    if ((!historyDrawerOpen && !settingsDrawerOpen && !showClearHistoryConfirm && !pendingDeleteHistory) || typeof document === "undefined") return;
+    if ((!historyDrawerOpen && !showClearHistoryConfirm && !pendingDeleteHistory) || typeof document === "undefined") return;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
@@ -467,7 +399,6 @@ export default function App() {
           return;
         }
         setHistoryDrawerOpen(false);
-        setSettingsDrawerOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -480,7 +411,6 @@ export default function App() {
     deletingHistoryId,
     historyDrawerOpen,
     pendingDeleteHistory,
-    settingsDrawerOpen,
     showClearHistoryConfirm,
   ]);
 
@@ -573,146 +503,10 @@ export default function App() {
     successTimerRef.current = setTimeout(() => setShowSuccessToast(false), 3600);
   }, []);
 
-  const triggerModelConfigGuide = useCallback(() => {
-    setHistoryDrawerOpen(false);
-    setSettingsDrawerOpen(true);
-    setModelConfigGuideActive(true);
-
-    if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
-    modelConfigGuideTimerRef.current = setTimeout(
-      () => setModelConfigGuideActive(false),
-      ERROR_GUIDE_DURATION_MS,
-    );
-
-    if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
-    modelConfigGuideFocusTimerRef.current = setTimeout(() => {
-      const missingBaseUrl = modelPreset === "custom" && !String(modelBaseUrl || "").trim();
-      const missingModelName = !String(modelName || "").trim();
-      const target = missingBaseUrl
-        ? modelBaseUrlInputRef.current
-        : missingModelName
-          ? modelNameInputRef.current
-          : modelBaseUrlInputRef.current;
-      target?.focus();
-      target?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
-    }, 220);
-  }, [modelBaseUrl, modelName, modelPreset, uiScrollBehavior]);
-
-  const triggerModelTestGuide = useCallback(() => {
-    setHistoryDrawerOpen(false);
-    setSettingsDrawerOpen(true);
-    setModelTestGuideActive(true);
-
-    if (modelTestGuideTimerRef.current) clearTimeout(modelTestGuideTimerRef.current);
-    modelTestGuideTimerRef.current = setTimeout(
-      () => setModelTestGuideActive(false),
-      ERROR_GUIDE_DURATION_MS,
-    );
-
-    if (modelTestGuideFocusTimerRef.current) clearTimeout(modelTestGuideFocusTimerRef.current);
-    modelTestGuideFocusTimerRef.current = setTimeout(() => {
-      modelTestButtonRef.current?.focus();
-      modelTestButtonRef.current?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
-    }, 260);
-  }, [uiScrollBehavior]);
-
-  const validateModelConfig = useCallback(() => {
-    const hasBaseUrl = Boolean(String(modelBaseUrl || "").trim());
-    const hasModelName = Boolean(String(modelName || "").trim());
-    const needBaseUrl = modelPreset === "custom";
-    if (hasModelName && (!needBaseUrl || hasBaseUrl)) return true;
-    if (needBaseUrl && !hasBaseUrl && !hasModelName) {
-      showError("请填写模型接口 Base URL 和模型名称");
-    } else if (needBaseUrl && !hasBaseUrl) {
-      showError("请填写模型接口 Base URL");
-    } else {
-      showError("请填写模型名称");
-    }
-    triggerModelConfigGuide();
-    return false;
-  }, [modelBaseUrl, modelName, modelPreset, showError, triggerModelConfigGuide]);
-
-  const applyModelPreset = useCallback((preset: ModelPreset) => {
-    setModelPreset(preset);
-    setModelConfigGuideActive(false);
-    if (preset === "custom") {
-      setModelBaseUrl("");
-      setModelName("");
-      return;
-    }
-    const selected = MODEL_PRESETS[preset];
-    setModelBaseUrl(selected.baseUrl);
-    setModelName("");
-  }, []);
-
-  const testModelConnection = useCallback(async () => {
-    if (!apiKey) {
-      showError("请输入 API Key");
-      return;
-    }
-    if (!validateModelConfig()) return;
-
-    setTestingModel(true);
-    try {
-      const data = await fetchJson<{ message?: string; reply?: string }>("/test_model", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          api_key: apiKey,
-          model_name: modelName,
-          model_base_url: modelBaseUrl,
-        }),
-      });
-
-      const responseText = String(data.reply || "").replace(/\s+/g, " ").trim();
-      const briefReply = responseText ? ` · 返回：${responseText.slice(0, 48)}` : "";
-      verifiedModelConfigSignatureRef.current = buildModelConfigSignature(
-        apiKey,
-        modelPreset,
-        modelName,
-        modelBaseUrl,
-      );
-      showSuccess(`${String(data.message || "模型连接测试成功")}${briefReply}`);
-    } catch (error) {
-      showError(String((error as Error).message || error));
-    } finally {
-      setTestingModel(false);
-    }
-  }, [apiKey, fetchJson, modelBaseUrl, modelName, modelPreset, showError, showSuccess, validateModelConfig]);
-
-  const pickUploadPrecheckError = useCallback((message: string) => {
-    const raw = String(message || "").trim();
-    const normalized = raw.replace(/^模型连接测试失败[:：]\s*/u, "").trim();
-    const errorCode = extractErrorCode(normalized);
-    if (errorCode === "risk_model_config_invalid") {
-      return "模型配置无效：请检查 Base URL、模型名称是否匹配，并确认模型支持图片理解";
-    }
-    if (errorCode === "risk_model_auth_failed") {
-      return "模型鉴权失败：请检查 API Key 是否有效且与当前平台匹配";
-    }
-    const parts = normalized.split("|").map((item) => item.trim()).filter(Boolean);
-    const preferredHints = [
-      "模型鉴权失败",
-      "模型连接失败",
-      "请求过于频繁",
-      "模型服务请求超时",
-      "模型服务调用失败",
-      "联网搜索功能未开通",
-    ];
-    for (const hint of preferredHints) {
-      const matched = parts.find((item) => item.includes(hint));
-      if (matched) return matched;
-    }
-    return parts[0] || normalized || "模型连通测试失败";
-  }, []);
-
   const verifyModelConnectionForUpload = useCallback(async () => {
-    // 模型连通校验已取消：统一由后端 .env 托管模型配置。
-    void pickUploadPrecheckError;
-    void triggerModelTestGuide;
-    void testModelConnection;
+    // 模型连通校验已取消：模型配置（API Key / 名称 / Base URL）统一由后端 .env 托管。
     return true;
-  }, [pickUploadPrecheckError, testModelConnection, triggerModelTestGuide]);
+  }, []);
 
   const setProgressTextIfChanged = useCallback((nextText: string) => {
     const normalized = String(nextText || "");
@@ -936,7 +730,7 @@ export default function App() {
       }
 
       onSafetyCheckStart?.(file, fileIndex, totalFiles);
-      setProgressTextIfChanged(`已上传完成，正在进行安全检测：${file.name}（${fileIndex}/${totalFiles}）`);
+      setProgressTextIfChanged(`已上传完成，正在保存视频：${file.name}（${fileIndex}/${totalFiles}）`);
       const finalized = await fetchJson<{ filename: string; filepath: string }>("/upload_chunk_finalize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -973,19 +767,19 @@ export default function App() {
               i + 1,
               files.length,
               (processingFile, currentIndex, total) => {
-                const moderationPercent = Math.min(
+                const finalizePercent = Math.min(
                   99,
-                  Math.round(((Math.max(0, currentIndex - 1) + STAGE_PERCENT.moderation / 100) / total) * 100),
+                  Math.round(((Math.max(0, currentIndex - 1) + STAGE_PERCENT.finalize / 100) / total) * 100),
                 );
-                setProgressTextIfChanged(`已上传完成，正在进行安全检测：${processingFile.name}（${currentIndex}/${total}）`);
+                setProgressTextIfChanged(`已上传完成，正在保存视频：${processingFile.name}（${currentIndex}/${total}）`);
                 updateProgressBoard({
                   mode: "upload",
-                  stage: "moderation",
+                  stage: "finalize",
                   total,
                   current: currentIndex,
                   success: uploadedSuccess,
                   failed: uploadedFailed,
-                  percent: moderationPercent,
+                  percent: finalizePercent,
                   currentFile: processingFile.name,
                 });
               },
@@ -1058,9 +852,6 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           filepath: file.filepath,
-          web_search: webSearch,
-          max_vision: maxVision,
-          summary_only: summaryOnly,
         }),
       });
       setResultData(data);
@@ -1214,7 +1005,7 @@ export default function App() {
     if (!readyForUpload) return;
 
     setImportingUrl(true);
-    showProgress("链接导入中", "正在下载链接视频并执行安全检测...");
+    showProgress("链接导入中", "正在下载链接视频...");
     updateProgressBoard({ mode: "upload", stage: "prepare", total: 1, percent: 0, current: 0 });
 
     try {
@@ -1263,7 +1054,7 @@ export default function App() {
     stopBatchPolling();
     stopSinglePolling();
     setIsAnalyzing(true);
-    showProgress("链接处理中", "正在下载链接视频并执行安全检测...");
+    showProgress("链接处理中", "正在下载链接视频...");
     updateProgressBoard({ mode: "upload", stage: "prepare", total: 1, percent: 0, current: 0 });
 
     try {
@@ -1321,9 +1112,6 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           filepaths: analyzableFiles.map((item) => item.filepath),
-          web_search: webSearch,
-          max_vision: maxVision,
-          summary_only: summaryOnly,
         }),
       });
       setBatchResultData(data);
@@ -1529,28 +1317,18 @@ export default function App() {
     setSavingSteps(true);
     showProgress("重新生成中", "根据编辑步骤生成新文档...");
 
-    const requestRegenerate = async (enableWebSearch: boolean) =>
+    const requestRegenerate = async () =>
       fetchJson<SingleResultData>("/regenerate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           steps: editedSteps,
           output_dir: resultData.output_dir,
-          web_search: enableWebSearch,
         }),
       });
 
     try {
-      let data: SingleResultData;
-      try {
-        data = await requestRegenerate(webSearch);
-      } catch (error) {
-        const message = String((error as Error).message || error);
-        const canFallback = webSearch && WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint));
-        if (!canFallback) throw error;
-        setWebSearch(false);
-        data = await requestRegenerate(false);
-      }
+      const data = await requestRegenerate();
 
       setResultData(data);
       setIsEditMode(false);
@@ -1561,7 +1339,7 @@ export default function App() {
       setSavingSteps(false);
       hideProgress();
     }
-  }, [editedSteps, fetchJson, hideProgress, resultData?.output_dir, showError, showProgress, webSearch]);
+  }, [editedSteps, fetchJson, hideProgress, resultData?.output_dir, showError, showProgress]);
 
   const triggerDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -1669,18 +1447,16 @@ export default function App() {
     setSubtitleKeyword("");
   }, [resultData?.output_dir]);
 
-  const downloadSubtitleFile = useCallback(
-    async (format: "srt" | "vtt" | "txt") => {
+  const downloadSubtitleZip = useCallback(
+    async () => {
       const outputDirName = basename(resultData?.output_dir);
       if (!outputDirName) {
         showError("没有可下载字幕的结果");
         return;
       }
       try {
-        const blob = await fetchBlob(
-          `/download_subtitle/${encodeURIComponent(outputDirName)}?format=${encodeURIComponent(format)}`,
-        );
-        triggerDownload(blob, `${outputDirName}_subtitle.${format}`);
+        const blob = await fetchBlob(`/download_subtitles_zip/${encodeURIComponent(outputDirName)}`);
+        triggerDownload(blob, `${outputDirName}_subtitles.zip`);
       } catch (error) {
         showError(`字幕下载失败: ${String((error as Error).message || error)}`);
       }
@@ -1688,12 +1464,41 @@ export default function App() {
     [fetchBlob, resultData?.output_dir, showError, triggerDownload],
   );
 
+  const refreshSubtitleWorkbench = useCallback(async () => {
+    const outputDirName = basename(resultData?.output_dir);
+    if (!outputDirName) {
+      showError("没有可重新加载字幕的结果");
+      return;
+    }
+    setSubtitleRefreshing(true);
+    setSubtitleLoadError("");
+    try {
+      const data = await fetchJson<SubtitleWorkbenchData>(
+        `/refresh_subtitle/${encodeURIComponent(outputDirName)}`,
+        { method: "POST" },
+      );
+      setSubtitleWorkbench(data);
+      setSubtitleLoadError("");
+    } catch (error) {
+      setSubtitleLoadError(String((error as Error).message || error || "字幕重新加载失败"));
+      showError(`字幕重新加载失败: ${String((error as Error).message || error)}`);
+    } finally {
+      setSubtitleRefreshing(false);
+    }
+  }, [fetchJson, resultData?.output_dir, showError]);
+
   const seekVideoTo = useCallback((seconds: number) => {
     const videoEl = subtitleVideoRef.current;
     if (!videoEl) return;
     const targetSeconds = Math.max(0, Number(seconds) || 0);
     videoEl.currentTime = targetSeconds;
     void videoEl.play().catch(() => undefined);
+  }, []);
+
+  const formatSubtitleDisplayTime = useCallback((value: unknown) => {
+    const text = String(value || "").trim();
+    const matched = text.match(/^(\d{1,2}:\d{2}:\d{2})/);
+    return matched?.[1] || text || "00:00:00";
   }, []);
 
   const subtitleLines = useMemo(() => (Array.isArray(subtitleWorkbench?.lines) ? subtitleWorkbench?.lines || [] : []), [subtitleWorkbench?.lines]);
@@ -1769,50 +1574,6 @@ export default function App() {
     },
     [openDeleteHistoryConfirm],
   );
-  const clampMaxVision = useCallback(
-    (value: number) => Math.max(MAX_VISION_MIN, Math.min(MAX_VISION_MAX, Math.round(Number(value) || 0))),
-    [],
-  );
-  const handleMaxVisionInput = useCallback(
-    (rawValue: string) => {
-      const parsed = Number(rawValue);
-      if (!Number.isFinite(parsed)) {
-        setMaxVision(MAX_VISION_MIN);
-        return;
-      }
-      setMaxVision(clampMaxVision(parsed));
-    },
-    [clampMaxVision],
-  );
-  const increaseMaxVision = useCallback(() => {
-    setMaxVision((prev) => clampMaxVision(prev + 1));
-  }, [clampMaxVision]);
-  const decreaseMaxVision = useCallback(() => {
-    setMaxVision((prev) => clampMaxVision(prev - 1));
-  }, [clampMaxVision]);
-  const clampFps = useCallback((value: number) => {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return FPS_MIN;
-    const clamped = Math.max(FPS_MIN, Math.min(FPS_MAX, numeric));
-    return Math.round(clamped * 10) / 10;
-  }, []);
-  const handleFpsInput = useCallback(
-    (rawValue: string) => {
-      const parsed = Number(rawValue);
-      if (!Number.isFinite(parsed)) {
-        setFps(FPS_MIN);
-        return;
-      }
-      setFps(clampFps(parsed));
-    },
-    [clampFps],
-  );
-  const increaseFps = useCallback(() => {
-    setFps((prev) => clampFps(prev + FPS_STEP));
-  }, [clampFps]);
-  const decreaseFps = useCallback(() => {
-    setFps((prev) => clampFps(prev - FPS_STEP));
-  }, [clampFps]);
   const analyzableBatchCount = useMemo(
     () => batchFiles.filter((item) => Boolean(String(item.filepath || "").trim())).length,
     [batchFiles],
@@ -1838,7 +1599,7 @@ export default function App() {
   const isBlockedNoticeResult = singleResultMode === "blocked_notice";
   const isDegradedResult = singleResultMode === "candidate_steps" || singleResultMode === "timeline_summary";
   const drawerOverlayActive =
-    historyDrawerOpen || settingsDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
+    historyDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
   const heroCanvasAnimating = !mobilePerfMode && !drawerOverlayActive && heroAnimationActive;
   void heroCanvasAnimating;
   void CanvasText;
@@ -1919,23 +1680,23 @@ export default function App() {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              aria-expanded={settingsDrawerOpen}
-              aria-controls="settings-drawer"
-              onClick={() => {
-                setHistoryDrawerOpen(false);
-                setSettingsDrawerOpen((prev) => !prev);
-              }}
+              onClick={toggleTheme}
+              aria-label={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
+              title={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
               className="vi-nav-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
             >
-              <SettingsIcon className="h-3.5 w-3.5" />
-              设置
+              {theme === "dark" ? (
+                <SunIcon className="h-3.5 w-3.5" />
+              ) : (
+                <MoonIcon className="h-3.5 w-3.5" />
+              )}
+              {theme === "dark" ? "亮色" : "暗色"}
             </button>
             <button
               type="button"
               aria-expanded={historyDrawerOpen}
               aria-controls="history-drawer"
               onClick={() => {
-                setSettingsDrawerOpen(false);
                 setHistoryDrawerOpen((prev) => !prev);
               }}
               className="vi-nav-pill vi-nav-pill--accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
@@ -1950,9 +1711,10 @@ export default function App() {
         <header className="vi-hero hero-panel panel-card motion-enter rounded-xl border-0 bg-transparent p-4">
           <div className="mx-auto flex w-full max-w-4xl flex-col items-center gap-3 text-center">
             <span className="vi-hero-eyebrow">AI · 视频理解工作台</span>
-            <h1 className="vi-hero-title">
-              视频转文档，
-              <span className="vi-hero-title-accent"> 不止提取，更是理解</span>
+            <h1 className="vi-hero-title vi-hero-title-flip" aria-label="视频转文档，不止提取，更是理解">
+              <motion.div className="relative mx-4 my-4 flex flex-col items-center justify-center gap-4 text-center sm:mx-0 sm:mb-0 sm:flex-row">
+                <LayoutTextFlip text="视频转文档" words={["不止提取", "更是理解"]} />
+              </motion.div>
             </h1>
             <p className="vi-hero-subtitle">
               AI 自动分析视频内容，抓取关键截图，拆解核心步骤，输出结构清晰、重点明确的总结文档。
@@ -2011,9 +1773,6 @@ export default function App() {
                     </button>
                   </div>
                 </div>
-                <p className="vi-url-bar__note">
-                  只需提供链接即可下载并分析；平台播放页链接建议安装 <code>yt-dlp</code> 提升兼容性。
-                </p>
               </div>
               <input
                 ref={fileInputRef}
@@ -2046,28 +1805,6 @@ export default function App() {
                 </div>
                 <p className="vi-drop-title">点击选择 · 或拖拽视频到这里</p>
                 <p className="vi-drop-hint">支持 MP4 / AVI / MOV / MKV / WMV / FLV / WebM / M4V 等</p>
-              </div>
-              <div className="vi-kv-grid mt-3">
-                <div className="vi-kv-cell">
-                  <div className="vi-kv-label">标准推荐</div>
-                  <div className="vi-kv-value">20 分钟 · 250 MB 以内</div>
-                  <p className="vi-help">处理速度与稳定性最佳</p>
-                </div>
-                <div className="vi-kv-cell">
-                  <div className="vi-kv-label">长视频模式</div>
-                  <div className="vi-kv-value">自动切片 · 自动压缩</div>
-                  <p className="vi-help">20 分钟 / 250 MB 以上会自动进入，耗时增加</p>
-                </div>
-                <div className="vi-kv-cell">
-                  <div className="vi-kv-label">超长视频</div>
-                  <div className="vi-kv-value">建议先裁剪</div>
-                  <p className="vi-help">45 分钟+ 建议按章节裁剪，90 分钟+ 请拆分</p>
-                </div>
-                <div className="vi-kv-cell">
-                  <div className="vi-kv-label">批量上限</div>
-                  <div className="vi-kv-value">最多 5 个 / 含长视频 ≤ 2</div>
-                  <p className="vi-help">稳定性优先，避免单批过大</p>
-                </div>
               </div>
               <div className="vi-batch-list">
                 {batchFiles.map((item, index) => (
@@ -2148,7 +1885,7 @@ export default function App() {
                   <NoiseBackground
                     containerClassName="mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5"
                     className="w-full"
-                    gradientColors={ANALYZE_BUTTON_GRADIENT_COLORS}
+                    gradientColors={theme === "light" ? ANALYZE_BUTTON_LIGHT_GRADIENT_COLORS : ANALYZE_BUTTON_GRADIENT_COLORS}
                     noiseIntensity={0.07}
                     speed={0.13}
                     animating={shouldAnimateNoiseBackground}
@@ -2157,17 +1894,6 @@ export default function App() {
                   </NoiseBackground>
                 )}
               </div>
-              <button
-                type="button"
-                className={cn(
-                  "vi-btn vi-btn--block vi-btn--sm mt-2",
-                  summaryOnly && "vi-btn--primary",
-                )}
-                disabled={isAnalyzing}
-                onClick={() => setSummaryOnly((prev) => !prev)}
-              >
-                {summaryOnly ? "仅生成摘要版：已开启" : "仅生成摘要版"}
-              </button>
             </section>
 
             {hasAnyResult ? (
@@ -2200,18 +1926,6 @@ export default function App() {
                         </ul>
                       </div>
                     ) : null}
-                    {batchResultData?.batch_segment_policy?.summary ? (
-                      <div className="mb-2 rounded border border-sky-400/30 bg-sky-500/8 p-2 text-xs text-sky-100/95">
-                        <p className="font-semibold">
-                          批次分段统计：总计 {Number(batchResultData.batch_segment_policy.summary.total_files || 0)} 个
-                        </p>
-                        <p className="mt-1">
-                          长视频 {Number(batchResultData.batch_segment_policy.summary.long_count || 0)} · 超长{" "}
-                          {Number(batchResultData.batch_segment_policy.summary.super_long_count || 0)} · 裁剪优先{" "}
-                          {Number(batchResultData.batch_segment_policy.summary.trim_required_count || 0)}
-                        </p>
-                      </div>
-                    ) : null}
                     <div className="space-y-2">
                       {(batchResultData?.results || []).map((r, i) => (
                         <div key={`${r.filename}-${i}`} className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
@@ -2237,16 +1951,6 @@ export default function App() {
                                   : "失败"}
                             </span>
                           </div>
-                          {r.segment_policy ? (
-                            <p className="mt-1 text-[11px] text-sky-200/90">
-                              分段策略：{formatSegmentPolicyLine(r.segment_policy)}
-                            </p>
-                          ) : null}
-                          {(r.segment_guardrails || []).length > 0 ? (
-                            <p className="mt-1 text-[11px] text-amber-200/90">
-                              调整：{String((r.segment_guardrails || [])[0] || "")}
-                            </p>
-                          ) : null}
                           {r.success ? (
                             <>
                               <button
@@ -2337,25 +2041,6 @@ export default function App() {
                       >
                         {resultData.analysis_note}
                       </p>
-                    ) : null}
-                    {resultData?.segment_policy ? (
-                      <div className="mb-2 rounded border border-sky-400/35 bg-sky-500/8 p-2 text-xs text-sky-100/95">
-                        <p className="font-semibold">分段策略：{formatSegmentPolicyLine(resultData.segment_policy)}</p>
-                        {(resultData.segment_policy.recommendations || []).length > 0 ? (
-                          <ul className="mt-1 list-disc space-y-1 pl-5 text-sky-100/90">
-                            {(resultData.segment_policy.recommendations || []).slice(0, 3).map((tip, idx) => (
-                              <li key={`single-policy-tip-${idx}`}>{tip}</li>
-                            ))}
-                          </ul>
-                        ) : null}
-                        {(resultData.segment_guardrails || []).length > 0 ? (
-                          <ul className="mt-1 list-disc space-y-1 pl-5 text-amber-200/90">
-                            {(resultData.segment_guardrails || []).slice(0, 3).map((tip, idx) => (
-                              <li key={`single-guardrail-${idx}`}>{tip}</li>
-                            ))}
-                          </ul>
-                        ) : null}
-                      </div>
                     ) : null}
                     {isBlockedNoticeResult ? (
                       <div className="rounded border border-rose-500/45 bg-rose-500/10 p-3 text-sm">
@@ -2478,7 +2163,7 @@ export default function App() {
                             >
                               <div className="mb-1 flex gap-2">
                                 <input
-                                  className="steps-edit-input flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
+                                  className="steps-edit-input steps-edit-title-input flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
                                   value={step.title || ""}
                                   placeholder={NEW_STEP_DEFAULT_TITLE}
                                   onChange={(e) =>
@@ -2499,7 +2184,7 @@ export default function App() {
                                 />
                               </div>
                               <textarea
-                                className="steps-edit-textarea min-h-16 w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
+                                className="steps-edit-textarea steps-edit-desc-textarea min-h-16 w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
                                 value={step.description || ""}
                                 placeholder={NEW_STEP_DEFAULT_DESCRIPTION}
                                 onChange={(e) =>
@@ -2581,34 +2266,18 @@ export default function App() {
                         <button
                           type="button"
                           className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={subtitleLoading}
-                          onClick={() => void loadSubtitleWorkbench(String(resultData?.output_dir || ""))}
+                          disabled={subtitleRefreshing}
+                          onClick={() => void refreshSubtitleWorkbench()}
                         >
-                          {subtitleLoading ? "加载中..." : "刷新字幕"}
+                          {subtitleRefreshing ? "重新加载中..." : "重新加载字幕"}
                         </button>
                         <button
                           type="button"
                           className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={subtitleLoading}
-                          onClick={() => void downloadSubtitleFile("srt")}
+                          disabled={subtitleLoading || subtitleRefreshing}
+                          onClick={() => void downloadSubtitleZip()}
                         >
-                          导出 SRT
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={subtitleLoading}
-                          onClick={() => void downloadSubtitleFile("vtt")}
-                        >
-                          导出 VTT
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={subtitleLoading}
-                          onClick={() => void downloadSubtitleFile("txt")}
-                        >
-                          导出 TXT
+                          下载字幕
                         </button>
                       </div>
                     </div>
@@ -2625,6 +2294,15 @@ export default function App() {
                       </div>
                     ) : null}
 
+                    {subtitleRefreshing ? (
+                      <div className="subtitle-refresh-anim mb-2" role="status" aria-label="正在重新加载字幕">
+                        <span className="subtitle-refresh-anim__dot" />
+                        <span className="subtitle-refresh-anim__dot" />
+                        <span className="subtitle-refresh-anim__dot" />
+                        <span className="subtitle-refresh-anim__track" />
+                      </div>
+                    ) : null}
+
                     {subtitleLoading ? (
                       <p className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-300">
                         正在加载字幕...
@@ -2634,7 +2312,7 @@ export default function App() {
                         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
                           <input
                             type="text"
-                            className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500 sm:max-w-xs"
+                            className="subtitle-search-input w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500 sm:max-w-xs"
                             placeholder="搜索字幕内容或时间点"
                             value={subtitleKeyword}
                             onChange={(e) => setSubtitleKeyword(e.target.value)}
@@ -2652,7 +2330,7 @@ export default function App() {
                               onClick={() => seekVideoTo(Number(line.start_seconds || 0))}
                             >
                               <p className="font-semibold text-teal-200/95">
-                                {String(line.start_time || "00:00:00,000")} - {String(line.end_time || "00:00:00,000")}
+                                {formatSubtitleDisplayTime(line.start_time)} - {formatSubtitleDisplayTime(line.end_time)}
                               </p>
                               <p className="mt-0.5 whitespace-pre-wrap text-neutral-200">{String(line.text || "")}</p>
                             </button>
@@ -2662,7 +2340,7 @@ export default function App() {
                     ) : subtitleAssetAvailable ? (
                       <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
                         <p>
-                          已检测到字幕文件，但当前未加载到字幕行。你可以点击“刷新字幕”，或直接导出 SRT/VTT/TXT。
+                          已检测到字幕文件，但当前未加载到字幕行。你可以点击“重新加载字幕”，或直接下载字幕压缩包。
                         </p>
                         {String(subtitleWorkbench?.subtitle_file || resultData?.subtitle_file_name || "").trim() ? (
                           <p className="mt-1 text-xs text-amber-200/90">
@@ -2733,8 +2411,8 @@ export default function App() {
                         </button>
                       </div>
                     </div>
-                    <p className="mt-2 rounded border border-amber-400/35 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200/95">
-                      提醒：历史记录与服务器生成的总结文件仅保留 72 小时，系统会自动清理。
+                    <p className="history-retention-note mt-2 rounded border border-amber-400/35 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200/95">
+                      提醒：历史记录生成的总结文件仅保留 72 小时。
                     </p>
                   </div>
                   <VirtualizedHistoryList
@@ -2861,264 +2539,6 @@ export default function App() {
           )
         : null}
 
-      {typeof document !== "undefined"
-        ? createPortal(
-            <div
-              className="history-drawer-overlay fixed inset-0 z-[45]"
-              hidden={!settingsDrawerOpen}
-              aria-hidden={!settingsDrawerOpen}
-            >
-              <button
-                type="button"
-                aria-label="关闭设置侧边栏"
-                className="history-drawer-backdrop absolute inset-0 bg-black/45"
-                onClick={() => setSettingsDrawerOpen(false)}
-              />
-              <div className="pointer-events-none relative h-full w-full">
-                <aside
-                  id="settings-drawer"
-                  className="history-drawer-panel pointer-events-auto ml-auto flex h-full w-[min(92vw,360px)] flex-col border-l border-neutral-700/80 bg-neutral-900/97 py-4 shadow-[-16px_0_34px_rgba(2,6,23,0.45)]"
-                >
-                  <div className="border-b border-neutral-800 px-4 pb-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <SettingsIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">设置</h2>
-                      </div>
-                      <button
-                        type="button"
-                        title="关闭侧边栏"
-                        aria-label="关闭侧边栏"
-                        className="inline-flex h-8 w-8 items-center justify-center rounded border border-neutral-700 text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100"
-                        onClick={() => setSettingsDrawerOpen(false)}
-                      >
-                        <CloseIcon className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="history-scroll flex-1 overflow-auto px-4 py-3">
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">
-                        <span className="mr-1 text-rose-300">*</span>模型 API Key
-                      </label>
-                      <div className="relative">
-                        <input
-                          ref={apiKeyInputRef}
-                          className={cn(
-                            "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 pr-9 text-sm",
-                            apiKeyGuideActive && "api-key-guide-input",
-                          )}
-                          type={showApiKey ? "text" : "password"}
-                          placeholder="请输入 API Key"
-                          value={apiKey}
-                          onChange={(e) => {
-                            setApiKey(e.target.value);
-                            if (apiKeyGuideActive) setApiKeyGuideActive(false);
-                          }}
-                        />
-                        <button
-                          type="button"
-                          className="absolute inset-y-0 right-0 inline-flex w-8 items-center justify-center rounded-r text-neutral-400 transition-colors hover:text-neutral-100"
-                          title={showApiKey ? "隐藏 API Key" : "显示 API Key"}
-                          aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}
-                          onClick={() => setShowApiKey((prev) => !prev)}
-                        >
-                          {showApiKey ? <EyeOffIcon className="h-4 w-4" /> : <EyeIcon className="h-4 w-4" />}
-                        </button>
-                      </div>
-                      <p className="text-xs text-neutral-500">可填写任意兼容平台的 API Key</p>
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">模型预设</label>
-                      <select
-                        className="settings-select"
-                        value={modelPreset}
-                        onChange={(e) => applyModelPreset(e.target.value as ModelPreset)}
-                      >
-                        <option value="ark">{MODEL_PRESETS.ark.label}</option>
-                        <option value="openai">{MODEL_PRESETS.openai.label}</option>
-                        <option value="deepseek">{MODEL_PRESETS.deepseek.label}</option>
-                        <option value="qwen">{MODEL_PRESETS.qwen.label}</option>
-                        <option value="custom">自定义</option>
-                      </select>
-                      <p className="text-xs text-neutral-500">一键填充常见平台的 Base URL（模型名称需手动填写）</p>
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">
-                        {modelPreset === "custom" ? <span className="mr-1 text-rose-300">*</span> : null}
-                        模型接口 Base URL
-                      </label>
-                      <input
-                        ref={modelBaseUrlInputRef}
-                        className={cn(
-                          "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm",
-                          modelPreset === "custom" && modelConfigGuideActive && !String(modelBaseUrl || "").trim() && "model-required-guide-input",
-                        )}
-                        type="text"
-                        placeholder="例如: https://api.openai.com/v1"
-                        value={modelBaseUrl}
-                        required={modelPreset === "custom"}
-                        aria-required={modelPreset === "custom"}
-                        onChange={(e) => {
-                          const nextBaseUrl = e.target.value;
-                          setModelPreset("custom");
-                          setModelBaseUrl(nextBaseUrl);
-                          if (modelConfigGuideActive && nextBaseUrl.trim() && String(modelName || "").trim()) {
-                            setModelConfigGuideActive(false);
-                          }
-                        }}
-                      />
-                      <p className="text-xs text-neutral-500">支持兼容接口（Ark / OpenAI / DeepSeek / Qwen 等）</p>
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">
-                        <span className="mr-1 text-rose-300">*</span>
-                        模型名称
-                      </label>
-                      <input
-                        ref={modelNameInputRef}
-                        className={cn(
-                          "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm",
-                          modelConfigGuideActive && !String(modelName || "").trim() && "model-required-guide-input",
-                        )}
-                        type="text"
-                        placeholder="例如: gpt-5.4 / deepseek-chat / qwen-plus / doubao-seed-2-0-pro-260215"
-                        value={modelName}
-                        required
-                        aria-required
-                        onChange={(e) => {
-                          const nextModelName = e.target.value;
-                          setModelName(nextModelName);
-                          const hasBaseUrl = Boolean(String(modelBaseUrl || "").trim());
-                          if (modelConfigGuideActive && nextModelName.trim() && (modelPreset !== "custom" || hasBaseUrl)) {
-                            setModelConfigGuideActive(false);
-                          }
-                        }}
-                      />
-                      <p className="text-xs text-neutral-500">按你所用平台的模型 ID 填写（必填）</p>
-                      {modelPreset === "custom" ? <p className="text-xs text-rose-300">自定义预设下，Base URL 与模型名称均必填</p> : null}
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <div className="rounded-lg border border-neutral-700/80 bg-neutral-900/70 px-2.5 py-2 text-xs text-neutral-400">
-                        测试链接按钮已停用，模型连通性由后端启动分析时自动处理。
-                      </div>
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">Whisper 字幕识别模型</label>
-                      <select
-                        className="settings-select"
-                        value={whisperModel}
-                        onChange={(e) => setWhisperModel(e.target.value)}
-                      >
-                        <option value="tiny">tiny - 最快，精度较低</option>
-                        <option value="base">base - 快速，平衡精度</option>
-                        <option value="small">small - 中等速度，较高精度</option>
-                        <option value="medium">medium - 较慢，更高精度</option>
-                        <option value="large">large - 最慢，最高精度</option>
-                      </select>
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">AI 看图增强次数</label>
-                      <div className="settings-stepper">
-                        <input
-                          className="settings-number-input"
-                          type="number"
-                          min={MAX_VISION_MIN}
-                          max={MAX_VISION_MAX}
-                          value={maxVision}
-                          onChange={(e) => handleMaxVisionInput(e.target.value)}
-                          onBlur={() => setMaxVision((prev) => clampMaxVision(prev))}
-                        />
-                        <div className="settings-stepper-controls">
-                          <button
-                            type="button"
-                            className="settings-stepper-btn"
-                            aria-label="增加 AI 看图增强次数"
-                            onClick={increaseMaxVision}
-                            disabled={maxVision >= MAX_VISION_MAX}
-                          >
-                            ▲
-                          </button>
-                          <button
-                            type="button"
-                            className="settings-stepper-btn"
-                            aria-label="减少 AI 看图增强次数"
-                            onClick={decreaseMaxVision}
-                            disabled={maxVision <= MAX_VISION_MIN}
-                          >
-                            ▼
-                          </button>
-                        </div>
-                      </div>
-                      <p className="text-xs text-neutral-500">对低置信度步骤进行 AI 看图增强（0-10 次）</p>
-                    </div>
-
-                    <label className="feature-toggle mb-3 flex items-start gap-2 text-sm">
-                      <input
-                        className="feature-checkbox mt-0.5"
-                        type="checkbox"
-                        checked={useVideo}
-                        onChange={(e) => setUseVideo(e.target.checked)}
-                      />
-                      <span>
-                        <strong className="block font-semibold">视频上传模式</strong>
-                        <span className="feature-note text-xs text-neutral-500">直接上传视频给 AI 识别（更准确，费用更高）</span>
-                      </span>
-                    </label>
-
-                    {useVideo ? (
-                      <div className="fps-reveal mb-3 space-y-1">
-                        <label className="text-sm">抽帧频率 (FPS)</label>
-                        <div className="settings-stepper">
-                          <input
-                            className="settings-number-input"
-                            type="number"
-                            min={FPS_MIN}
-                            max={FPS_MAX}
-                            step={FPS_STEP}
-                            value={fps}
-                            onChange={(e) => handleFpsInput(e.target.value)}
-                            onBlur={() => setFps((prev) => clampFps(prev))}
-                          />
-                          <div className="settings-stepper-controls">
-                            <button
-                              type="button"
-                              className="settings-stepper-btn"
-                              aria-label="增加抽帧频率"
-                              onClick={increaseFps}
-                              disabled={fps >= FPS_MAX}
-                            >
-                              ▲
-                            </button>
-                            <button
-                              type="button"
-                              className="settings-stepper-btn"
-                              aria-label="减少抽帧频率"
-                              onClick={decreaseFps}
-                              disabled={fps <= FPS_MIN}
-                            >
-                              ▼
-                            </button>
-                          </div>
-                        </div>
-                        <p className="text-xs text-neutral-500">视频上传模式下的抽帧频率，默认 1 帧/秒</p>
-                      </div>
-                    ) : null}
-
-                  </div>
-                </aside>
-              </div>
-            </div>,
-            document.body,
-          )
-        : null}
-
       {progressVisible ? (
         <div className="progress-overlay-anim fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
           <div className="progress-dialog-anim vi-progress-card">
@@ -3179,4 +2599,3 @@ export default function App() {
     </div>
   );
 }
-
