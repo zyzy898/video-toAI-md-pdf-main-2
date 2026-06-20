@@ -372,6 +372,13 @@ outputs/<video_stem>_<timestamp>/
 | `WAITRESS_THREADS` | Waitress 工作线程数 | `4` |
 | `WAITRESS_CONNECTION_LIMIT` | 最大并发连接 | `100` |
 
+### 安全
+
+| 变量 | 说明 | 默认 |
+| --- | --- | --- |
+| `FLASK_SECRET_KEY` | Flask 会话签名密钥（缺失时启动随机生成） | 随机 |
+| `URL_IMPORT_ALLOW_PRIVATE_HOSTS` | 允许 URL 导入访问内网/保留地址（SSRF 防护开关，仅信任内网部署设 `1`） | `0` |
+
 ---
 
 ## 🧪 开发建议
