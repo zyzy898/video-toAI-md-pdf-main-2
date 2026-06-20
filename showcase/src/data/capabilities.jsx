@@ -52,7 +52,7 @@ export const capabilities = [
     tag: '字幕',
     Icon: SubtitleIcon,
     title: '字幕工作台',
-    desc: 'Whisper 常驻 + CLI 兜底，一键导出 SRT / VTT / TXT；可关键词检索字幕，点哪行视频跳哪行。',
+    desc: 'faster-whisper（CTranslate2）常驻转写，按模型与参数缓存结果；一键导出 SRT / VTT / TXT，可关键词检索字幕，点哪行视频跳哪行。',
     tags: [
       { label: 'SRT · VTT · TXT', accent: true },
       { label: '关键词检索' },

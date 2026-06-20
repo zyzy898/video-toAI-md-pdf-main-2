@@ -25,7 +25,7 @@ export const techLogos = [
   { node: <SiFlask />, title: 'Flask', href: 'https://flask.palletsprojects.com' },
   { node: <SiPython />, title: 'Python', href: 'https://www.python.org' },
   { node: <SiFfmpeg />, title: 'FFmpeg', href: 'https://ffmpeg.org' },
-  { node: <SiOpenai />, title: 'Whisper · OpenAI', href: 'https://openai.com/research/whisper' },
+  { node: <SiOpenai />, title: 'faster-whisper · Whisper', href: 'https://github.com/SYSTRAN/faster-whisper' },
   { node: <SiMarkdown />, title: 'Markdown', href: 'https://daringfireball.net/projects/markdown' },
   { node: <SiDocker />, title: 'Docker', href: 'https://www.docker.com' },
   { node: <SiNginx />, title: 'Nginx', href: 'https://nginx.org' },

@@ -4,6 +4,13 @@ import TextType from '../components/TextType/TextType.jsx';
 import { PlayIcon, ArrowRightIcon } from '../components/icons/Icons.jsx';
 import useFadeUpReveal from '../hooks/useFadeUpReveal.js';
 import useIsMobile from '../hooks/useIsMobile.js';
+
+/**
+ * 「开始使用」按钮跳转的线上工作台地址。
+ * TODO: 部署完成后替换为真实的线上地址（例如 https://your-app.example.com）。
+ */
+const APP_URL = '#';
+
 const heroChips = [
   'AI 视频理解',
   'Whisper ASR',
@@ -69,9 +76,18 @@ export default function LandingPage() {
         </div>
 
         <div className="landing-cta fade-up delay-3">
-          <Link to="/showcase" className="btn btn--primary btn--xl">
+          <a
+            href={APP_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="btn btn--primary btn--xl"
+          >
             <PlayIcon />
-            开始演示
+            开始使用
+          </a>
+          <Link to="/showcase" className="btn btn--xl btn--ghost">
+            观看演示
+            <ArrowRightIcon />
           </Link>
           <a
             href="https://github.com/zyzy898/video-toAI-md-pdf-main-2"

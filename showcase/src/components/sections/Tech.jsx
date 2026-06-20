@@ -11,7 +11,7 @@ export default function Tech() {
           <span className="section-tag">TECH STACK · ENGINEERING</span>
           <h2 className="section-title">技术栈与工程化</h2>
           <p className="section-sub">
-            前端 React 19 + TypeScript + Tailwind 4；后端 Flask + Whisper + ffmpeg；多 LLM Provider 路由 + 多层降级。下面同时呈现真实落地的工程化优化点。
+            前端 React 19 + TypeScript + Tailwind 4；后端 Flask + faster-whisper + ffmpeg；多 LLM Provider 路由 + 多层降级。下面同时呈现真实落地的工程化优化点。
           </p>
         </div>
 
@@ -47,7 +47,7 @@ export default function Tech() {
         <div className="tech-logos">
           <div className="tech-logos-head">
             <span className="tech-logos-tag">POWERED BY</span>
-            <p className="tech-logos-sub">React · Vite · Flask · Whisper · FFmpeg 等业界主流方案</p>
+            <p className="tech-logos-sub">React · Vite · Flask · faster-whisper · FFmpeg 等业界主流方案</p>
           </div>
           <div className="tech-logos-frame" aria-hidden="false">
             <LogoLoop

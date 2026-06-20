@@ -574,6 +574,21 @@ body {
   background: rgba(59, 130, 246, 0.14);
 }
 
+.vi-inline-spinner {
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 999px;
+  border: 2px solid rgba(148, 163, 184, 0.28);
+  border-top-color: #bae6fd;
+  animation: vi-spin 0.72s linear infinite;
+}
+
+@keyframes vi-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ---------- Analyze CTA ---------- */
 .vi-cta {
   margin-top: 0.9rem;

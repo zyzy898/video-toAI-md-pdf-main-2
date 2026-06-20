@@ -142,8 +142,8 @@ export const engineeringCards = [
     Icon: ServerIcon,
     title: '后端并发与资源治理',
     items: [
-      '截图生成、批量分析、Whisper 推理的<b>并发线程数都可配置</b>，按机器配置随时调整',
-      'Whisper 模型常驻内存，避免每次分析都重新加载；字幕结果做缓存，相同视频重复分析直接命中',
+      '截图生成、批量分析、faster-whisper 推理的<b>并发线程数都可配置</b>，按机器配置随时调整',
+      'faster-whisper 模型常驻内存，避免每次分析都重新加载；字幕结果按模型大小 / 精度 / beam / VAD 做缓存，调参后不会错误复用',
       '生产环境用 Waitress 替代 Flask 自带服务器，多线程不会被 Python GIL 卡住',
       '后台清理线程定期回收：<b>上传文件 24 小时清，输出与历史 72 小时清</b>，磁盘永远不会爆'
     ],

@@ -310,6 +310,7 @@ export default function App() {
   const singleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progressVisibleRef = useRef(false);
   const batchFilesRef = useRef<BatchFileItem[]>([]);
+  const pendingFileSeqRef = useRef(0);
   const subtitleVideoRef = useRef<HTMLVideoElement | null>(null);
   const progressPollIntervalMs = mobilePerfMode
     ? PROGRESS_POLL_INTERVAL_MOBILE_MS
@@ -323,6 +324,25 @@ export default function App() {
   useEffect(() => {
     batchFilesRef.current = batchFiles;
   }, [batchFiles]);
+
+  const nextPendingFileId = useCallback((prefix: string) => {
+    pendingFileSeqRef.current += 1;
+    return `${prefix}-${Date.now()}-${pendingFileSeqRef.current}`;
+  }, []);
+
+  const replaceBatchFileByClientId = useCallback((clientId: string, nextItem: BatchFileItem) => {
+    setBatchFiles((prev) => prev.map((item) => (item.clientId === clientId ? nextItem : item)));
+  }, []);
+
+  const guessUrlVideoName = useCallback((url: string) => {
+    try {
+      const parsed = new URL(url);
+      const guessed = basename(decodeURIComponent(parsed.pathname || ""));
+      return guessed && /\.[A-Za-z0-9]{2,5}$/.test(guessed) ? guessed : "url_video.mp4";
+    } catch {
+      return "url_video.mp4";
+    }
+  }, []);
 
   useEffect(() => {
     if (typeof document === "undefined") return;
@@ -725,12 +745,10 @@ export default function App() {
         formData.append("upload_id", uploadId);
         formData.append("chunk_index", String(chunkIndex));
         formData.append("chunk", file.slice(start, end));
-        setProgressTextIfChanged(`正在上传 ${file.name}（${fileIndex}/${totalFiles}，分片 ${chunkIndex + 1}/${totalChunks}）`);
         await fetchJson("/upload_chunk", { method: "POST", body: formData });
       }
 
       onSafetyCheckStart?.(file, fileIndex, totalFiles);
-      setProgressTextIfChanged(`已上传完成，正在保存视频：${file.name}（${fileIndex}/${totalFiles}）`);
       const finalized = await fetchJson<{ filename: string; filepath: string }>("/upload_chunk_finalize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -739,7 +757,7 @@ export default function App() {
       window.localStorage.removeItem(resumeKey);
       return finalized;
     },
-    [fetchJson, setProgressTextIfChanged],
+    [fetchJson],
   );
 
   const uploadBatchFiles = useCallback(
@@ -753,38 +771,44 @@ export default function App() {
       const readyForUpload = await verifyModelConnectionForUpload();
       if (!readyForUpload) return;
 
-      showProgress("上传中", "正在上传视频...");
-      updateProgressBoard({ mode: "upload", stage: "prepare", total: files.length, percent: 0 });
+      const placeholders = files.map((file) => ({
+        filename: file.name,
+        filepath: "",
+        status: "processing" as FileStatus,
+        error: "等待上传...",
+        clientId: nextPendingFileId("upload"),
+      }));
+      setBatchFiles((prev) => [...prev, ...placeholders]);
       try {
-        const uploaded: BatchFileItem[] = [];
         let uploadedSuccess = 0;
         let uploadedFailed = 0;
         for (let i = 0; i < files.length; i += 1) {
           const currentFile = files[i];
+          const placeholder = placeholders[i];
           try {
+            replaceBatchFileByClientId(placeholder.clientId || "", {
+              ...placeholder,
+              error: `正在上传（${i + 1}/${files.length}）...`,
+            });
             const item = await uploadSingleFileWithResume(
               currentFile,
               i + 1,
               files.length,
               (processingFile, currentIndex, total) => {
-                const finalizePercent = Math.min(
-                  99,
-                  Math.round(((Math.max(0, currentIndex - 1) + STAGE_PERCENT.finalize / 100) / total) * 100),
-                );
-                setProgressTextIfChanged(`已上传完成，正在保存视频：${processingFile.name}（${currentIndex}/${total}）`);
-                updateProgressBoard({
-                  mode: "upload",
-                  stage: "finalize",
-                  total,
-                  current: currentIndex,
-                  success: uploadedSuccess,
-                  failed: uploadedFailed,
-                  percent: finalizePercent,
-                  currentFile: processingFile.name,
+                replaceBatchFileByClientId(placeholder.clientId || "", {
+                  ...placeholder,
+                  filename: processingFile.name,
+                  error: `正在保存视频（${currentIndex}/${total}）...`,
                 });
               },
             );
-            uploaded.push({ filename: item.filename, filepath: item.filepath, status: "pending", error: "" });
+            replaceBatchFileByClientId(placeholder.clientId || "", {
+              filename: item.filename,
+              filepath: item.filepath,
+              status: "pending",
+              error: "",
+              clientId: placeholder.clientId,
+            });
             uploadedSuccess += 1;
           } catch (error) {
             const apiError = error instanceof ApiRequestError ? error : null;
@@ -796,40 +820,27 @@ export default function App() {
             }
             const segmentHint = formatSegmentPolicyHint(apiError?.payload?.segment_policy);
             if (segmentHint) message = [message, segmentHint].filter(Boolean).join(" | ");
-            uploaded.push({
+            replaceBatchFileByClientId(placeholder.clientId || "", {
               filename: currentFile.name,
               filepath: "",
               status: "failed",
               error: formatInlineErrorMessage(message),
+              clientId: placeholder.clientId,
             });
             uploadedFailed += 1;
           }
-          updateProgressBoard({
-            mode: "upload",
-            stage: i + 1 >= files.length ? "done" : "upload",
-            total: files.length,
-            current: i + 1,
-            success: uploadedSuccess,
-            failed: uploadedFailed,
-            percent: Math.round(((i + 1) / files.length) * 100),
-          });
         }
-        setBatchFiles((prev) => [...prev, ...uploaded]);
         if (uploadedFailed > 0) {
           showError(`已跳过 ${uploadedFailed} 个上传失败视频，可继续分析其余视频。`);
         }
       } catch (error) {
         showError(`上传失败: ${String((error as Error).message || error)}`);
-      } finally {
-        hideProgress();
       }
     },
     [
-      hideProgress,
-      setProgressTextIfChanged,
+      nextPendingFileId,
+      replaceBatchFileByClientId,
       showError,
-      showProgress,
-      updateProgressBoard,
       uploadSingleFileWithResume,
       verifyModelConnectionForUpload,
     ],
@@ -837,12 +848,18 @@ export default function App() {
   const analyzeByUploadedFile = useCallback(async (file: BatchFileItem) => {
     setBatchFiles((prev) =>
       prev.map((item) =>
-        item.filepath ? { ...item, status: item.filepath === file.filepath ? "pending" : item.status, error: "" } : item,
+        item.filepath
+          ? {
+              ...item,
+              status: item.filepath === file.filepath ? ("processing" as FileStatus) : item.status,
+              error: item.filepath === file.filepath ? (summaryOnly ? "正在生成摘要版..." : "正在分析视频...") : "",
+            }
+          : item,
       ),
     );
     stopBatchPolling();
     setIsAnalyzing(true);
-    showProgress("单文件处理中", summaryOnly ? "正在生成摘要版，请稍候..." : "正在分析视频，请稍候...");
+    hideProgress();
     updateProgressBoard({ mode: "single", stage: "prepare", total: 1, percent: 5, currentFile: file.filename });
     startSinglePolling();
     let reveal = false;
@@ -955,7 +972,6 @@ export default function App() {
     maxVision,
     showError,
     showSuccess,
-    showProgress,
     startSinglePolling,
     stopBatchPolling,
     stopSinglePolling,
@@ -1004,38 +1020,40 @@ export default function App() {
     const readyForUpload = await verifyModelConnectionForUpload();
     if (!readyForUpload) return;
 
+    const clientId = nextPendingFileId("url");
+    const placeholder: BatchFileItem = {
+      filename: guessUrlVideoName(urls[0]),
+      filepath: "",
+      status: "processing",
+      error: "正在导入链接视频...",
+      clientId,
+    };
+    setBatchFiles((prev) => [placeholder, ...prev]);
     setImportingUrl(true);
-    showProgress("链接导入中", "正在下载链接视频...");
-    updateProgressBoard({ mode: "upload", stage: "prepare", total: 1, percent: 0, current: 0 });
 
     try {
       const uploadedItem = await uploadBySourceUrl(urls[0]);
-      setBatchFiles((prev) => [uploadedItem, ...prev]);
+      replaceBatchFileByClientId(clientId, { ...uploadedItem, clientId });
       setSourceUrl("");
-      updateProgressBoard({
-        mode: "upload",
-        stage: "done",
-        total: 1,
-        current: 1,
-        success: 1,
-        failed: 0,
-        percent: 100,
-        currentFile: uploadedItem.filename,
-      });
       showSuccess("链接导入成功，可直接开始分析。");
     } catch (error) {
-      showError(`链接导入失败: ${String((error as Error).message || error)}`);
+      const message = `链接导入失败: ${String((error as Error).message || error)}`;
+      replaceBatchFileByClientId(clientId, {
+        ...placeholder,
+        status: "failed",
+        error: formatInlineErrorMessage(message),
+      });
+      showError(message);
     } finally {
-      hideProgress();
       setImportingUrl(false);
     }
   }, [
-    hideProgress,
+    guessUrlVideoName,
+    nextPendingFileId,
+    replaceBatchFileByClientId,
     showError,
-    showProgress,
     showSuccess,
     sourceUrl,
-    updateProgressBoard,
     uploadBySourceUrl,
     verifyModelConnectionForUpload,
   ]);
@@ -1050,31 +1068,33 @@ export default function App() {
     const readyForUpload = await verifyModelConnectionForUpload();
     if (!readyForUpload) return;
 
+    const clientId = nextPendingFileId("url");
+    const placeholder: BatchFileItem = {
+      filename: guessUrlVideoName(urls[0]),
+      filepath: "",
+      status: "processing",
+      error: "正在导入链接视频...",
+      clientId,
+    };
+    setBatchFiles((prev) => [placeholder, ...prev]);
     setImportingUrl(true);
     stopBatchPolling();
     stopSinglePolling();
     setIsAnalyzing(true);
-    showProgress("链接处理中", "正在下载链接视频...");
-    updateProgressBoard({ mode: "upload", stage: "prepare", total: 1, percent: 0, current: 0 });
 
     try {
       const uploadedItem = await uploadBySourceUrl(urls[0]);
-      setBatchFiles((prev) => [uploadedItem, ...prev]);
+      replaceBatchFileByClientId(clientId, { ...uploadedItem, clientId });
       setSourceUrl("");
-      updateProgressBoard({
-        mode: "upload",
-        stage: "done",
-        total: 1,
-        current: 1,
-        success: 1,
-        failed: 0,
-        percent: 100,
-        currentFile: uploadedItem.filename,
-      });
-      setProgressTextIfChanged("链接视频导入完成，正在启动分析...");
       await analyzeByUploadedFile(uploadedItem);
     } catch (error) {
-      showError(`链接分析失败: ${String((error as Error).message || error)}`);
+      const message = `链接分析失败: ${String((error as Error).message || error)}`;
+      replaceBatchFileByClientId(clientId, {
+        ...placeholder,
+        status: "failed",
+        error: formatInlineErrorMessage(message),
+      });
+      showError(message);
       hideProgress();
       setIsAnalyzing(false);
     } finally {
@@ -1082,14 +1102,14 @@ export default function App() {
     }
   }, [
     analyzeByUploadedFile,
+    guessUrlVideoName,
     hideProgress,
-    setProgressTextIfChanged,
+    nextPendingFileId,
+    replaceBatchFileByClientId,
     showError,
-    showProgress,
     sourceUrl,
     stopBatchPolling,
     stopSinglePolling,
-    updateProgressBoard,
     uploadBySourceUrl,
     verifyModelConnectionForUpload,
   ]);
@@ -1098,11 +1118,11 @@ export default function App() {
     const analyzableFiles = getAnalyzableBatchFiles();
     if (analyzableFiles.length <= 1) return;
     setBatchFiles((prev) =>
-      prev.map((item) => (item.filepath ? { ...item, status: "pending", error: "" } : item)),
+      prev.map((item) => (item.filepath ? { ...item, status: "processing", error: "正在等待批量分析..." } : item)),
     );
     stopSinglePolling();
     setIsAnalyzing(true);
-    showProgress("批量处理中", summaryOnly ? "正在逐个生成摘要版..." : "正在逐个分析视频...");
+    hideProgress();
     updateProgressBoard({ mode: "batch", stage: "prepare", total: analyzableFiles.length, percent: 0 });
     startBatchPolling();
     let reveal = false;
@@ -1174,7 +1194,6 @@ export default function App() {
     maxVision,
     countBatchStatus,
     showError,
-    showProgress,
     startBatchPolling,
     stopBatchPolling,
     stopSinglePolling,
@@ -1560,7 +1579,7 @@ export default function App() {
       : status === "failed"
         ? "失败"
         : status === "processing"
-          ? "处理中"
+          ? "正在准备文件"
           : "待处理";
   const handleOpenHistoryRecord = useCallback(
     (id: string) => {
@@ -1809,7 +1828,7 @@ export default function App() {
               <div className="vi-batch-list">
                 {batchFiles.map((item, index) => (
                   <div
-                    key={`${item.filepath}-${index}`}
+                    key={item.clientId || item.filepath || `${item.filename}-${index}`}
                     className={cn(
                       "vi-batch-row",
                       item.status === "failed" && "vi-batch-row--fail",
@@ -1846,7 +1865,7 @@ export default function App() {
                           <StatusFailedIcon /> 失败
                         </span>
                       ) : item.status === "processing" ? (
-                        <span className="vi-status vi-status--run">处理中</span>
+                        <span className="vi-inline-spinner" aria-label="处理中" />
                       ) : (
                         <span className="vi-status">待处理</span>
                       )}
