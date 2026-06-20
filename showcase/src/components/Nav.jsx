@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { ChevronRightIcon } from './icons/Icons.jsx';
+import { ChevronRightIcon, GithubIcon, SunIcon, MoonIcon } from './icons/Icons.jsx';
 import { navLinks } from '../data/nav.js';
+import useTheme from '../hooks/useTheme.js';
+
+/** 项目源码仓库地址。 */
+const REPO_URL = 'https://github.com/zyzy898/video-toAI-md-pdf-main-2';
 
 /**
  * 顶栏 + 移动端抽屉。
@@ -12,6 +16,7 @@ import { navLinks } from '../data/nav.js';
  */
 export default function Nav({ activeId = null, mode = 'full' }) {
   const [open, setOpen] = useState(false);
+  const [theme, toggleTheme] = useTheme();
   const isMinimal = mode === 'minimal';
 
   useEffect(() => {
@@ -73,23 +78,44 @@ export default function Nav({ activeId = null, mode = 'full' }) {
             ))}
           </div>
         )}
-        {/* 移动端汉堡：只在 full 模式下展示（minimal 模式没有锚点抽屉的必要） */}
-        {!isMinimal && (
+        <div className="nav-right">
           <button
             type="button"
-            className="nav-toggle"
-            aria-controls="nav-mobile-panel"
-            aria-expanded={open ? 'true' : 'false'}
-            aria-label={open ? '关闭菜单' : '打开菜单'}
-            onClick={() => setOpen((v) => !v)}
+            className="nav-theme-toggle"
+            onClick={toggleTheme}
+            aria-label={theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
+            title={theme === 'dark' ? '切换到亮色主题' : '切换到暗色主题'}
           >
-            <span className="nav-toggle-bars" aria-hidden="true">
-              <span></span>
-              <span></span>
-              <span></span>
-            </span>
+            {theme === 'dark' ? <SunIcon className="ico" /> : <MoonIcon className="ico" />}
           </button>
-        )}
+          <a
+            href={REPO_URL}
+            target="_blank"
+            rel="noreferrer"
+            className="nav-github"
+            aria-label="查看源码（GitHub）"
+            title="查看源码"
+          >
+            <GithubIcon className="ico" />
+          </a>
+          {/* 移动端汉堡：只在 full 模式下展示（minimal 模式没有锚点抽屉的必要） */}
+          {!isMinimal && (
+            <button
+              type="button"
+              className="nav-toggle"
+              aria-controls="nav-mobile-panel"
+              aria-expanded={open ? 'true' : 'false'}
+              aria-label={open ? '关闭菜单' : '打开菜单'}
+              onClick={() => setOpen((v) => !v)}
+            >
+              <span className="nav-toggle-bars" aria-hidden="true">
+                <span></span>
+                <span></span>
+                <span></span>
+              </span>
+            </button>
+          )}
+        </div>
       </div>
       {!isMinimal && (
         <div

@@ -2,8 +2,12 @@ import { techCards } from '../../data/tech.js';
 import { engineeringCards } from '../../data/engineering.jsx';
 import { techLogos } from '../../data/techLogos.jsx';
 import LogoLoop from '../LogoLoop/LogoLoop.jsx';
+import useTheme from '../../hooks/useTheme.js';
 
 export default function Tech() {
+  const [theme] = useTheme();
+  // 跑马灯左右渐隐色需与外框背景一致，否则明主题下露出深色方块
+  const logoFadeColor = theme === 'light' ? '#f8fafc' : '#0b0d14';
   return (
     <section id="tech">
       <div className="container">
@@ -47,7 +51,7 @@ export default function Tech() {
         <div className="tech-logos">
           <div className="tech-logos-head">
             <span className="tech-logos-tag">POWERED BY</span>
-            <p className="tech-logos-sub">React · Vite · Flask · faster-whisper · FFmpeg 等业界主流方案</p>
+            <p className="tech-logos-sub"></p>
           </div>
           <div className="tech-logos-frame" aria-hidden="false">
             <LogoLoop
@@ -59,7 +63,7 @@ export default function Tech() {
               hoverSpeed={20}
               scaleOnHover
               fadeOut
-              fadeOutColor="#0b0d14"
+              fadeOutColor={logoFadeColor}
               ariaLabel="Tech stack 品牌 logo 循环展示"
             />
           </div>

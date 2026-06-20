@@ -1169,6 +1169,58 @@ body {
   letter-spacing: 0.02em;
 }
 
+/* Clickable step timestamp → seeks the subtitle video */
+.step-time-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(125, 211, 252, 0.32);
+  background: rgba(34, 211, 238, 0.1);
+  color: #7dd3fc;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.step-time-jump:hover {
+  color: #e0f2fe;
+  border-color: rgba(125, 211, 252, 0.6);
+  background: rgba(34, 211, 238, 0.18);
+}
+
+.step-time-jump:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.5);
+}
+
+/* Active subtitle line synced to the video playhead */
+.subtitle-line-row {
+  scroll-margin: 0.5rem;
+}
+
+.subtitle-line-row--active {
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.4), 0 6px 18px rgba(13, 148, 136, 0.22);
+}
+
+:root[data-theme="light"] .step-time-jump {
+  border-color: rgba(8, 145, 178, 0.4);
+  background: rgba(8, 145, 178, 0.1);
+  color: #0e7490;
+}
+
+:root[data-theme="light"] .step-time-jump:hover {
+  color: #155e75;
+  border-color: rgba(8, 145, 178, 0.6);
+  background: rgba(8, 145, 178, 0.16);
+}
+
+:root[data-theme="light"] .subtitle-line-row--active {
+  box-shadow: 0 0 0 1px rgba(13, 148, 136, 0.5), 0 6px 18px rgba(13, 148, 136, 0.16);
+}
+
 .readonly-step-title {
   display: inline-flex;
   align-items: center;

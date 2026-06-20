@@ -219,6 +219,15 @@ export function TrashIcon({ className = "h-3.5 w-3.5" }: IconProps) {
   );
 }
 
+export function CopyIcon({ className = "h-4 w-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <rect x="9" y="9" width="11" height="11" rx="2.2" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M15 5.5V5A2 2 0 0 0 13 3H6A2 2 0 0 0 4 5v7a2 2 0 0 0 2 2h.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function HistoryEmptyIllustration({ className = "h-24 w-24" }: IconProps) {
   return (
     <svg viewBox="0 0 128 128" fill="none" className={className} aria-hidden="true">

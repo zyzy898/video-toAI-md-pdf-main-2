@@ -132,6 +132,10 @@ import {
 } from "./components/icons";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import { ReadonlyStepsList } from "./components/ReadonlyStepsList";
+import { StepsPanel } from "./components/StepsPanel";
+import { DocumentPanel } from "./components/DocumentPanel";
+import { SubtitlePanel } from "./components/SubtitlePanel";
+import { BatchResultPanel } from "./components/BatchResultPanel";
 import { VirtualizedHistoryList } from "./components/VirtualizedHistoryList";
 
 void BrandStudioIcon;
@@ -277,6 +281,11 @@ export default function App() {
   const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
   const [batchResultData, setBatchResultData] = useState<BatchResultData | null>(null);
+  const [savedBatchResult, setSavedBatchResult] = useState<BatchResultData | null>(null);
+  const [view, setView] = useState<"upload" | "result">("upload");
+  const [activeResultTab, setActiveResultTab] = useState<"steps" | "document" | "subtitle">("steps");
+  const [activeResultSection, setActiveResultSection] = useState<string>("");
+  const [showBackToTop, setShowBackToTop] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [subtitleWorkbench, setSubtitleWorkbench] = useState<SubtitleWorkbenchData | null>(null);
   const [subtitleLoading, setSubtitleLoading] = useState(false);
@@ -780,7 +789,6 @@ export default function App() {
       }));
       setBatchFiles((prev) => [...prev, ...placeholders]);
       try {
-        let uploadedSuccess = 0;
         let uploadedFailed = 0;
         for (let i = 0; i < files.length; i += 1) {
           const currentFile = files[i];
@@ -809,7 +817,6 @@ export default function App() {
               error: "",
               clientId: placeholder.clientId,
             });
-            uploadedSuccess += 1;
           } catch (error) {
             const apiError = error instanceof ApiRequestError ? error : null;
             let message = String((error as Error).message || error || "上传失败");
@@ -875,6 +882,8 @@ export default function App() {
       setBatchResultData(null);
       setIsEditMode(false);
       setEditedSteps([]);
+      setActiveResultTab("steps");
+      setView("result");
       if (data?.fallback_used) {
         showSuccess(String(data.analysis_note || "未识别到标准步骤，已自动生成候选内容。"));
       }
@@ -922,6 +931,8 @@ export default function App() {
         setBatchResultData(null);
         setIsEditMode(false);
         setEditedSteps([]);
+        setActiveResultTab("steps");
+        setView("result");
         setBatchFiles((prev) =>
           prev.map((item) =>
             item.filepath === file.filepath ? { ...item, status: "failed", error: "安全检测未通过" } : item,
@@ -1138,6 +1149,7 @@ export default function App() {
       setResultData(null);
       setIsEditMode(false);
       setEditedSteps([]);
+      setView("result");
       let resultIndex = 0;
       const nextFiles: BatchFileItem[] = batchFilesRef.current.map((item) => {
         if (!item.filepath) return item;
@@ -1205,6 +1217,7 @@ export default function App() {
   ]);
 
   const startAnalyze = useCallback(async () => {
+    setSavedBatchResult(null);
     const analyzableFiles = getAnalyzableBatchFiles();
     if (analyzableFiles.length === 1) return analyzeSingle();
     if (analyzableFiles.length > 1) return analyzeBatch();
@@ -1251,7 +1264,12 @@ export default function App() {
               : {},
           subtitle_workbench_url: String(record.subtitle_workbench_url || ""),
         });
+        setSavedBatchResult(null);
         setBatchResultData(null);
+        setIsEditMode(false);
+        setEditedSteps([]);
+        setActiveResultTab("steps");
+        setView("result");
         if (resultsRef.current) {
           resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
         }
@@ -1263,6 +1281,84 @@ export default function App() {
     },
     [fetchJson, hideProgress, showError, showProgress, uiScrollBehavior],
   );
+
+  const openBatchResultItem = useCallback(
+    async (item: BatchResultItem) => {
+      const outputDirName = basename(item.output_dir_name || item.output_dir);
+      if (!outputDirName) {
+        showError("该结果缺少输出目录，无法打开详情");
+        return;
+      }
+      showProgress("加载中", "正在读取分析结果...");
+      const base = `/output/${encodeURIComponent(outputDirName)}`;
+      try {
+        const [stepsRes, markdownRes] = await Promise.all([
+          fetch(`${base}/steps.json`, withHistoryClientHeader()).catch(() => null),
+          fetch(`${base}/operation_guide.md`, withHistoryClientHeader()).catch(() => null),
+        ]);
+        const steps =
+          stepsRes && stepsRes.ok ? ((await stepsRes.json().catch(() => [])) as StepItem[]) : [];
+        const markdown = markdownRes && markdownRes.ok ? await markdownRes.text().catch(() => "") : "";
+
+        setResultData({
+          steps: Array.isArray(steps) ? steps : [],
+          markdown: markdown || "",
+          output_dir: String(item.output_dir || outputDirName),
+          output_dir_name: outputDirName,
+          pdf_path: "",
+          has_steps: Array.isArray(steps) && steps.length > 0,
+          result_mode: String(item.result_mode || ""),
+          fallback_used: Boolean(item.fallback_used),
+          analysis_note: String(item.analysis_note || ""),
+          quality_score: Number(item.quality_score || 0),
+          degrade_reason: String(item.degrade_reason || ""),
+          content_title: String(item.content_title || item.filename || ""),
+          key_points: Array.isArray(item.key_points) ? item.key_points : [],
+          timeline_points: Array.isArray(item.timeline_points) ? item.timeline_points : [],
+          confidence_note: String(item.confidence_note || ""),
+          video_preview_url: String(item.video_preview_url || ""),
+          subtitle_available: Boolean(item.subtitle_available),
+          subtitle_file_name: String(item.subtitle_file_name || ""),
+          subtitle_line_count: Number(item.subtitle_line_count || 0),
+          subtitle_exports:
+            item.subtitle_exports && typeof item.subtitle_exports === "object"
+              ? (item.subtitle_exports as Record<string, string>)
+              : {},
+          subtitle_workbench_url: String(item.subtitle_workbench_url || ""),
+        });
+        setSavedBatchResult(batchResultData);
+        setBatchResultData(null);
+        setIsEditMode(false);
+        setEditedSteps([]);
+        setActiveResultTab("steps");
+        setView("result");
+        if (resultsRef.current) {
+          resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
+        } else if (typeof window !== "undefined") {
+          window.scrollTo({ top: 0, behavior: uiScrollBehavior });
+        }
+      } catch (error) {
+        showError(`打开结果失败: ${String((error as Error).message || error)}`);
+      } finally {
+        hideProgress();
+      }
+    },
+    [batchResultData, hideProgress, showError, showProgress, uiScrollBehavior, withHistoryClientHeader],
+  );
+
+  const returnToBatchResult = useCallback(() => {
+    if (!savedBatchResult) return;
+    setBatchResultData(savedBatchResult);
+    setSavedBatchResult(null);
+    setResultData(null);
+    setIsEditMode(false);
+    setEditedSteps([]);
+    if (resultsRef.current) {
+      resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
+    } else if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: uiScrollBehavior });
+    }
+  }, [savedBatchResult, uiScrollBehavior]);
 
   const openDeleteHistoryConfirm = useCallback(
     (record: HistoryItem) => {
@@ -1466,6 +1562,18 @@ export default function App() {
     setSubtitleKeyword("");
   }, [resultData?.output_dir]);
 
+  useEffect(() => {
+    const blocked = String(resultData?.result_mode || "").trim().toLowerCase() === "blocked_notice";
+    const single = Boolean(resultData);
+    if (activeResultTab === "document" && !(single && !blocked && Boolean(resultData?.markdown))) {
+      setActiveResultTab("steps");
+      return;
+    }
+    if (activeResultTab === "subtitle" && !(single && !blocked && Boolean(resultData?.output_dir))) {
+      setActiveResultTab("steps");
+    }
+  }, [activeResultTab, resultData]);
+
   const downloadSubtitleZip = useCallback(
     async () => {
       const outputDirName = basename(resultData?.output_dir);
@@ -1616,7 +1724,147 @@ export default function App() {
   const singleResultSteps = resultData?.steps || EMPTY_STEPS;
   const singleResultMode = String(resultData?.result_mode || "").trim().toLowerCase();
   const isBlockedNoticeResult = singleResultMode === "blocked_notice";
-  const isDegradedResult = singleResultMode === "candidate_steps" || singleResultMode === "timeline_summary";
+  const isResultView = view === "result" && hasAnyResult;
+  const hasDocumentPanel = hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.markdown);
+  const hasSubtitlePanel = hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.output_dir);
+  const showStepsPanel = hasSingleResult && (isBlockedNoticeResult || Boolean(resultData));
+  const confidenceLevel = useMemo<"high" | "medium" | "low" | null>(() => {
+    if (!hasSingleResult || isBlockedNoticeResult) return null;
+    const isDegraded = singleResultMode === "candidate_steps" || singleResultMode === "timeline_summary";
+    const score = Number(resultData?.quality_score || 0);
+    if (isDegraded) return "low";
+    if (score > 0 && score < 0.6) return "low";
+    if (score >= 0.6 && score < 0.8) return "medium";
+    return "high";
+  }, [hasSingleResult, isBlockedNoticeResult, resultData?.quality_score, singleResultMode]);
+  const confidenceLabel =
+    confidenceLevel === "high" ? "结果可信度 高" : confidenceLevel === "medium" ? "结果可信度 中" : "结果可信度 低";
+  const currentResultName = useMemo(() => {
+    if (hasBatchResult) return `批量结果（${batchResultData?.results?.length || 0} 个文件）`;
+    const title = String(resultData?.content_title || "").trim();
+    if (title) return title;
+    const named = batchFiles.find((item) => item.status === "success" && item.filename);
+    return String(named?.filename || "分析结果").trim() || "分析结果";
+  }, [batchFiles, batchResultData?.results?.length, hasBatchResult, resultData?.content_title]);
+  const resultSectionIds = useMemo(() => {
+    const ids: string[] = [];
+    if (hasSubtitlePanel) ids.push("result-panel-subtitle");
+    if (showStepsPanel) ids.push("result-panel-steps");
+    if (hasDocumentPanel) ids.push("result-panel-document");
+    return ids;
+  }, [hasDocumentPanel, hasSubtitlePanel, showStepsPanel]);
+
+  // Scroll-spy: highlight whichever result panel is currently in view.
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof IntersectionObserver === "undefined") return;
+    if (!isResultView || resultSectionIds.length < 2) {
+      setActiveResultSection("");
+      return;
+    }
+    const elements = resultSectionIds
+      .map((id) => document.getElementById(id))
+      .filter((el): el is HTMLElement => Boolean(el));
+    if (elements.length === 0) return;
+
+    const visibility = new Map<string, number>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          visibility.set(entry.target.id, entry.isIntersecting ? entry.intersectionRatio : 0);
+        }
+        let topId = "";
+        let topRatio = 0;
+        visibility.forEach((ratio, id) => {
+          if (ratio > topRatio) {
+            topRatio = ratio;
+            topId = id;
+          }
+        });
+        if (topId) setActiveResultSection((prev) => (prev === topId ? prev : topId));
+      },
+      { rootMargin: "-30% 0px -55% 0px", threshold: [0, 0.25, 0.5, 1] },
+    );
+    elements.forEach((el) => observer.observe(el));
+    return () => observer.disconnect();
+  }, [isResultView, resultSectionIds]);
+
+  // Reveal a "back to top" affordance once the result page is scrolled down.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let rafId = 0;
+    const syncVisibility = () => {
+      const scrollTop = window.scrollY || document.documentElement.scrollTop || 0;
+      const next = isResultView && scrollTop > 520;
+      setShowBackToTop((prev) => (prev === next ? prev : next));
+    };
+    const handleScroll = () => {
+      if (rafId) return;
+      rafId = window.requestAnimationFrame(() => {
+        rafId = 0;
+        syncVisibility();
+      });
+    };
+    // Defer the initial sync so we don't setState synchronously in the effect body.
+    const initialRafId = window.requestAnimationFrame(syncVisibility);
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      window.cancelAnimationFrame(initialRafId);
+      if (rafId) window.cancelAnimationFrame(rafId);
+      window.removeEventListener("scroll", handleScroll);
+    };
+  }, [isResultView]);
+  const goBackToUpload = useCallback(() => {
+    setView("upload");
+    setSavedBatchResult(null);
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: uiScrollBehavior });
+    }
+  }, [uiScrollBehavior]);
+  const scrollToPanel = useCallback(
+    (panelId: string) => {
+      if (typeof document === "undefined") return;
+      const target = document.getElementById(panelId);
+      if (target) target.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
+    },
+    [uiScrollBehavior],
+  );
+  const copyTextToClipboard = useCallback(
+    async (text: string, successText: string) => {
+      const content = String(text || "").trim();
+      if (!content) {
+        showError("没有可复制的内容");
+        return;
+      }
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(content);
+        } else {
+          const textarea = document.createElement("textarea");
+          textarea.value = content;
+          textarea.style.position = "fixed";
+          textarea.style.opacity = "0";
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand("copy");
+          document.body.removeChild(textarea);
+        }
+        showSuccess(successText);
+      } catch (error) {
+        showError(`复制失败: ${String((error as Error).message || error)}`);
+      }
+    },
+    [showError, showSuccess],
+  );
+  const copyMarkdownSource = useCallback(() => {
+    void copyTextToClipboard(String(resultData?.markdown || ""), "已复制 Markdown 源码");
+  }, [copyTextToClipboard, resultData?.markdown]);
+  const copyPlainText = useCallback(() => {
+    if (typeof document === "undefined") return;
+    const container = document.createElement("div");
+    container.innerHTML = renderedMarkdown;
+    const plainText = container.textContent || container.innerText || "";
+    void copyTextToClipboard(plainText, "已复制纯文本");
+  }, [copyTextToClipboard, renderedMarkdown]);
   const drawerOverlayActive =
     historyDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
   const heroCanvasAnimating = !mobilePerfMode && !drawerOverlayActive && heroAnimationActive;
@@ -1697,6 +1945,32 @@ export default function App() {
             <span>Video Insights</span>
           </button>
           <div className="flex items-center gap-2">
+            {hasAnyResult ? (
+              <button
+                type="button"
+                onClick={() => {
+                  if (view === "result") {
+                    goBackToUpload();
+                  } else {
+                    setView("result");
+                    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: uiScrollBehavior });
+                  }
+                }}
+                className="vi-nav-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
+              >
+                {view === "result" ? (
+                  <>
+                    <UploadIcon className="h-3.5 w-3.5" />
+                    上传
+                  </>
+                ) : (
+                  <>
+                    <StepsIcon className="h-3.5 w-3.5" />
+                    结果
+                  </>
+                )}
+              </button>
+            ) : null}
             <button
               type="button"
               onClick={toggleTheme}
@@ -1727,7 +2001,8 @@ export default function App() {
         </div>
       </nav>
       <main className="app-main relative z-10 mx-auto w-full max-w-[1320px] space-y-6 px-4 pb-8 pt-[5.25rem] sm:px-6 md:space-y-7 md:px-8 md:pb-10 md:pt-24">
-        <header className="vi-hero hero-panel panel-card motion-enter rounded-xl border-0 bg-transparent p-4">
+        {!isResultView ? (
+          <header className="vi-hero hero-panel panel-card motion-enter rounded-xl border-0 bg-transparent p-4">
           <div className="mx-auto flex w-full max-w-4xl flex-col items-center gap-3 text-center">
             <span className="vi-hero-eyebrow">AI · 视频理解工作台</span>
             <h1 className="vi-hero-title vi-hero-title-flip" aria-label="视频转文档，不止提取，更是理解">
@@ -1747,9 +2022,11 @@ export default function App() {
             </div>
           </div>
         </header>
+        ) : null}
 
         <div className="app-grid grid items-start gap-5 2xl:gap-6">
           <section className="app-workspace motion-enter motion-delay-2 min-w-0 space-y-4">
+            {!isResultView ? (
             <section className="panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
               <div className="vi-card-head">
                 <div className="vi-card-title">
@@ -1889,6 +2166,7 @@ export default function App() {
                 <button
                   type="button"
                   className="vi-btn vi-btn--block vi-btn--sm mt-2"
+                  disabled={isAnalyzing}
                   onClick={() => setBatchFiles([])}
                 >
                   <ClearIcon className="h-3.5 w-3.5" />
@@ -1914,477 +2192,193 @@ export default function App() {
                 )}
               </div>
             </section>
+            ) : null}
 
-            {hasAnyResult ? (
-              <div
-                ref={resultsRef}
-                className="results-grid grid items-stretch gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]"
-              >
-                {hasBatchResult ? (
-                  <section className="panel-card motion-enter rounded-xl border border-neutral-800 bg-neutral-900/70 p-4 xl:col-span-2">
-                    <div className="mb-2 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <StackIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">批量处理结果</h2>
-                      </div>
-                      <button
-                        className="zip-download-btn flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
-                        onClick={() => void downloadBatchZip()}
-                      >
-                        <DownloadZipIcon className="h-3.5 w-3.5" />
-                        下载批量 ZIP
-                      </button>
-                    </div>
-                    {(batchResultData?.batch_policy_warnings || []).length > 0 ? (
-                      <div className="mb-2 rounded border border-amber-400/35 bg-amber-500/10 p-2 text-xs text-amber-200/95">
-                        <p className="font-semibold">批次策略提醒</p>
-                        <ul className="mt-1 list-disc space-y-1 pl-5">
-                          {(batchResultData?.batch_policy_warnings || []).slice(0, 3).map((tip, idx) => (
-                            <li key={`batch-policy-warning-${idx}`}>{tip}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                    <div className="space-y-2">
-                      {(batchResultData?.results || []).map((r, i) => (
-                        <div key={`${r.filename}-${i}`} className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
-                          <div className="flex items-center justify-between">
-                            <p className="truncate text-sm font-medium">{r.filename}</p>
-                            <span
-                              className={`text-xs ${
-                                r.success
-                                  ? r.result_mode === "candidate_steps" || r.result_mode === "timeline_summary"
-                                    ? "text-amber-300"
-                                    : "text-emerald-300"
-                                  : r.result_mode === "blocked_notice" || r.code === "content_policy_violation"
-                                    ? "text-amber-300"
-                                    : "text-rose-300"
-                              }`}
-                            >
-                              {r.success
-                                ? r.result_mode === "candidate_steps" || r.result_mode === "timeline_summary"
-                                  ? "已完成（降级）"
-                                  : "成功"
-                                : r.result_mode === "blocked_notice" || r.code === "content_policy_violation"
-                                  ? "已拦截"
-                                  : "失败"}
-                            </span>
-                          </div>
-                          {r.success ? (
-                            <>
-                              <button
-                                className="zip-download-btn mt-1 flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
-                                onClick={() => void downloadSingleFromBatch(r.output_dir, r.filename)}
-                              >
-                                <DownloadSingleIcon className="h-3.5 w-3.5" />
-                                下载
-                              </button>
-                              {r.fallback_used ? (
-                                <p className="mt-1 text-xs text-amber-300/90">
-                                  {(r.analysis_note || "未识别到标准步骤，已自动生成候选内容。") +
-                                    `（质量分：${Number(r.quality_score || 0).toFixed(2)}）`}
-                                </p>
-                              ) : null}
-                            </>
-                          ) : r.result_mode === "blocked_notice" || r.code === "content_policy_violation" ? (
-                            <div className="mt-1 rounded border border-rose-500/45 bg-rose-500/10 p-2 text-xs text-rose-200/95">
-                              <p className="font-semibold">
-                                {r.blocked_notice?.title || "安全检测未通过（已拦截）"}
-                              </p>
-                              <p className="mt-1">
-                                等级：{String(r.blocked_notice?.risk_level || r.risk?.risk_level || "high")} · 规则：
-                                {String(r.blocked_notice?.reason_code || r.risk?.reason_code || "CONTENT_POLICY_VIOLATION")}
-                              </p>
-                              <p className="mt-1 break-words">
-                                {String(r.blocked_notice?.reason || r.risk?.reason || r.error || CONTENT_POLICY_BLOCK_MESSAGE)}
-                              </p>
-                              {(r.blocked_notice?.suggestions || []).length > 0 ? (
-                                <ul className="mt-1 list-disc space-y-1 pl-4">
-                                  {(r.blocked_notice?.suggestions || []).slice(0, 3).map((tip, idx) => (
-                                    <li key={`b-tip-${i}-${idx}`}>{tip}</li>
-                                  ))}
-                                </ul>
-                              ) : null}
-                            </div>
-                          ) : (
-                            <p className="mt-1 text-xs text-rose-300">{r.error || "处理失败"}</p>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                ) : null}
-
-                {hasSingleResult ? (
-                  <section className="panel-card motion-enter result-heavy-surface flex h-full min-h-0 flex-col rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
-                    <div className="mb-2 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <StepsIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">
-                          {isBlockedNoticeResult
-                            ? "安全检测结果说明"
-                            : isDegradedResult
-                              ? singleResultMode === "timeline_summary"
-                                ? "时间线摘要（自动降级）"
-                                : "候选步骤（自动降级）"
-                              : "识别到的步骤"}
-                        </h2>
-                      </div>
-                      {!isEditMode && !isBlockedNoticeResult ? (
+            {isResultView ? (
+              <div ref={resultsRef} className="result-workspace motion-enter space-y-4">
+                <section className="result-header-bar panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      {savedBatchResult ? (
                         <button
-                          className="steps-edit-btn flex items-center gap-1 rounded px-2 py-1 text-xs"
-                          onClick={() => {
-                            if (!resultData?.steps?.length) return showError("当前没有可编辑步骤");
-                            setEditedSteps(
-                              clone(resultData.steps).map((s, i) => ({
-                                ...s,
-                                step: i + 1,
-                                time: s.time || "00:00",
-                                title: s.title || "",
-                                description: s.description || "",
-                              })),
-                            );
-                            setIsEditMode(true);
-                          }}
+                          type="button"
+                          onClick={returnToBatchResult}
+                          className="vi-btn vi-btn--sm shrink-0"
                         >
-                          <EditIcon className="h-3.5 w-3.5" />
-                          编辑
+                          ← 返回批量结果
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={goBackToUpload}
+                          className="vi-btn vi-btn--sm shrink-0"
+                        >
+                          ← 返回上传
+                        </button>
+                      )}
+                      <h2 className="truncate text-sm font-semibold text-neutral-100" title={currentResultName}>
+                        {currentResultName}
+                      </h2>
+                    </div>
+                  </div>
+                  {hasSingleResult && !isBlockedNoticeResult ? (
+                    <div className="result-overview mt-3 flex flex-wrap items-center gap-1.5">
+                      {confidenceLevel ? (
+                        <span
+                          className={cn("confidence-badge", `confidence-badge--${confidenceLevel}`)}
+                          title={
+                            resultData?.quality_score
+                              ? `质量分：${Number(resultData.quality_score).toFixed(2)}`
+                              : undefined
+                          }
+                        >
+                          <span className="confidence-badge-dot" />
+                          {confidenceLabel}
+                        </span>
+                      ) : null}
+                      {hasSubtitlePanel ? (
+                        <button
+                          type="button"
+                          className={cn(
+                            "result-overview-chip result-overview-chip--link",
+                            activeResultSection === "result-panel-subtitle" && "result-overview-chip--active",
+                          )}
+                          aria-current={activeResultSection === "result-panel-subtitle" ? "true" : undefined}
+                          onClick={() => scrollToPanel("result-panel-subtitle")}
+                        >
+                          <StepsIcon className="h-3.5 w-3.5" />
+                          字幕工作台
+                        </button>
+                      ) : null}
+                      {showStepsPanel ? (
+                        <button
+                          type="button"
+                          className={cn(
+                            "result-overview-chip result-overview-chip--link",
+                            activeResultSection === "result-panel-steps" && "result-overview-chip--active",
+                          )}
+                          aria-current={activeResultSection === "result-panel-steps" ? "true" : undefined}
+                          onClick={() => scrollToPanel("result-panel-steps")}
+                        >
+                          <StepsIcon className="h-3.5 w-3.5" />
+                          步骤 {singleResultSteps.length}
+                        </button>
+                      ) : null}
+                      {hasDocumentPanel ? (
+                        <button
+                          type="button"
+                          className={cn(
+                            "result-overview-chip result-overview-chip--link",
+                            activeResultSection === "result-panel-document" && "result-overview-chip--active",
+                          )}
+                          aria-current={activeResultSection === "result-panel-document" ? "true" : undefined}
+                          onClick={() => scrollToPanel("result-panel-document")}
+                        >
+                          <DocumentIcon className="h-3.5 w-3.5" />
+                          总结文档
                         </button>
                       ) : null}
                     </div>
-                    {resultData?.analysis_note ? (
-                      <p
-                        className={`mb-2 text-xs ${
-                          isBlockedNoticeResult ? "text-rose-300/90" : "text-amber-300/90"
-                        }`}
-                      >
-                        {resultData.analysis_note}
-                      </p>
-                    ) : null}
-                    {isBlockedNoticeResult ? (
-                      <div className="rounded border border-rose-500/45 bg-rose-500/10 p-3 text-sm">
-                        <p className="font-semibold text-rose-200">
-                          {resultData?.blocked_notice?.title || "安全检测未通过（已拦截）"}
-                        </p>
-                        <p className="mt-1 text-rose-100/90">
-                          风险等级：{String(resultData?.blocked_notice?.risk_level || resultData?.risk?.risk_level || "high")}
-                        </p>
-                        <p className="text-rose-100/90">
-                          规则码：{String(resultData?.blocked_notice?.reason_code || resultData?.risk?.reason_code || "CONTENT_POLICY_VIOLATION")}
-                        </p>
-                        <p className="mt-1 text-rose-100/95 break-words">
-                          {String(resultData?.blocked_notice?.reason || resultData?.risk?.reason || CONTENT_POLICY_BLOCK_MESSAGE)}
-                        </p>
-                        {(resultData?.blocked_notice?.suggestions || []).length > 0 ? (
-                          <ul className="mt-2 list-disc space-y-1 pl-5 text-rose-100/90">
-                            {(resultData?.blocked_notice?.suggestions || []).slice(0, 4).map((tip, idx) => (
-                              <li key={`bn-tip-${idx}`}>{tip}</li>
-                            ))}
-                          </ul>
-                        ) : null}
-                        {resultData?.blocked_notice?.retry_guidance ? (
-                          <p className="mt-2 text-rose-100/90">{resultData.blocked_notice.retry_guidance}</p>
-                        ) : null}
-                      </div>
-                    ) : !isEditMode ? (
-                      <div className="single-result-scroll history-scroll flex-1 min-h-0 space-y-2 overflow-auto pr-1">
-                        {isDegradedResult ? (
-                          <div className="space-y-2">
-                            <div className="rounded border border-amber-400/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200">
-                              置信度较低（质量分：{Number(resultData?.quality_score || 0).toFixed(2)}）。原因：
-                              {formatDegradeReason(resultData?.degrade_reason)}
-                            </div>
-                            {resultData?.content_title ? (
-                              <div className="rounded border border-amber-400/30 bg-amber-500/6 p-2 text-xs text-amber-100/95">
-                                <p className="font-semibold">标题：{resultData.content_title}</p>
-                                {(resultData.key_points || []).length > 0 ? (
-                                  <ul className="mt-1 list-disc space-y-1 pl-5">
-                                    {(resultData.key_points || []).slice(0, 5).map((item, idx) => (
-                                      <li key={`kp-${idx}`}>{item}</li>
-                                    ))}
-                                  </ul>
-                                ) : null}
-                                {(resultData.timeline_points || []).length > 0 ? (
-                                  <p className="mt-1">
-                                    时间点：
-                                    {(resultData.timeline_points || [])
-                                      .slice(0, 5)
-                                      .map((item) => String(item?.time || "00:00"))
-                                      .join(" / ")}
-                                  </p>
-                                ) : null}
-                                {resultData?.confidence_note ? (
-                                  <p className="mt-1">{resultData.confidence_note}</p>
-                                ) : null}
-                              </div>
-                            ) : null}
-                          </div>
-                        ) : null}
-                        <ReadonlyStepsList steps={singleResultSteps} />
-                      </div>
-                    ) : (
-                      <div className="steps-edit-scroll history-scroll flex-1 min-h-0 overflow-auto pr-1">
-                        <div className="steps-edit-actions mb-2 flex gap-2">
-                          <button
-                            type="button"
-                            disabled={savingSteps}
-                            className="steps-edit-save-btn"
-                            onClick={() => void saveEditedSteps()}
-                          >
-                            保存并重生成
-                          </button>
-                          <button
-                            type="button"
-                            disabled={savingSteps}
-                            className="steps-edit-cancel-btn"
-                            onClick={() => {
-                              setIsEditMode(false);
-                              setEditedSteps([]);
-                            }}
-                          >
-                            取消
-                          </button>
-                        </div>
-                        <div className="space-y-2">
-                          {editedSteps.map((step, index) => (
-                            <div
-                              key={`e-${index}`}
-                              draggable
-                              onDragStart={() => setDragIndex(index)}
-                              onDragOver={(e) => {
-                                e.preventDefault();
-                                setDragOverIndex(index);
-                              }}
-                              onDrop={(e) => {
-                                e.preventDefault();
-                                if (dragIndex === null || dragIndex === index) return;
-                                setEditedSteps((prev) => {
-                                  const next = [...prev];
-                                  const [moved] = next.splice(dragIndex, 1);
-                                  if (!moved) return prev;
-                                  next.splice(index, 0, moved);
-                                  return next.map((s, i) => ({ ...s, step: i + 1 }));
-                                });
-                                setDragIndex(null);
-                                setDragOverIndex(null);
-                              }}
-                              onDragEnd={() => {
-                                setDragIndex(null);
-                                setDragOverIndex(null);
-                              }}
-                              className={`rounded border p-2 ${
-                                dragIndex === index
-                                  ? "border-teal-500/50 opacity-60"
-                                  : dragOverIndex === index
-                                    ? "border-teal-400"
-                                    : "border-neutral-800"
-                              }`}
-                            >
-                              <div className="mb-1 flex gap-2">
-                                <input
-                                  className="steps-edit-input steps-edit-title-input flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
-                                  value={step.title || ""}
-                                  placeholder={NEW_STEP_DEFAULT_TITLE}
-                                  onChange={(e) =>
-                                    setEditedSteps((prev) =>
-                                      prev.map((item, idx) => (idx === index ? { ...item, title: e.target.value } : item)),
-                                    )
-                                  }
-                                />
-                                <input
-                                  className="steps-edit-input w-24 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
-                                  value={step.time || ""}
-                                  placeholder={NEW_STEP_DEFAULT_TIME}
-                                  onChange={(e) =>
-                                    setEditedSteps((prev) =>
-                                      prev.map((item, idx) => (idx === index ? { ...item, time: e.target.value } : item)),
-                                    )
-                                  }
-                                />
-                              </div>
-                              <textarea
-                                className="steps-edit-textarea steps-edit-desc-textarea min-h-16 w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
-                                value={step.description || ""}
-                                placeholder={NEW_STEP_DEFAULT_DESCRIPTION}
-                                onChange={(e) =>
-                                  setEditedSteps((prev) =>
-                                    prev.map((item, idx) => (idx === index ? { ...item, description: e.target.value } : item)),
-                                  )
-                                }
-                              />
-                              <button
-                                type="button"
-                                title="删除步骤"
-                                aria-label="删除步骤"
-                                className="mt-1 inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10"
-                                onClick={() =>
-                                  setEditedSteps((prev) =>
-                                    prev.filter((_, idx) => idx !== index).map((s, i) => ({ ...s, step: i + 1 })),
-                                  )
-                                }
-                              >
-                                <TrashIcon />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                        <button
-                          className="mt-2 w-full rounded-lg border border-dashed border-teal-400/45 bg-gradient-to-b from-teal-500/8 to-cyan-500/6 px-3 py-2 text-sm font-medium text-teal-100/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition-all duration-200 hover:-translate-y-0.5 hover:border-teal-300/70 hover:from-teal-500/14 hover:to-cyan-500/12 hover:text-teal-50 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-950"
-                          onClick={() =>
-                            setEditedSteps((prev) => [
-                              ...prev,
-                              {
-                                step: prev.length + 1,
-                                time: "",
-                                title: "",
-                                description: "",
-                              },
-                            ])
-                          }
-                        >
-                          添加新步骤
-                        </button>
-                      </div>
-                    )}
-                  </section>
+                  ) : null}
+                </section>
+                {hasBatchResult && batchResultData ? (
+                  <BatchResultPanel
+                    data={batchResultData}
+                    onDownloadAll={() => void downloadBatchZip()}
+                    onDownloadItem={(outputDir, filename) =>
+                      void downloadSingleFromBatch(outputDir, filename)
+                    }
+                    onOpenItem={(item) => void openBatchResultItem(item)}
+                  />
                 ) : null}
 
-                {hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.markdown) ? (
-                  <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
-                    <div className="mb-2 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <DocumentIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">生成的总结文档</h2>
-                      </div>
-                      <button
-                        className="zip-download-btn flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
-                        onClick={() => void downloadSingleZip()}
-                      >
-                        <DownloadZipIcon className="h-3.5 w-3.5" />
-                        下载 ZIP
-                      </button>
-                    </div>
-                    <MarkdownPreview
-                      html={renderedMarkdown}
-                      className={summaryOnly ? "summary-only-scroll-rail" : undefined}
-                      contentClassName={
-                        summaryOnly ? "summary-only-markdown-content" : "standard-markdown-content"
-                      }
-                    />
-                  </section>
-                ) : null}
-
-                {hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.output_dir) ? (
-                  <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
-                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <StepsIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">字幕工作台</h2>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={subtitleRefreshing}
-                          onClick={() => void refreshSubtitleWorkbench()}
-                        >
-                          {subtitleRefreshing ? "重新加载中..." : "重新加载字幕"}
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={subtitleLoading || subtitleRefreshing}
-                          onClick={() => void downloadSubtitleZip()}
-                        >
-                          下载字幕
-                        </button>
-                      </div>
-                    </div>
-
-                    {String(subtitleWorkbench?.video_preview_url || resultData?.video_preview_url || "").trim() ? (
-                      <div className="mb-2 overflow-hidden rounded border border-neutral-800 bg-black/40">
-                        <video
-                          ref={subtitleVideoRef}
-                          controls
-                          preload="metadata"
-                          className="max-h-[300px] w-full bg-black"
-                          src={String(subtitleWorkbench?.video_preview_url || resultData?.video_preview_url || "")}
+                {hasSingleResult && resultData ? (
+                  <div className={cn("result-trio", hasSubtitlePanel && "result-trio--split")}>
+                    {hasSubtitlePanel ? (
+                      <div id="result-panel-subtitle" className="result-trio-aside result-anchor">
+                        <SubtitlePanel
+                          resultData={resultData}
+                          subtitleWorkbench={subtitleWorkbench}
+                          subtitleLines={subtitleLines}
+                          filteredSubtitleLines={filteredSubtitleLines}
+                          subtitleKeyword={subtitleKeyword}
+                          subtitleLoading={subtitleLoading}
+                          subtitleRefreshing={subtitleRefreshing}
+                          subtitleLoadError={subtitleLoadError}
+                          subtitleAssetAvailable={subtitleAssetAvailable}
+                          videoRef={subtitleVideoRef}
+                          onKeywordChange={setSubtitleKeyword}
+                          onRefresh={() => void refreshSubtitleWorkbench()}
+                          onDownload={() => void downloadSubtitleZip()}
+                          onSeek={seekVideoTo}
+                          formatDisplayTime={formatSubtitleDisplayTime}
                         />
                       </div>
                     ) : null}
 
-                    {subtitleRefreshing ? (
-                      <div className="subtitle-refresh-anim mb-2" role="status" aria-label="正在重新加载字幕">
-                        <span className="subtitle-refresh-anim__dot" />
-                        <span className="subtitle-refresh-anim__dot" />
-                        <span className="subtitle-refresh-anim__dot" />
-                        <span className="subtitle-refresh-anim__track" />
-                      </div>
-                    ) : null}
-
-                    {subtitleLoading ? (
-                      <p className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-300">
-                        正在加载字幕...
-                      </p>
-                    ) : subtitleLines.length > 0 ? (
-                      <>
-                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                          <input
-                            type="text"
-                            className="subtitle-search-input w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500 sm:max-w-xs"
-                            placeholder="搜索字幕内容或时间点"
-                            value={subtitleKeyword}
-                            onChange={(e) => setSubtitleKeyword(e.target.value)}
+                    <div className="result-trio-main space-y-4">
+                      {showStepsPanel ? (
+                        <div id="result-panel-steps" className="result-anchor">
+                          <StepsPanel
+                            resultData={resultData}
+                            steps={singleResultSteps}
+                            isEditMode={isEditMode}
+                            editedSteps={editedSteps}
+                            savingSteps={savingSteps}
+                            dragIndex={dragIndex}
+                            dragOverIndex={dragOverIndex}
+                            setEditedSteps={setEditedSteps}
+                            setIsEditMode={setIsEditMode}
+                            setDragIndex={setDragIndex}
+                            setDragOverIndex={setDragOverIndex}
+                            onShowError={showError}
+                            onSave={() => void saveEditedSteps()}
+                            onSeek={hasSubtitlePanel ? seekVideoTo : undefined}
                           />
-                          <p className="text-xs text-neutral-400">
-                            共 {subtitleLines.length} 行，匹配 {filteredSubtitleLines.length} 行
-                          </p>
                         </div>
-                        <div className="history-scroll max-h-[340px] space-y-1 overflow-auto pr-1">
-                          {filteredSubtitleLines.slice(0, 1200).map((line, idx) => (
-                            <button
-                              type="button"
-                              key={`sub-line-${line.index || idx}-${line.start_time || ""}`}
-                              className="w-full rounded border border-neutral-800 bg-neutral-950/60 px-2 py-1.5 text-left text-xs transition-colors hover:border-teal-400/60 hover:bg-teal-500/10"
-                              onClick={() => seekVideoTo(Number(line.start_seconds || 0))}
-                            >
-                              <p className="font-semibold text-teal-200/95">
-                                {formatSubtitleDisplayTime(line.start_time)} - {formatSubtitleDisplayTime(line.end_time)}
-                              </p>
-                              <p className="mt-0.5 whitespace-pre-wrap text-neutral-200">{String(line.text || "")}</p>
-                            </button>
-                          ))}
+                      ) : null}
+
+                      {hasDocumentPanel ? (
+                        <div id="result-panel-document" className="result-anchor">
+                          <DocumentPanel
+                            html={renderedMarkdown}
+                            summaryOnly={summaryOnly}
+                            onDownloadZip={() => void downloadSingleZip()}
+                            onCopyMarkdown={copyMarkdownSource}
+                            onCopyText={copyPlainText}
+                          />
                         </div>
-                      </>
-                    ) : subtitleAssetAvailable ? (
-                      <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-                        <p>
-                          已检测到字幕文件，但当前未加载到字幕行。你可以点击“重新加载字幕”，或直接下载字幕压缩包。
-                        </p>
-                        {String(subtitleWorkbench?.subtitle_file || resultData?.subtitle_file_name || "").trim() ? (
-                          <p className="mt-1 text-xs text-amber-200/90">
-                            字幕文件：{String(subtitleWorkbench?.subtitle_file || resultData?.subtitle_file_name || "")}
-                            {Number(resultData?.subtitle_line_count || 0) > 0
-                              ? `（约 ${Number(resultData?.subtitle_line_count || 0)} 行）`
-                              : ""}
-                          </p>
-                        ) : null}
-                        {subtitleLoadError ? (
-                          <p className="mt-1 text-xs text-amber-200/90">加载原因：{subtitleLoadError}</p>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <p className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-300">
-                        当前结果未检测到可用字幕。你可以切换字幕模式重新分析，或检查音频质量后重试。
-                      </p>
-                    )}
-                  </section>
+                      ) : null}
+                    </div>
+                  </div>
                 ) : null}
               </div>
             ) : null}
           </section>
         </div>
       </main>
+
+      {isResultView ? (
+        <button
+          type="button"
+          aria-label="返回结果顶部"
+          title="返回顶部"
+          className={cn("back-to-top-btn", showBackToTop && "back-to-top-btn--visible")}
+          onClick={() => {
+            if (resultsRef.current) {
+              resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
+            } else if (typeof window !== "undefined") {
+              window.scrollTo({ top: 0, behavior: uiScrollBehavior });
+            }
+          }}
+        >
+          <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+            <path d="M12 19V6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            <path d="M6 11l6-6 6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <span>顶部</span>
+        </button>
+      ) : null}
 
       {typeof document !== "undefined"
         ? createPortal(
