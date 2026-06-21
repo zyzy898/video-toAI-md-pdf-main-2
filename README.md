@@ -11,6 +11,7 @@
 | 📤 上传 | 单文件 / 批量 / 分片续传 / URL 导入 |
 | 🛡️ 风控 | 上传前 + 分析前双重校验（SHA-256 黑名单、视觉检测、关键词兜底） |
 | 🧠 分析 | Whisper 字幕 + 视频理解双模式，标准步骤 → 候选步骤 → 时间线摘要三级降级 |
+| 🎯 字幕精度 | 音频降噪/响度归一化（Plan B）、热词偏置 + 自学习词表（Plan A）、LLM 同音字上下文纠错 |
 | 📄 输出 | Markdown、PDF、步骤截图、`steps.json`、字幕（SRT/VTT/TXT） |
 | 🪄 增强 | 低置信度步骤截图视觉增强、前端编辑步骤后重新生成文档 |
 | 📦 管理 | 历史记录（client-id 隔离）、批量 ZIP 下载、24h 上传 / 72h 历史自动清理 |
@@ -30,7 +31,7 @@
 pip install -r requirements.txt
 ```
 
-`faster-whisper` 已包含在依赖中，无需额外安装。
+`faster-whisper` 与中文分词库 `jieba`（用于字幕纠错词表提炼）已包含在依赖中，无需额外安装。
 
 ### 2. 配置 `.env`
 
@@ -80,6 +81,10 @@ npm run dev
 ├─ asr/                                # ASR 抽象层
 │  ├─ base.py / factory.py             #   TranscriberBackend 抽象 + 构建工厂
 │  ├─ faster_whisper_backend.py        #   faster-whisper (CTranslate2) 实现
+│  ├─ audio_preprocess.py              #   Plan B：ffmpeg 降噪 + 响度归一化
+│  ├─ subtitle_correct.py              #   LLM 同音字纠错（纯函数：构造提示/解析/护栏）
+│  ├─ correction_log.py                #   纠错复查日志 + 自学习热词词表（Plan A 反馈环）
+│  ├─ zh_simplify.py                   #   繁→简中文归一化
 │  └─ srt_writer.py                    #   SRT 序列化
 ├─ Scrapling_download/                 # B站/抖音/小红书平台链接下载器
 ├─ web-react/                          # React 19 + TypeScript 前端工作台
@@ -95,7 +100,7 @@ npm run dev
 ## 🔄 处理流程
 
 ```
-上传/导入 → 上传前风控 → 分析前风控 → 预处理(长视频) → Whisper/视频理解 → 文档生成 → 结果保存
+上传/导入 → 上传前风控 → 分析前风控 → 预处理(长视频) → Whisper/视频理解 → 字幕纠错 → 文档生成 → 结果保存
 ```
 
 ### 1. 上传
@@ -113,6 +118,14 @@ npm run dev
 - **字幕模式**（默认）：Whisper 生成字幕 → 基于时间戳字幕输出步骤 JSON（成本低，适合录屏）
 - **视频模式**（需 Ark）：直传视频给模型分析（可利用画面信息，长视频自动限制或降级）
 - 标准步骤失败后自动降级：候选步骤 → 时间线摘要
+
+#### 4.1 字幕精度增强（字幕模式）
+
+- **音频预处理（Plan B）**：ASR 前用 ffmpeg 做高通滤波 + FFT 降噪 + EBU R128 响度归一化（`WHISPER_PREPROCESS_AUDIO`，默认关闭）；失败时回退原始音轨，绝不阻断转写
+- **解码质量调优**：beam search、`best_of`、温度回退梯队、关闭跨段条件化以抑制长静音段幻觉，默认值即提升准确率
+- **热词偏置（Plan A）**：`WHISPER_HOTWORDS` / `WHISPER_INITIAL_PROMPT` 在解码阶段就把识别偏向正确的领域术语
+- **LLM 同音字纠错**：转写后把字幕分批送模型，仅修正同音/近音错别字（如「铁子」→「帖子」），长度比例护栏拒绝任何疑似改写（`SUBTITLE_LLM_CORRECT`，默认开启）
+- **自学习反馈环**：每次纠错都用 jieba 切词提炼 `(错→对)` 词对，写入 `outputs/subtitle_corrections.jsonl` 复查日志，并把正确术语沉淀进 `outputs/hotwords_glossary.txt`；该词表在下一个视频转写时即被重新读取为热词，无需重启进程
 
 ### 5. 文档输出
 生成 `images/step_XX.jpg`、`operation_guide.md`、`operation_guide.pdf`、`steps.json`，有字幕时附加 SRT/VTT/TXT。
@@ -150,7 +163,7 @@ npm run dev
 
 ## 🎙️ ASR 字幕识别
 
-统一走 `faster-whisper`（CTranslate2，CPU/显存友好），通过 `asr/` 抽象层调用。
+统一走 `faster-whisper`（CTranslate2，CPU/显存友好），通过 `asr/` 抽象层调用。输出经繁→简归一化。
 
 | 环境变量 | 默认值 | 说明 |
 | --- | --- | --- |
@@ -158,10 +171,35 @@ npm run dev
 | `WHISPER_THREADS` | CPU 核数（1-8） | 推理线程数 |
 | `WHISPER_DEVICE` | `auto` | `cpu` / `cuda` / `auto` |
 | `WHISPER_COMPUTE_TYPE` | `int8` | 精度：`int8` / `int8_float16` / `float16` / `float32` |
-| `WHISPER_BEAM_SIZE` | `1` | beam search 宽度（1-10） |
+| `WHISPER_BEAM_SIZE` | `5` | beam search 宽度（1-10） |
+| `WHISPER_BEST_OF` | `5` | 候选采样数（1-10） |
 | `WHISPER_VAD_FILTER` | `1` | 是否启用 VAD 过滤静音段 |
+| `WHISPER_CONDITION_ON_PREVIOUS_TEXT` | `0` | 跨段条件化；关闭可抑制长静音段循环幻觉 |
+| `WHISPER_TEMPERATURES` | `0.0,0.2,0.4` | 温度回退梯队（低置信度解码自动重试） |
+| `WHISPER_COMPRESSION_RATIO_THRESHOLD` | `2.4` | 压缩比阈值（1.0-10.0） |
+| `WHISPER_NO_SPEECH_THRESHOLD` | `0.6` | 无语音判定阈值（0.0-1.0） |
+| `WHISPER_INITIAL_PROMPT` | - | 解码上下文种子提示（Plan A） |
+| `WHISPER_HOTWORDS` | - | 静态领域热词（Plan A，与自学习词表合并） |
+| `WHISPER_HOTWORDS_FILE` | `outputs/hotwords_glossary.txt` | 自学习热词词表路径 |
+| `WHISPER_PREPROCESS_AUDIO` | `0` | Plan B：ASR 前 ffmpeg 降噪 + 响度归一化 |
 
-字幕缓存到 `outputs/.subtitle_cache/`，缓存键含模型大小、精度、beam size、VAD 等参数，调参后不会错误复用。
+字幕缓存到 `outputs/.subtitle_cache/`，缓存键含模型大小、精度、beam size、best_of、跨段条件化、压缩比/无语音阈值、initial_prompt/热词/音频预处理开关、VAD 等参数，调参后不会错误复用。
+
+### 字幕精度三层方案
+
+| 方案 | 阶段 | 机制 | 默认 |
+| --- | --- | --- | --- |
+| **Plan B** | 转写前 | ffmpeg `highpass`+`afftdn`+`loudnorm` 清理音频，输出 16kHz 单声道 | 关 |
+| **Plan A** | 解码时 | `hotwords` + `initial_prompt` 把识别偏向正确术语 | 静态热词需手动配置 |
+| **LLM 纠错** | 转写后 | 上下文同音字纠错（长度比例护栏防改写） | 开 |
+
+**自学习反馈环**：LLM 纠错产生的每处改动会经 jieba 切词提炼为 `(错→对)` 词对——
+
+1. **记录**：完整 before/after 行 + 双侧分词 + 词对写入 `outputs/subtitle_corrections.jsonl`，供人工复查
+2. **沉淀**：正确术语累加进 `outputs/hotwords_glossary.txt`（去重有序的纯文本词表）
+3. **回灌**：`asr.factory` 在每次 `transcribe()` 时重新读取该词表作为 Plan A 热词，本次进程内累积的纠错对下一个视频立即生效，无需重启
+
+整条链路 best-effort：jieba 缺失时退化为字符级切分，任何写入失败都不会中断转写。
 
 ---
 
@@ -275,7 +313,12 @@ outputs/<video_stem>_<timestamp>/
    └─ ...
 ```
 
-运行时临时目录：`.analysis_proxy/`（预处理副本）、`.risk_frames/`（风控抽帧）、`.risk_subtitles/`（文本风控字幕）。
+运行时临时目录：`.analysis_proxy/`（预处理副本）、`.risk_frames/`（风控抽帧）、`.risk_subtitles/`（文本风控字幕）、`.subtitle_cache/`（字幕缓存）。
+
+字幕精度反馈环产物（位于 `outputs/` 根目录，跨视频共享）：
+
+- `subtitle_corrections.jsonl` —— LLM 同音字纠错复查日志（每行一条改动）
+- `hotwords_glossary.txt` —— 自学习热词词表，下次转写自动作为 Plan A 热词回灌
 
 ---
 
@@ -317,6 +360,23 @@ outputs/<video_stem>_<timestamp>/
 | `MAX_VISION` | 视觉增强次数上限 | `10` |
 | `WEB_SEARCH` | 联网搜索（仅 Ark） | `0` |
 
+### 字幕精度
+
+| 变量 | 说明 | 默认 |
+| --- | --- | --- |
+| `WHISPER_PREPROCESS_AUDIO` | Plan B：ASR 前 ffmpeg 降噪 + 响度归一化 | `0` |
+| `WHISPER_BEST_OF` | 候选采样数（1-10） | `5` |
+| `WHISPER_CONDITION_ON_PREVIOUS_TEXT` | 跨段条件化（关闭抑制幻觉） | `0` |
+| `WHISPER_TEMPERATURES` | 温度回退梯队 | `0.0,0.2,0.4` |
+| `WHISPER_COMPRESSION_RATIO_THRESHOLD` | 压缩比阈值（1.0-10.0） | `2.4` |
+| `WHISPER_NO_SPEECH_THRESHOLD` | 无语音判定阈值（0.0-1.0） | `0.6` |
+| `WHISPER_INITIAL_PROMPT` | Plan A：解码上下文种子提示 | - |
+| `WHISPER_HOTWORDS` | Plan A：静态领域热词 | - |
+| `WHISPER_HOTWORDS_FILE` | 自学习热词词表路径 | `outputs/hotwords_glossary.txt` |
+| `SUBTITLE_LLM_CORRECT` | LLM 同音字纠错开关 | `1` |
+| `SUBTITLE_CORRECT_GLOSSARY` | 纠错时提供给模型的正确术语提示 | - |
+| `SUBTITLE_CORRECTION_LOG` | 纠错复查日志路径 | `outputs/subtitle_corrections.jsonl` |
+
 ### 性能
 
 | 变量 | 说明 | 默认 |
@@ -324,7 +384,7 @@ outputs/<video_stem>_<timestamp>/
 | `WHISPER_THREADS` | Whisper 推理线程数 | CPU 核数（≤8） |
 | `WHISPER_DEVICE` | `cpu` / `cuda` / `auto` | `auto` |
 | `WHISPER_COMPUTE_TYPE` | `int8` / `int8_float16` / `float16` / `float32` | `int8` |
-| `WHISPER_BEAM_SIZE` | beam search 宽度（1-10） | `1` |
+| `WHISPER_BEAM_SIZE` | beam search 宽度（1-10） | `5` |
 | `WHISPER_VAD_FILTER` | 语音活动检测 | `1` |
 | `SCREENSHOT_MAX_WORKERS` | 截图并发数 | `2` |
 | `BATCH_ANALYZE_MAX_WORKERS` | 批量分析并发数（1-16） | `2` |
@@ -385,6 +445,7 @@ outputs/<video_stem>_<timestamp>/
 
 - 先在 `.env` 配好模型参数，再调整前端 UI
 - `BATCH_ANALYZE_MAX_WORKERS` 和 `WHISPER_THREADS` 是核心性能旋钮
+- 字幕识别不准时优先：升级 `WHISPER_MODE` → 开启 `WHISPER_PREPROCESS_AUDIO` → 配置 `WHISPER_HOTWORDS` 领域术语；纠错词表会随使用自动增长
 - 超长视频优先裁剪，而非强行提高并发
 - URL 导入遇风控页时优先补 cookies 或代理
 - 可选依赖：`pip install playwright && playwright install chromium` 可增强动态页面抓取

@@ -13,6 +13,7 @@ from .base import (
     TranscriberInitError,
     TranscriberNotAvailable,
 )
+from .audio_preprocess import cleanup_temp_audio, preprocess_audio
 from .srt_writer import write_srt_file
 from .factory import build_transcriber
 
@@ -24,4 +25,6 @@ __all__ = [
     "TranscriberNotAvailable",
     "write_srt_file",
     "build_transcriber",
+    "preprocess_audio",
+    "cleanup_temp_audio",
 ]

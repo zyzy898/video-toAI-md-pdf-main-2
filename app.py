@@ -1801,6 +1801,26 @@ def _run_async(coro):
         loop.close()
 
 
+def _maybe_correct_subtitles(agent, srt_path, report=None) -> int:
+    """Optionally run the LLM homophone-correction pass on a generated SRT.
+
+    Gated by ``SUBTITLE_LLM_CORRECT`` (default off) so it never adds latency or
+    token cost unless explicitly enabled. Never raises: a failed correction
+    leaves the original subtitles untouched.
+    """
+    raw = str(os.getenv("SUBTITLE_LLM_CORRECT", "1")).strip().lower()
+    if raw not in {"1", "true", "yes", "on"}:
+        return 0
+    try:
+        if report:
+            report("subtitle", "正在用 AI 校对字幕同音字...")
+        return _run_async(agent.correct_subtitles_with_llm(srt_path))
+    except Exception as exc:  # noqa: BLE001 - correction is best-effort
+        logger.warning("字幕 LLM 同音字纠错失败，保留原字幕: %s", exc)
+        return 0
+
+
+
 def _build_unique_upload_path(filename: str) -> Path:
     safe_name = secure_filename(filename)
     if not safe_name:
@@ -3492,6 +3512,9 @@ class VideoProcessingService:
                 logger.warning("Whisper 字幕生成失败，切换候选内容生成: %s", exc)
                 srt_path = None
 
+            if srt_path:
+                _maybe_correct_subtitles(agent, srt_path, report)
+
             if srt_path and not summary_only:
                 report("analysis", "\u6b63\u5728\u5206\u6790\u5b57\u5e55\u5185\u5bb9...")
                 try:
@@ -3511,6 +3534,9 @@ class VideoProcessingService:
             except Exception as exc:
                 logger.warning("Whisper 字幕生成失败，继续视频分析模式: %s", exc)
                 srt_path = None
+
+            if srt_path:
+                _maybe_correct_subtitles(agent, srt_path, report)
 
             if not summary_only:
                 report("analysis", "\u6b63\u5728\u5206\u6790\u89c6\u9891\u753b\u9762...")

@@ -31,6 +31,9 @@ faster-whisper>=1.0.0
 # Traditional -> Simplified Chinese normalisation for transcripts
 zhconv>=1.4.3
 
+# Chinese word segmentation for subtitle-correction term extraction (Plan A feedback loop)
+jieba>=0.42.1
+
 # =========================
 # Document generation
 # =========================

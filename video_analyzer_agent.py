@@ -119,6 +119,7 @@ class VideoAnalyzerAgent:
         self.client = self.llm_client
         self.whisper_model = whisper_model
         self.whisper_threads = self._resolve_whisper_threads()
+        self.ffmpeg_cmd = self._prepare_ffmpeg_command()
         if transcriber is not None:
             self.transcriber = transcriber
         else:
@@ -126,11 +127,11 @@ class VideoAnalyzerAgent:
                 model_size=str(self.whisper_model or "base"),
                 threads=int(self.whisper_threads),
                 language="zh",
+                ffmpeg_cmd=self.ffmpeg_cmd,
             )
         self.whisper_backend = getattr(self.transcriber, "name", "faster_whisper")
         self._parsed_srt_cache_key: tuple[str, int, int] | None = None
         self._parsed_srt_cache_value: List[Dict[str, Any]] | None = None
-        self.ffmpeg_cmd = self._prepare_ffmpeg_command()
         try:
             self.SUBTITLE_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -418,6 +419,121 @@ class VideoAnalyzerAgent:
         self._save_subtitle_to_cache(video_file, srt_path, cache_identity=cache_identity)
         print(f"字幕已生成: {srt_path}")
         return str(srt_path)
+
+    # ========== 字幕 LLM 同音字纠错（可选增强，上下文感知） ==========
+
+    async def correct_subtitles_with_llm(
+        self,
+        srt_path: str,
+        *,
+        glossary: Optional[str] = None,
+        batch_size: int = 40,
+    ) -> int:
+        """对已生成的 SRT 字幕做一次 LLM 上下文同音字纠错并就地回写。
+
+        把字幕按批送给模型，要求"仅修正同音/近音错别字、不得改写语义"，
+        并通过长度比例护栏拒绝任何疑似改写，保证不会破坏原意。
+
+        :param srt_path: SRT 文件路径
+        :param glossary: 可选的正确术语提示（逗号/空格分隔），辅助模型判断
+        :param batch_size: 每次调用模型处理的字幕行数
+        :return: 实际被修正的字幕行数
+        """
+        from asr.subtitle_correct import (
+            apply_corrections,
+            build_correction_messages,
+            chunk_lines,
+            parse_correction_response,
+        )
+
+        path = Path(srt_path)
+        if not path.exists() or path.stat().st_size <= 0:
+            return 0
+
+        subtitles = self.parse_srt(srt_path)
+        if not subtitles:
+            return 0
+
+        texts = [str(sub.get("text", "") or "") for sub in subtitles]
+        glossary = glossary or os.getenv("SUBTITLE_CORRECT_GLOSSARY") or None
+
+        async def _correct_batch(batch):
+            messages = build_correction_messages(batch, glossary=glossary)
+            try:
+                reply = await self._chat_completion_text(messages, temperature=0.0)
+            except Exception as exc:  # noqa: BLE001 - never block on a bad batch
+                logging.warning("[correct_subtitles] 批次纠错调用失败，保留原文: %s", exc)
+                return {}
+            return parse_correction_response(reply)
+
+        batches = chunk_lines(texts, batch_size=batch_size)
+        print(f"正在对 {len(texts)} 行字幕做 LLM 同音字纠错（{len(batches)} 批）...")
+
+        batch_results = await asyncio.gather(
+            *(_correct_batch(batch) for batch in batches),
+            return_exceptions=True,
+        )
+
+        merged: Dict[int, str] = {}
+        for item in batch_results:
+            if isinstance(item, Exception):
+                logging.warning("[correct_subtitles] 批次异常，已跳过: %s", item)
+                continue
+            if isinstance(item, dict):
+                merged.update(item)
+
+        corrected_texts, changed = apply_corrections(texts, merged)
+        if changed <= 0:
+            print("字幕纠错完成：未发现需要修正的同音字。")
+            return 0
+
+        # 收集发生变化的行（带时间戳），用于记录复查日志 + 沉淀热词。
+        changes = [
+            {
+                "time": str(subtitles[i].get("start_time", "") or ""),
+                "original": texts[i],
+                "corrected": corrected_texts[i],
+            }
+            for i in range(len(texts))
+            if texts[i] != corrected_texts[i]
+        ]
+        try:
+            from asr.correction_log import record_and_learn
+
+            _written, added = record_and_learn(changes, video=Path(srt_path).stem)
+            if added:
+                print(f"已沉淀 {len(added)} 个新热词到方案A词表: {', '.join(added)}")
+        except Exception as exc:  # noqa: BLE001 - logging must never block纠错
+            logging.warning("[correct_subtitles] 纠错记录/热词沉淀失败: %s", exc)
+
+        self._rewrite_srt_text(srt_path, subtitles, corrected_texts)
+        # 字幕内容变了，让解析缓存失效，下游重新读取纠错后的文本。
+        self._parsed_srt_cache_key = None
+        self._parsed_srt_cache_value = None
+        print(f"字幕纠错完成：共修正 {changed} 行。")
+        return changed
+
+    def _rewrite_srt_text(
+        self,
+        srt_path: str,
+        subtitles: List[Dict[str, Any]],
+        new_texts: List[str],
+    ) -> None:
+        """用纠错后的文本就地重写 SRT，保留原有时间轴与序号。"""
+        from asr.base import SubtitleSegment
+        from asr import write_srt_file
+
+        segments: List[SubtitleSegment] = []
+        for sub, text in zip(subtitles, new_texts):
+            try:
+                start = float(sub.get("start_seconds", 0.0) or 0.0)
+                end = self.time_to_seconds(sub.get("end_time", sub.get("start_time", "00:00:00,000")))
+            except Exception:
+                start = float(sub.get("start_seconds", 0.0) or 0.0)
+                end = start
+            segments.append(SubtitleSegment(start=start, end=float(end), text=str(text)))
+        write_srt_file(Path(srt_path), segments)
+
     # ========== 字幕分析：识别操作步骤（默认模式，纯文本，便宜） ==========
 
     async def analyze_subtitles(self, srt_path: str) -> List[Dict]:
