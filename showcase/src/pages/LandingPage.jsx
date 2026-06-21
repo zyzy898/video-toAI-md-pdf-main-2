@@ -8,9 +8,8 @@ import useTheme from '../hooks/useTheme.js';
 
 /**
  * 「开始使用」按钮跳转的线上工作台地址。
- * TODO: 部署完成后替换为真实的线上地址（例如 https://your-app.example.com）。
  */
-const APP_URL = '#';
+const APP_URL = 'https://video-to-ai-md-pdf-main-2-onlyweb.vercel.app/';
 
 const heroChips = [
   'AI 视频理解',
