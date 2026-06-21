@@ -43,14 +43,17 @@ export const techCards = [
     emoji: '🎞️',
     section: 'VIDEO',
     name: '视频处理引擎',
-    count: 7,
-    summary: 'faster-whisper（CTranslate2）常驻转写 + FFmpeg 抽帧 / 压缩 / 切片；长视频自适应预处理。',
+    count: 10,
+    summary: 'faster-whisper（CTranslate2）常驻转写 + FFmpeg 抽帧 / 压缩 / 切片；音频降噪、热词自学习、LLM 同音字纠错多层提升字幕精度。',
     items: [
       { label: 'faster-whisper', accent: true },
       { label: 'CTranslate2', accent: true },
       { label: 'ffmpeg-python' },
       { label: 'imageio-ffmpeg' },
       { label: '动态抽帧' },
+      { label: '音频降噪归一化' },
+      { label: 'jieba 热词自学习' },
+      { label: 'LLM 同音字纠错' },
       { label: '长视频压缩' },
       { label: '字幕缓存' }
     ]

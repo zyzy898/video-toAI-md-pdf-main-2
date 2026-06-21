@@ -14,7 +14,7 @@ import {
 } from '../components/icons/Icons.jsx';
 
 /**
- * 工程化优化与落地实践 · 12 张卡。
+ * 工程化优化与落地实践 · 13 张卡。
  * 列表条目使用 dangerouslySetInnerHTML 渲染，因为原文里有 <b> / <code> 标签。
  */
 export const engineeringCards = [
@@ -76,6 +76,21 @@ export const engineeringCards = [
       { label: '自动切片', accent: true },
       { label: '参数自动收紧' },
       { label: '早拒绝早友好', kind: 'warn' }
+    ]
+  },
+  {
+    Icon: SubtitleIcon,
+    title: '字幕精度三层增强 + 自学习',
+    items: [
+      '<b>方案 B · 转写前</b>：ffmpeg 高通滤波 + FFT 降噪 + EBU R128 响度归一化，把背景音乐 / 低频嗡声 / 忽大忽小的人声先清干净再喂给 ASR',
+      '<b>方案 A · 解码时</b>：领域热词 + 上下文种子提示在解码阶段就把识别偏向正确术语，从源头压制近音错字',
+      '<b>转写后 · LLM 纠错</b>：把字幕分批送模型，仅修正同音 / 近音错别字（如「铁子」→「帖子」），<b>长度比例护栏</b>拒绝任何疑似改写，模型再离谱也毁不掉原意',
+      '<b>自学习反馈环</b>：每处纠错用 jieba 切词提炼「错→对」词对，写入可复查日志并沉淀成热词表；<b>下一个视频转写时自动回灌</b>，越用越准，无需重启'
+    ],
+    tags: [
+      { label: '降噪归一化', accent: true },
+      { label: '同音字纠错', accent: true },
+      { label: '越用越准', kind: 'success' }
     ]
   },
   {

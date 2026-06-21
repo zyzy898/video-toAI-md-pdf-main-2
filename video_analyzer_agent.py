@@ -1024,11 +1024,28 @@ class VideoAnalyzerAgent:
 
     def _build_document_from_steps(self, steps: List[Dict], image_dir: str = "images") -> str:
         """Build a deterministic document from user-edited steps as a strict fallback."""
+        # 用最后一步的时间戳粗略估算预计耗时（不可解析时省略）。
+        estimated = ""
+        for step in reversed(steps):
+            raw_time = str(step.get("time", "") or "").strip()
+            if not raw_time:
+                continue
+            try:
+                total_seconds = self._parse_timestamp(raw_time)
+            except (TypeError, ValueError):
+                continue
+            minutes = max(1, round(total_seconds / 60))
+            estimated = f"约 {minutes} 分钟（按视频时长估算，实际操作可能更久）"
+            break
+
         lines: List[str] = [
             "# 操作步骤总结",
             "",
-            "## 概览",
-            f"- 共 {len(steps)} 个步骤。",
+            "## 概述",
+            f"- **适用人群**：需要按视频完成本套操作的读者",
+            "- **前置条件**：请提前准备好视频中涉及的账号、软件或权限",
+            f"- **预计耗时**：{estimated or '视实际操作熟练度而定'}",
+            f"- **简介**：本指南共 {len(steps)} 个步骤，按视频内容整理为可照做的操作流程。",
             "- 本文档按用户编辑后的步骤内容生成。",
             "",
         ]
@@ -1112,7 +1129,11 @@ class VideoAnalyzerAgent:
 3. 操作说明要具体、准确，让读者能照着操作
 4. 结合联网搜索到的信息，补充更丰富的上下文（如软件介绍、功能说明、注意事项等）
 5. 如果有字幕内容，结合字幕让描述更加准确和详细
-6. 在文档开头添加一个简短的概述（可结合搜索到的产品介绍）
+6. 在文档开头添加结构化的「## 概述」章节，必须包含以下要点（用无序列表呈现，可结合搜索到的产品介绍）：
+   - **适用人群**：这份指南适合哪些读者
+   - **前置条件**：开始操作前需要准备的账号/软件/权限等
+   - **预计耗时**：完成全部步骤大约需要多长时间
+   - **简介**：一句话说明本指南能帮读者完成什么
 7. 保持语言简洁专业
 8. 在文档末尾添加「## 参考资料」章节，列出所有搜索引用的信息来源（标题+链接）
 9. 直接返回 Markdown 内容，不要添加其他说明"""
@@ -1124,7 +1145,11 @@ class VideoAnalyzerAgent:
 2. 每个步骤包含：标题（## 步骤 X：标题）、截图、详细操作说明
 3. 操作说明要具体、准确，让读者能照着操作
 4. 如果有字幕内容，结合字幕让描述更加准确和详细
-5. 在文档开头添加一个简短的概述
+5. 在文档开头添加结构化的「## 概述」章节，必须包含以下要点（用无序列表呈现）：
+   - **适用人群**：这份指南适合哪些读者
+   - **前置条件**：开始操作前需要准备的账号/软件/权限等
+   - **预计耗时**：完成全部步骤大约需要多长时间
+   - **简介**：一句话说明本指南能帮读者完成什么
 6. 保持语言简洁专业
 7. 直接返回 Markdown 内容，不要添加其他说明"""
 
@@ -1218,7 +1243,38 @@ IMPORTANT:
 
     def generate_pdf(self, md_path: str, pdf_path: str = None) -> str:
         """
-        将 Markdown 文档转换为 PDF（图片嵌入）
+        将 Markdown 文档转换为 PDF。
+
+        优先使用 Playwright（Chromium 无头浏览器）渲染：完整保留表格、代码块、
+        嵌套列表、链接样式与中文排版。Chromium 不可用时自动回退到 FPDF 逐行渲染，
+        保证任何环境下都能出 PDF。
+
+        可用 PDF_RENDER_ENGINE=fpdf 强制走旧引擎；默认 auto（优先 Playwright）。
+        :param md_path: Markdown 文件路径
+        :param pdf_path: PDF 输出路径（默认同名 .pdf）
+        :return: PDF 文件路径
+        """
+        if not pdf_path:
+            pdf_path = str(Path(md_path).with_suffix(".pdf"))
+
+        engine = str(os.getenv("PDF_RENDER_ENGINE", "auto")).strip().lower()
+        if engine != "fpdf":
+            try:
+                from services import pdf_render
+
+                if pdf_render.render_markdown_to_pdf(md_path, pdf_path):
+                    print(f"PDF 文档已生成 (Chromium): {pdf_path}")
+                    return pdf_path
+                logging.info("Playwright 渲染不可用，回退 FPDF 引擎。")
+            except Exception as exc:
+                logging.warning("Playwright 渲染异常，回退 FPDF: %s", str(exc)[:200])
+
+        return self._generate_pdf_fpdf(md_path, pdf_path)
+
+    def _generate_pdf_fpdf(self, md_path: str, pdf_path: str = None) -> str:
+        """
+        将 Markdown 文档转换为 PDF（FPDF 逐行渲染，图片嵌入）。
+        作为 Playwright 渲染不可用时的兜底实现。
         :param md_path: Markdown 文件路径
         :param pdf_path: PDF 输出路径（默认同名 .pdf）
         :return: PDF 文件路径

@@ -41,3 +41,7 @@ markdown>=3.5.0
 fpdf2>=2.7.0
 # Image sizing for PDF embedding (constrain screenshot height)
 Pillow>=10.0.0
+# High-fidelity Markdown -> PDF via headless Chromium (tables/code/CJK layout).
+# Optional: when absent, generate_pdf falls back to the FPDF renderer.
+# First-time setup also needs the browser binary:  python -m playwright install chromium
+playwright>=1.40.0

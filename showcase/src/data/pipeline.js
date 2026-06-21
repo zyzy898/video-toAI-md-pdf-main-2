@@ -31,7 +31,7 @@ export const pipelineSteps = [
     num: 5,
     stage: '分析',
     title: '内容分析',
-    desc: 'Whisper 转写字幕 → 模型抽取步骤；或开启视频理解直分析。失败自动降级为候选步骤或时间线摘要。'
+    desc: 'Whisper 转写字幕（降噪归一 + 热词偏置 + LLM 同音字纠错）→ 模型抽取步骤；或开启视频理解直分析。失败自动降级为候选步骤或时间线摘要。'
   },
   {
     num: 6,
