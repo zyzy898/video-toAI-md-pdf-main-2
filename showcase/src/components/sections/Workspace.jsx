@@ -17,7 +17,7 @@ const kvProgress = [
   { label: '失败', value: '0 个', help: '超长视频会自动降级', valueColor: '#fda4af' },
   {
     label: '当前文件',
-    value: 'test2_14.mp4',
+    value: 'test2_5.mp4',
     help: '视觉增强 · 第 4/6 步',
     valueStyle: { fontSize: '0.8rem', color: 'rgba(165, 243, 252, 0.95)' }
   }
@@ -152,8 +152,8 @@ export default function Workspace() {
 
                 <div className="files" style={{ marginTop: '0.85rem' }}>
                   <FileRow
-                    name="test2_14.mp4"
-                    info="分析完成 · 6 步骤 · 6 张截图 · 字幕 100 行"
+                    name="test2_5.mp4"
+                    info="分析完成 · 6 步骤 · 6 张截图 · 字幕 111 行"
                     state="ok"
                   />
                   <FileRow

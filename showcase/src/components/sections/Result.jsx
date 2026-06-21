@@ -155,22 +155,19 @@ export default function Result() {
               </blockquote>
 
               <h2>📖 概述</h2>
-              <p>
-                本文汇总了 6 个高精准度、低竞争度的靠谱求职渠道，覆盖社招、校招、实习、央国企等多种求职场景，可帮助求职者过滤无效岗位，大幅提升求职成功率。
-              </p>
-
-              <h2>🎯 关键要点</h2>
               <ul>
                 <li>
-                  招聘软件上多是低待遇岗位，<strong>高薪稳定的工作往往在其他渠道</strong>提前找到人。
+                  <strong>适用人群</strong>：在校大学生、应届生、待业求职者、计划换工作的在职人员，有求职、找实习需求的所有人群
                 </li>
                 <li>
-                  官方招聘号投递的简历<strong>会被 HR 优先查看</strong>，比普通软件反馈更有保障。
+                  <strong>前置条件</strong>：可正常使用的微信、小红书、脉脉/领英账号，可正常访问网页的网络环境
                 </li>
                 <li>
-                  内推是<strong>效率最高、流程最快</strong>的方式，通过率远高于普通投递。
+                  <strong>预计耗时</strong>：15~30 分钟（不含岗位筛选、简历投递时间）
                 </li>
-                <li>小红书「实习继任」可挖到竞争度低的急招实习；央国企认准官方渠道。</li>
+                <li>
+                  <strong>简介</strong>：本指南分享 6 个小众靠谱的求职渠道，帮助用户规避低含金量岗位，降低求职竞争，提高简历投递成功率。
+                </li>
               </ul>
 
               <h2>📝 操作步骤</h2>
@@ -194,11 +191,11 @@ export default function Result() {
               <h2>🧾 文档信息</h2>
               <ul>
                 <li>
-                  生成时间：<code>2026-06-20 23:31</code>
+                  生成时间：<code>2026-06-21 19:14</code>
                 </li>
                 <li>分析模式：字幕模式 + 视觉增强</li>
                 <li>
-                  输出目录：<code>{'outputs/<video>_<timestamp>/'}</code>
+                  输出目录：<code>outputs/test2_5_20260621_191017/</code>
                 </li>
                 <li>包含资源：operation_guide.md · operation_guide.pdf · steps.json · 6 张截图 · 字幕 SRT / VTT / TXT</li>
               </ul>
@@ -297,7 +294,7 @@ export default function Result() {
           <div style={{ display: 'grid', gap: '0.3rem', fontSize: '0.78rem', color: 'var(--vi-text-3)' }}>
             <p style={{ margin: 0 }}>阶段：vision_enhance · 第 4/6 步</p>
             <p style={{ margin: 0, color: 'rgba(94, 234, 212, 0.9)' }}>
-              当前文件：test2_14.mp4
+              当前文件：test2_5.mp4
             </p>
           </div>
         </div>
