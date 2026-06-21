@@ -1702,6 +1702,18 @@ body {
   color: rgba(186, 230, 253, 0.82);
 }
 
+:root[data-theme="light"] .history-empty-art {
+  color: rgba(14, 116, 144, 0.92);
+}
+
+:root[data-theme="light"] .history-empty-title {
+  color: rgba(15, 23, 42, 0.92);
+}
+
+:root[data-theme="light"] .history-empty-desc {
+  color: rgba(51, 65, 85, 0.78);
+}
+
 .analyze-action-btn {
   position: relative;
   isolation: isolate;
