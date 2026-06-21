@@ -851,8 +851,9 @@ body {
   color: #075985 !important;
 }
 
-:root[data-theme="light"] .text-amber-200,
-:root[data-theme="light"] .text-amber-300 {
+:root[data-theme="light"] [class*="text-amber-100"],
+:root[data-theme="light"] [class*="text-amber-200"],
+:root[data-theme="light"] [class*="text-amber-300"] {
   color: #92400e !important;
 }
 
@@ -861,10 +862,37 @@ body {
   color: #065f46 !important;
 }
 
-:root[data-theme="light"] .text-rose-200,
-:root[data-theme="light"] .text-rose-300 {
-  color: #be123c !important;
+:root[data-theme="light"] [class*="text-rose-100"],
+:root[data-theme="light"] [class*="text-rose-200"],
+:root[data-theme="light"] [class*="text-rose-300"],
+:root[data-theme="light"] [class*="text-red-100"],
+:root[data-theme="light"] [class*="text-red-200"],
+:root[data-theme="light"] [class*="text-red-300"] {
+  color: #b91c1c !important;
 }
+
+/* ---------- Error / warning containers: lift faint tints for light mode ---------- */
+:root[data-theme="light"] [class*="bg-rose-500/"],
+:root[data-theme="light"] [class*="bg-red-500/"] {
+  background-color: rgba(254, 226, 226, 0.85) !important;
+}
+
+:root[data-theme="light"] [class*="border-rose-500/"],
+:root[data-theme="light"] [class*="border-rose-400/"],
+:root[data-theme="light"] [class*="border-red-500/"],
+:root[data-theme="light"] [class*="border-red-400/"] {
+  border-color: rgba(220, 38, 38, 0.55) !important;
+}
+
+:root[data-theme="light"] [class*="bg-amber-500/"] {
+  background-color: rgba(254, 243, 199, 0.9) !important;
+}
+
+:root[data-theme="light"] [class*="border-amber-500/"],
+:root[data-theme="light"] [class*="border-amber-400/"] {
+  border-color: rgba(217, 119, 6, 0.55) !important;
+}
+
 
 /* ---------- Navigation ---------- */
 :root[data-theme="light"] .vi-nav,
