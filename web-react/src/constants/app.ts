@@ -29,6 +29,7 @@ export const UPLOAD_RESUME_KEY_PREFIX = "video-upload-resume-v1";
 export const HISTORY_CLIENT_ID_KEY = "video-insights-client-id-v1";
 export const HISTORY_CLIENT_ID_HEADER = "X-Client-ID";
 export const USER_SETTINGS_STORAGE_KEY_PREFIX = "video-insights-user-settings-v1";
+export const THEME_STORAGE_KEY = "video-insights-theme-v1";
 export const ERROR_TOAST_DURATION_MS = 9000;
 export const ERROR_GUIDE_DURATION_MS = 5200;
 
@@ -61,6 +62,7 @@ export const STAGE_LABELS: Record<string, string> = {
   prepare: "准备中",
   upload: "上传中",
   moderation: "安全检测",
+  finalize: "保存视频",
   subtitle: "字幕识别",
   analysis: "内容分析",
   screenshots: "截图生成",
@@ -75,6 +77,7 @@ export const STAGE_PERCENT: Record<string, number> = {
   prepare: 8,
   upload: 35,
   moderation: 70,
+  finalize: 70,
   subtitle: 28,
   analysis: 55,
   screenshots: 75,
@@ -150,6 +153,12 @@ export const ANALYZE_BUTTON_GRADIENT_COLORS = [
   "rgb(45, 212, 191)",
   "rgb(56, 189, 248)",
   "rgb(96, 165, 250)",
+];
+
+export const ANALYZE_BUTTON_LIGHT_GRADIENT_COLORS = [
+  "rgba(8, 145, 178, 0.92)",
+  "rgba(37, 99, 235, 0.82)",
+  "rgba(109, 40, 217, 0.7)",
 ];
 
 export const NEW_STEP_DEFAULT_TITLE = "新步骤";

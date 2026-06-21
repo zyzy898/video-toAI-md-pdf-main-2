@@ -219,6 +219,15 @@ export function TrashIcon({ className = "h-3.5 w-3.5" }: IconProps) {
   );
 }
 
+export function CopyIcon({ className = "h-4 w-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <rect x="9" y="9" width="11" height="11" rx="2.2" stroke="currentColor" strokeWidth="1.8" />
+      <path d="M15 5.5V5A2 2 0 0 0 13 3H6A2 2 0 0 0 4 5v7a2 2 0 0 0 2 2h.5" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function HistoryEmptyIllustration({ className = "h-24 w-24" }: IconProps) {
   return (
     <svg viewBox="0 0 128 128" fill="none" className={className} aria-hidden="true">
@@ -241,6 +250,33 @@ export function HistoryEmptyIllustration({ className = "h-24 w-24" }: IconProps)
       <circle cx="64" cy="68" r="3.5" fill="#0f172a" fillOpacity="0.48" />
       <path d="m96 26 5 5m0-5-5 5" stroke="#67e8f9" strokeWidth="2.2" strokeLinecap="round" />
       <path d="m27 93 4 4m0-4-4 4" stroke="#7dd3fc" strokeWidth="2.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+export function SunIcon({ className = "h-4 w-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <circle cx="12" cy="12" r="4.2" stroke="currentColor" strokeWidth="1.7" />
+      <path
+        d="M12 2.5v2.4M12 19.1v2.4M4.6 4.6l1.7 1.7M17.7 17.7l1.7 1.7M2.5 12h2.4M19.1 12h2.4M4.6 19.4l1.7-1.7M17.7 6.3l1.7-1.7"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+export function MoonIcon({ className = "h-4 w-4" }: IconProps) {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path
+        d="M20 13.4A8 8 0 1 1 10.6 4a6.4 6.4 0 0 0 9.4 9.4z"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
     </svg>
   );
 }

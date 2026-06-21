@@ -1,15 +1,18 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
+import { motion } from "motion/react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { BackgroundBeams } from "@/components/ui/background-beams";
 import { CanvasText } from "@/components/ui/canvas-text";
+import { LayoutTextFlip } from "@/components/ui/layout-text-flip";
 import { NoiseBackground } from "@/components/ui/noise-background";
 import { cn } from "@/lib/utils";
 
 import {
   ALIYUN_APIKEY_DOC_URL,
   ANALYZE_BUTTON_GRADIENT_COLORS,
+  ANALYZE_BUTTON_LIGHT_GRADIENT_COLORS,
   CONTENT_POLICY_BLOCK_MESSAGE,
   DEFAULT_PROGRESS_BOARD,
   DEFAULT_UPLOAD_CHUNK_SIZE,
@@ -41,6 +44,7 @@ import {
   STAGE_PERCENT,
   UPLOAD_RESUME_KEY_PREFIX,
   USER_SETTINGS_STORAGE_KEY_PREFIX,
+  THEME_STORAGE_KEY,
   VALID_VIDEO_EXTENSIONS,
   WEB_SEARCH_ACTIVATION_URL,
   WEB_SEARCH_ERROR_HINTS,
@@ -114,6 +118,7 @@ import {
   FolderPlusIcon,
   HistoryEmptyIllustration,
   HistoryIcon,
+  MoonIcon,
   PlayIcon,
   RefreshIcon,
   SettingsIcon,
@@ -121,11 +126,16 @@ import {
   StatusFailedIcon,
   StatusSuccessIcon,
   StepsIcon,
+  SunIcon,
   TrashIcon,
   UploadIcon,
 } from "./components/icons";
 import { MarkdownPreview } from "./components/MarkdownPreview";
 import { ReadonlyStepsList } from "./components/ReadonlyStepsList";
+import { StepsPanel } from "./components/StepsPanel";
+import { DocumentPanel } from "./components/DocumentPanel";
+import { SubtitlePanel } from "./components/SubtitlePanel";
+import { BatchResultPanel } from "./components/BatchResultPanel";
 import { VirtualizedHistoryList } from "./components/VirtualizedHistoryList";
 
 void BrandStudioIcon;
@@ -243,40 +253,43 @@ export type {
 };
 
 export default function App() {
-  const [apiKey, setApiKey] = useState("");
-  const [showApiKey, setShowApiKey] = useState(false);
-  const [modelPreset, setModelPreset] = useState<ModelPreset>("ark");
-  const [modelName, setModelName] = useState("");
-  const [modelBaseUrl, setModelBaseUrl] = useState("https://ark.cn-beijing.volces.com/api/v3");
-  const [whisperModel, setWhisperModel] = useState("base");
-  const [maxVision, setMaxVision] = useState(10);
-  const [useVideo, setUseVideo] = useState(false);
+  const [theme, setTheme] = useState<"dark" | "light">(() => {
+    if (typeof window === "undefined") return "dark";
+    try {
+      const stored = window.localStorage.getItem(THEME_STORAGE_KEY);
+      if (stored === "light" || stored === "dark") return stored;
+    } catch {
+      // ignore storage read failure
+    }
+    return "dark";
+  });
+  const [maxVision] = useState(10);
   const [webSearch, setWebSearch] = useState(false);
-  const [fps, setFps] = useState(1);
-  const [summaryOnly, setSummaryOnly] = useState(false);
+  const [summaryOnly] = useState(false);
   const [sourceUrl, setSourceUrl] = useState("");
   const [importingUrl, setImportingUrl] = useState(false);
 
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
-  const [, setTestingModel] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
   const [deletingHistoryId, setDeletingHistoryId] = useState("");
   const [pendingDeleteHistory, setPendingDeleteHistory] = useState<HistoryItem | null>(null);
   const [showClearHistoryConfirm, setShowClearHistoryConfirm] = useState(false);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
-  const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
-  const [apiKeyGuideActive, setApiKeyGuideActive] = useState(false);
-  const [modelConfigGuideActive, setModelConfigGuideActive] = useState(false);
-  const [, setModelTestGuideActive] = useState(false);
 
   const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
   const [batchResultData, setBatchResultData] = useState<BatchResultData | null>(null);
+  const [savedBatchResult, setSavedBatchResult] = useState<BatchResultData | null>(null);
+  const [view, setView] = useState<"upload" | "result">("upload");
+  const [activeResultTab, setActiveResultTab] = useState<"steps" | "document" | "subtitle">("steps");
+  const [activeResultSection, setActiveResultSection] = useState<string>("");
+  const [showBackToTop, setShowBackToTop] = useState(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [subtitleWorkbench, setSubtitleWorkbench] = useState<SubtitleWorkbenchData | null>(null);
   const [subtitleLoading, setSubtitleLoading] = useState(false);
+  const [subtitleRefreshing, setSubtitleRefreshing] = useState(false);
   const [subtitleKeyword, setSubtitleKeyword] = useState("");
   const [subtitleLoadError, setSubtitleLoadError] = useState("");
 
@@ -299,26 +312,14 @@ export default function App() {
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const sourceUrlInputRef = useRef<HTMLInputElement | null>(null);
-  const apiKeyInputRef = useRef<HTMLInputElement | null>(null);
-  const modelBaseUrlInputRef = useRef<HTMLInputElement | null>(null);
-  const modelNameInputRef = useRef<HTMLInputElement | null>(null);
-  const modelTestButtonRef = useRef<HTMLButtonElement | null>(null);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const apiKeyGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const apiKeyGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const modelConfigGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const modelConfigGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const modelTestGuideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const modelTestGuideFocusTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const batchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const singleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const progressVisibleRef = useRef(false);
   const batchFilesRef = useRef<BatchFileItem[]>([]);
-  const verifiedModelConfigSignatureRef = useRef("");
-  const userSettingsStorageKeyRef = useRef("");
-  const [userSettingsLoaded, setUserSettingsLoaded] = useState(false);
+  const pendingFileSeqRef = useRef(0);
   const subtitleVideoRef = useRef<HTMLVideoElement | null>(null);
   const progressPollIntervalMs = mobilePerfMode
     ? PROGRESS_POLL_INTERVAL_MOBILE_MS
@@ -333,72 +334,38 @@ export default function App() {
     batchFilesRef.current = batchFiles;
   }, [batchFiles]);
 
-  useEffect(() => {
-    if (typeof window === "undefined") return;
+  const nextPendingFileId = useCallback((prefix: string) => {
+    pendingFileSeqRef.current += 1;
+    return `${prefix}-${Date.now()}-${pendingFileSeqRef.current}`;
+  }, []);
 
-    const clientId = getOrCreateHistoryClientId() || "anonymous";
-    const storageKey = `${USER_SETTINGS_STORAGE_KEY_PREFIX}:${clientId}`;
-    userSettingsStorageKeyRef.current = storageKey;
+  const replaceBatchFileByClientId = useCallback((clientId: string, nextItem: BatchFileItem) => {
+    setBatchFiles((prev) => prev.map((item) => (item.clientId === clientId ? nextItem : item)));
+  }, []);
+
+  const guessUrlVideoName = useCallback((url: string) => {
     try {
-      const raw = window.localStorage.getItem(storageKey);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as PersistedUserSettings;
-      if (!parsed || typeof parsed !== "object") return;
-
-      const presetText = String(parsed.modelPreset || "").trim().toLowerCase();
-      if (MODEL_PRESET_VALUES.includes(presetText as ModelPreset)) {
-        setModelPreset(presetText as ModelPreset);
-      }
-
-      const whisperText = String(parsed.whisperModel || "").trim().toLowerCase();
-      if (WHISPER_MODEL_VALUES.has(whisperText)) {
-        setWhisperModel(whisperText);
-      }
-
-      setApiKey(safeString(parsed.apiKey, 500, ""));
-      setModelName(safeString(parsed.modelName, 200, ""));
-      setModelBaseUrl(safeString(parsed.modelBaseUrl, 300, "https://ark.cn-beijing.volces.com/api/v3"));
-      setMaxVision(Math.round(clampNumber(parsed.maxVision, 10, MAX_VISION_MIN, MAX_VISION_MAX)));
-      setFps(Number(clampNumber(parsed.fps, 1, FPS_MIN, FPS_MAX).toFixed(1)));
-
-      if (typeof parsed.useVideo === "boolean") setUseVideo(parsed.useVideo);
-      if (typeof parsed.webSearch === "boolean") setWebSearch(parsed.webSearch);
-      if (typeof parsed.summaryOnly === "boolean") setSummaryOnly(parsed.summaryOnly);
+      const parsed = new URL(url);
+      const guessed = basename(decodeURIComponent(parsed.pathname || ""));
+      return guessed && /\.[A-Za-z0-9]{2,5}$/.test(guessed) ? guessed : "url_video.mp4";
     } catch {
-      // ignore malformed local data
-    } finally {
-      setUserSettingsLoaded(true);
+      return "url_video.mp4";
     }
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (!userSettingsLoaded) return;
-
-    const storageKey =
-      userSettingsStorageKeyRef.current ||
-      `${USER_SETTINGS_STORAGE_KEY_PREFIX}:${getOrCreateHistoryClientId() || "anonymous"}`;
-    userSettingsStorageKeyRef.current = storageKey;
-    const payload: PersistedUserSettings = {
-      version: 1,
-      apiKey: safeString(apiKey, 500, ""),
-      modelPreset,
-      modelName: safeString(modelName, 200, ""),
-      modelBaseUrl: safeString(modelBaseUrl, 300, ""),
-      whisperModel,
-      maxVision: Math.round(clampNumber(maxVision, 10, MAX_VISION_MIN, MAX_VISION_MAX)),
-      useVideo: Boolean(useVideo),
-      webSearch: Boolean(webSearch),
-      fps: Number(clampNumber(fps, 1, FPS_MIN, FPS_MAX).toFixed(1)),
-      summaryOnly: Boolean(summaryOnly),
-      updatedAt: new Date().toISOString(),
-    };
+    if (typeof document === "undefined") return;
+    document.documentElement.setAttribute("data-theme", theme);
     try {
-      window.localStorage.setItem(storageKey, JSON.stringify(payload));
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
     } catch {
       // ignore storage write failure
     }
-  }, [apiKey, fps, maxVision, modelBaseUrl, modelName, modelPreset, summaryOnly, useVideo, userSettingsLoaded, webSearch, whisperModel]);
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((prev) => (prev === "dark" ? "light" : "dark"));
+  }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -441,19 +408,13 @@ export default function App() {
     return () => {
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
       if (successTimerRef.current) clearTimeout(successTimerRef.current);
-      if (apiKeyGuideTimerRef.current) clearTimeout(apiKeyGuideTimerRef.current);
-      if (apiKeyGuideFocusTimerRef.current) clearTimeout(apiKeyGuideFocusTimerRef.current);
-      if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
-      if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
-      if (modelTestGuideTimerRef.current) clearTimeout(modelTestGuideTimerRef.current);
-      if (modelTestGuideFocusTimerRef.current) clearTimeout(modelTestGuideFocusTimerRef.current);
       if (batchTimerRef.current) clearInterval(batchTimerRef.current);
       if (singleTimerRef.current) clearInterval(singleTimerRef.current);
     };
   }, []);
 
   useEffect(() => {
-    if ((!historyDrawerOpen && !settingsDrawerOpen && !showClearHistoryConfirm && !pendingDeleteHistory) || typeof document === "undefined") return;
+    if ((!historyDrawerOpen && !showClearHistoryConfirm && !pendingDeleteHistory) || typeof document === "undefined") return;
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     const onKeyDown = (event: KeyboardEvent) => {
@@ -467,7 +428,6 @@ export default function App() {
           return;
         }
         setHistoryDrawerOpen(false);
-        setSettingsDrawerOpen(false);
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -480,7 +440,6 @@ export default function App() {
     deletingHistoryId,
     historyDrawerOpen,
     pendingDeleteHistory,
-    settingsDrawerOpen,
     showClearHistoryConfirm,
   ]);
 
@@ -573,146 +532,10 @@ export default function App() {
     successTimerRef.current = setTimeout(() => setShowSuccessToast(false), 3600);
   }, []);
 
-  const triggerModelConfigGuide = useCallback(() => {
-    setHistoryDrawerOpen(false);
-    setSettingsDrawerOpen(true);
-    setModelConfigGuideActive(true);
-
-    if (modelConfigGuideTimerRef.current) clearTimeout(modelConfigGuideTimerRef.current);
-    modelConfigGuideTimerRef.current = setTimeout(
-      () => setModelConfigGuideActive(false),
-      ERROR_GUIDE_DURATION_MS,
-    );
-
-    if (modelConfigGuideFocusTimerRef.current) clearTimeout(modelConfigGuideFocusTimerRef.current);
-    modelConfigGuideFocusTimerRef.current = setTimeout(() => {
-      const missingBaseUrl = modelPreset === "custom" && !String(modelBaseUrl || "").trim();
-      const missingModelName = !String(modelName || "").trim();
-      const target = missingBaseUrl
-        ? modelBaseUrlInputRef.current
-        : missingModelName
-          ? modelNameInputRef.current
-          : modelBaseUrlInputRef.current;
-      target?.focus();
-      target?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
-    }, 220);
-  }, [modelBaseUrl, modelName, modelPreset, uiScrollBehavior]);
-
-  const triggerModelTestGuide = useCallback(() => {
-    setHistoryDrawerOpen(false);
-    setSettingsDrawerOpen(true);
-    setModelTestGuideActive(true);
-
-    if (modelTestGuideTimerRef.current) clearTimeout(modelTestGuideTimerRef.current);
-    modelTestGuideTimerRef.current = setTimeout(
-      () => setModelTestGuideActive(false),
-      ERROR_GUIDE_DURATION_MS,
-    );
-
-    if (modelTestGuideFocusTimerRef.current) clearTimeout(modelTestGuideFocusTimerRef.current);
-    modelTestGuideFocusTimerRef.current = setTimeout(() => {
-      modelTestButtonRef.current?.focus();
-      modelTestButtonRef.current?.scrollIntoView({ behavior: uiScrollBehavior, block: "center" });
-    }, 260);
-  }, [uiScrollBehavior]);
-
-  const validateModelConfig = useCallback(() => {
-    const hasBaseUrl = Boolean(String(modelBaseUrl || "").trim());
-    const hasModelName = Boolean(String(modelName || "").trim());
-    const needBaseUrl = modelPreset === "custom";
-    if (hasModelName && (!needBaseUrl || hasBaseUrl)) return true;
-    if (needBaseUrl && !hasBaseUrl && !hasModelName) {
-      showError("请填写模型接口 Base URL 和模型名称");
-    } else if (needBaseUrl && !hasBaseUrl) {
-      showError("请填写模型接口 Base URL");
-    } else {
-      showError("请填写模型名称");
-    }
-    triggerModelConfigGuide();
-    return false;
-  }, [modelBaseUrl, modelName, modelPreset, showError, triggerModelConfigGuide]);
-
-  const applyModelPreset = useCallback((preset: ModelPreset) => {
-    setModelPreset(preset);
-    setModelConfigGuideActive(false);
-    if (preset === "custom") {
-      setModelBaseUrl("");
-      setModelName("");
-      return;
-    }
-    const selected = MODEL_PRESETS[preset];
-    setModelBaseUrl(selected.baseUrl);
-    setModelName("");
-  }, []);
-
-  const testModelConnection = useCallback(async () => {
-    if (!apiKey) {
-      showError("请输入 API Key");
-      return;
-    }
-    if (!validateModelConfig()) return;
-
-    setTestingModel(true);
-    try {
-      const data = await fetchJson<{ message?: string; reply?: string }>("/test_model", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          api_key: apiKey,
-          model_name: modelName,
-          model_base_url: modelBaseUrl,
-        }),
-      });
-
-      const responseText = String(data.reply || "").replace(/\s+/g, " ").trim();
-      const briefReply = responseText ? ` · 返回：${responseText.slice(0, 48)}` : "";
-      verifiedModelConfigSignatureRef.current = buildModelConfigSignature(
-        apiKey,
-        modelPreset,
-        modelName,
-        modelBaseUrl,
-      );
-      showSuccess(`${String(data.message || "模型连接测试成功")}${briefReply}`);
-    } catch (error) {
-      showError(String((error as Error).message || error));
-    } finally {
-      setTestingModel(false);
-    }
-  }, [apiKey, fetchJson, modelBaseUrl, modelName, modelPreset, showError, showSuccess, validateModelConfig]);
-
-  const pickUploadPrecheckError = useCallback((message: string) => {
-    const raw = String(message || "").trim();
-    const normalized = raw.replace(/^模型连接测试失败[:：]\s*/u, "").trim();
-    const errorCode = extractErrorCode(normalized);
-    if (errorCode === "risk_model_config_invalid") {
-      return "模型配置无效：请检查 Base URL、模型名称是否匹配，并确认模型支持图片理解";
-    }
-    if (errorCode === "risk_model_auth_failed") {
-      return "模型鉴权失败：请检查 API Key 是否有效且与当前平台匹配";
-    }
-    const parts = normalized.split("|").map((item) => item.trim()).filter(Boolean);
-    const preferredHints = [
-      "模型鉴权失败",
-      "模型连接失败",
-      "请求过于频繁",
-      "模型服务请求超时",
-      "模型服务调用失败",
-      "联网搜索功能未开通",
-    ];
-    for (const hint of preferredHints) {
-      const matched = parts.find((item) => item.includes(hint));
-      if (matched) return matched;
-    }
-    return parts[0] || normalized || "模型连通测试失败";
-  }, []);
-
   const verifyModelConnectionForUpload = useCallback(async () => {
-    // 模型连通校验已取消：统一由后端 .env 托管模型配置。
-    void pickUploadPrecheckError;
-    void triggerModelTestGuide;
-    void testModelConnection;
+    // 模型连通校验已取消：模型配置（API Key / 名称 / Base URL）统一由后端 .env 托管。
     return true;
-  }, [pickUploadPrecheckError, testModelConnection, triggerModelTestGuide]);
+  }, []);
 
   const setProgressTextIfChanged = useCallback((nextText: string) => {
     const normalized = String(nextText || "");
@@ -931,12 +754,10 @@ export default function App() {
         formData.append("upload_id", uploadId);
         formData.append("chunk_index", String(chunkIndex));
         formData.append("chunk", file.slice(start, end));
-        setProgressTextIfChanged(`正在上传 ${file.name}（${fileIndex}/${totalFiles}，分片 ${chunkIndex + 1}/${totalChunks}）`);
         await fetchJson("/upload_chunk", { method: "POST", body: formData });
       }
 
       onSafetyCheckStart?.(file, fileIndex, totalFiles);
-      setProgressTextIfChanged(`已上传完成，正在进行安全检测：${file.name}（${fileIndex}/${totalFiles}）`);
       const finalized = await fetchJson<{ filename: string; filepath: string }>("/upload_chunk_finalize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -945,7 +766,7 @@ export default function App() {
       window.localStorage.removeItem(resumeKey);
       return finalized;
     },
-    [fetchJson, setProgressTextIfChanged],
+    [fetchJson],
   );
 
   const uploadBatchFiles = useCallback(
@@ -959,39 +780,43 @@ export default function App() {
       const readyForUpload = await verifyModelConnectionForUpload();
       if (!readyForUpload) return;
 
-      showProgress("上传中", "正在上传视频...");
-      updateProgressBoard({ mode: "upload", stage: "prepare", total: files.length, percent: 0 });
+      const placeholders = files.map((file) => ({
+        filename: file.name,
+        filepath: "",
+        status: "processing" as FileStatus,
+        error: "等待上传...",
+        clientId: nextPendingFileId("upload"),
+      }));
+      setBatchFiles((prev) => [...prev, ...placeholders]);
       try {
-        const uploaded: BatchFileItem[] = [];
-        let uploadedSuccess = 0;
         let uploadedFailed = 0;
         for (let i = 0; i < files.length; i += 1) {
           const currentFile = files[i];
+          const placeholder = placeholders[i];
           try {
+            replaceBatchFileByClientId(placeholder.clientId || "", {
+              ...placeholder,
+              error: `正在上传（${i + 1}/${files.length}）...`,
+            });
             const item = await uploadSingleFileWithResume(
               currentFile,
               i + 1,
               files.length,
               (processingFile, currentIndex, total) => {
-                const moderationPercent = Math.min(
-                  99,
-                  Math.round(((Math.max(0, currentIndex - 1) + STAGE_PERCENT.moderation / 100) / total) * 100),
-                );
-                setProgressTextIfChanged(`已上传完成，正在进行安全检测：${processingFile.name}（${currentIndex}/${total}）`);
-                updateProgressBoard({
-                  mode: "upload",
-                  stage: "moderation",
-                  total,
-                  current: currentIndex,
-                  success: uploadedSuccess,
-                  failed: uploadedFailed,
-                  percent: moderationPercent,
-                  currentFile: processingFile.name,
+                replaceBatchFileByClientId(placeholder.clientId || "", {
+                  ...placeholder,
+                  filename: processingFile.name,
+                  error: `正在保存视频（${currentIndex}/${total}）...`,
                 });
               },
             );
-            uploaded.push({ filename: item.filename, filepath: item.filepath, status: "pending", error: "" });
-            uploadedSuccess += 1;
+            replaceBatchFileByClientId(placeholder.clientId || "", {
+              filename: item.filename,
+              filepath: item.filepath,
+              status: "pending",
+              error: "",
+              clientId: placeholder.clientId,
+            });
           } catch (error) {
             const apiError = error instanceof ApiRequestError ? error : null;
             let message = String((error as Error).message || error || "上传失败");
@@ -1002,40 +827,27 @@ export default function App() {
             }
             const segmentHint = formatSegmentPolicyHint(apiError?.payload?.segment_policy);
             if (segmentHint) message = [message, segmentHint].filter(Boolean).join(" | ");
-            uploaded.push({
+            replaceBatchFileByClientId(placeholder.clientId || "", {
               filename: currentFile.name,
               filepath: "",
               status: "failed",
               error: formatInlineErrorMessage(message),
+              clientId: placeholder.clientId,
             });
             uploadedFailed += 1;
           }
-          updateProgressBoard({
-            mode: "upload",
-            stage: i + 1 >= files.length ? "done" : "upload",
-            total: files.length,
-            current: i + 1,
-            success: uploadedSuccess,
-            failed: uploadedFailed,
-            percent: Math.round(((i + 1) / files.length) * 100),
-          });
         }
-        setBatchFiles((prev) => [...prev, ...uploaded]);
         if (uploadedFailed > 0) {
           showError(`已跳过 ${uploadedFailed} 个上传失败视频，可继续分析其余视频。`);
         }
       } catch (error) {
         showError(`上传失败: ${String((error as Error).message || error)}`);
-      } finally {
-        hideProgress();
       }
     },
     [
-      hideProgress,
-      setProgressTextIfChanged,
+      nextPendingFileId,
+      replaceBatchFileByClientId,
       showError,
-      showProgress,
-      updateProgressBoard,
       uploadSingleFileWithResume,
       verifyModelConnectionForUpload,
     ],
@@ -1043,12 +855,18 @@ export default function App() {
   const analyzeByUploadedFile = useCallback(async (file: BatchFileItem) => {
     setBatchFiles((prev) =>
       prev.map((item) =>
-        item.filepath ? { ...item, status: item.filepath === file.filepath ? "pending" : item.status, error: "" } : item,
+        item.filepath
+          ? {
+              ...item,
+              status: item.filepath === file.filepath ? ("processing" as FileStatus) : item.status,
+              error: item.filepath === file.filepath ? (summaryOnly ? "正在生成摘要版..." : "正在分析视频...") : "",
+            }
+          : item,
       ),
     );
     stopBatchPolling();
     setIsAnalyzing(true);
-    showProgress("单文件处理中", summaryOnly ? "正在生成摘要版，请稍候..." : "正在分析视频，请稍候...");
+    hideProgress();
     updateProgressBoard({ mode: "single", stage: "prepare", total: 1, percent: 5, currentFile: file.filename });
     startSinglePolling();
     let reveal = false;
@@ -1058,15 +876,14 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           filepath: file.filepath,
-          web_search: webSearch,
-          max_vision: maxVision,
-          summary_only: summaryOnly,
         }),
       });
       setResultData(data);
       setBatchResultData(null);
       setIsEditMode(false);
       setEditedSteps([]);
+      setActiveResultTab("steps");
+      setView("result");
       if (data?.fallback_used) {
         showSuccess(String(data.analysis_note || "未识别到标准步骤，已自动生成候选内容。"));
       }
@@ -1114,6 +931,8 @@ export default function App() {
         setBatchResultData(null);
         setIsEditMode(false);
         setEditedSteps([]);
+        setActiveResultTab("steps");
+        setView("result");
         setBatchFiles((prev) =>
           prev.map((item) =>
             item.filepath === file.filepath ? { ...item, status: "failed", error: "安全检测未通过" } : item,
@@ -1164,7 +983,6 @@ export default function App() {
     maxVision,
     showError,
     showSuccess,
-    showProgress,
     startSinglePolling,
     stopBatchPolling,
     stopSinglePolling,
@@ -1213,38 +1031,40 @@ export default function App() {
     const readyForUpload = await verifyModelConnectionForUpload();
     if (!readyForUpload) return;
 
+    const clientId = nextPendingFileId("url");
+    const placeholder: BatchFileItem = {
+      filename: guessUrlVideoName(urls[0]),
+      filepath: "",
+      status: "processing",
+      error: "正在导入链接视频...",
+      clientId,
+    };
+    setBatchFiles((prev) => [placeholder, ...prev]);
     setImportingUrl(true);
-    showProgress("链接导入中", "正在下载链接视频并执行安全检测...");
-    updateProgressBoard({ mode: "upload", stage: "prepare", total: 1, percent: 0, current: 0 });
 
     try {
       const uploadedItem = await uploadBySourceUrl(urls[0]);
-      setBatchFiles((prev) => [uploadedItem, ...prev]);
+      replaceBatchFileByClientId(clientId, { ...uploadedItem, clientId });
       setSourceUrl("");
-      updateProgressBoard({
-        mode: "upload",
-        stage: "done",
-        total: 1,
-        current: 1,
-        success: 1,
-        failed: 0,
-        percent: 100,
-        currentFile: uploadedItem.filename,
-      });
       showSuccess("链接导入成功，可直接开始分析。");
     } catch (error) {
-      showError(`链接导入失败: ${String((error as Error).message || error)}`);
+      const message = `链接导入失败: ${String((error as Error).message || error)}`;
+      replaceBatchFileByClientId(clientId, {
+        ...placeholder,
+        status: "failed",
+        error: formatInlineErrorMessage(message),
+      });
+      showError(message);
     } finally {
-      hideProgress();
       setImportingUrl(false);
     }
   }, [
-    hideProgress,
+    guessUrlVideoName,
+    nextPendingFileId,
+    replaceBatchFileByClientId,
     showError,
-    showProgress,
     showSuccess,
     sourceUrl,
-    updateProgressBoard,
     uploadBySourceUrl,
     verifyModelConnectionForUpload,
   ]);
@@ -1259,31 +1079,33 @@ export default function App() {
     const readyForUpload = await verifyModelConnectionForUpload();
     if (!readyForUpload) return;
 
+    const clientId = nextPendingFileId("url");
+    const placeholder: BatchFileItem = {
+      filename: guessUrlVideoName(urls[0]),
+      filepath: "",
+      status: "processing",
+      error: "正在导入链接视频...",
+      clientId,
+    };
+    setBatchFiles((prev) => [placeholder, ...prev]);
     setImportingUrl(true);
     stopBatchPolling();
     stopSinglePolling();
     setIsAnalyzing(true);
-    showProgress("链接处理中", "正在下载链接视频并执行安全检测...");
-    updateProgressBoard({ mode: "upload", stage: "prepare", total: 1, percent: 0, current: 0 });
 
     try {
       const uploadedItem = await uploadBySourceUrl(urls[0]);
-      setBatchFiles((prev) => [uploadedItem, ...prev]);
+      replaceBatchFileByClientId(clientId, { ...uploadedItem, clientId });
       setSourceUrl("");
-      updateProgressBoard({
-        mode: "upload",
-        stage: "done",
-        total: 1,
-        current: 1,
-        success: 1,
-        failed: 0,
-        percent: 100,
-        currentFile: uploadedItem.filename,
-      });
-      setProgressTextIfChanged("链接视频导入完成，正在启动分析...");
       await analyzeByUploadedFile(uploadedItem);
     } catch (error) {
-      showError(`链接分析失败: ${String((error as Error).message || error)}`);
+      const message = `链接分析失败: ${String((error as Error).message || error)}`;
+      replaceBatchFileByClientId(clientId, {
+        ...placeholder,
+        status: "failed",
+        error: formatInlineErrorMessage(message),
+      });
+      showError(message);
       hideProgress();
       setIsAnalyzing(false);
     } finally {
@@ -1291,14 +1113,14 @@ export default function App() {
     }
   }, [
     analyzeByUploadedFile,
+    guessUrlVideoName,
     hideProgress,
-    setProgressTextIfChanged,
+    nextPendingFileId,
+    replaceBatchFileByClientId,
     showError,
-    showProgress,
     sourceUrl,
     stopBatchPolling,
     stopSinglePolling,
-    updateProgressBoard,
     uploadBySourceUrl,
     verifyModelConnectionForUpload,
   ]);
@@ -1307,11 +1129,11 @@ export default function App() {
     const analyzableFiles = getAnalyzableBatchFiles();
     if (analyzableFiles.length <= 1) return;
     setBatchFiles((prev) =>
-      prev.map((item) => (item.filepath ? { ...item, status: "pending", error: "" } : item)),
+      prev.map((item) => (item.filepath ? { ...item, status: "processing", error: "正在等待批量分析..." } : item)),
     );
     stopSinglePolling();
     setIsAnalyzing(true);
-    showProgress("批量处理中", summaryOnly ? "正在逐个生成摘要版..." : "正在逐个分析视频...");
+    hideProgress();
     updateProgressBoard({ mode: "batch", stage: "prepare", total: analyzableFiles.length, percent: 0 });
     startBatchPolling();
     let reveal = false;
@@ -1321,15 +1143,13 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           filepaths: analyzableFiles.map((item) => item.filepath),
-          web_search: webSearch,
-          max_vision: maxVision,
-          summary_only: summaryOnly,
         }),
       });
       setBatchResultData(data);
       setResultData(null);
       setIsEditMode(false);
       setEditedSteps([]);
+      setView("result");
       let resultIndex = 0;
       const nextFiles: BatchFileItem[] = batchFilesRef.current.map((item) => {
         if (!item.filepath) return item;
@@ -1386,7 +1206,6 @@ export default function App() {
     maxVision,
     countBatchStatus,
     showError,
-    showProgress,
     startBatchPolling,
     stopBatchPolling,
     stopSinglePolling,
@@ -1398,6 +1217,7 @@ export default function App() {
   ]);
 
   const startAnalyze = useCallback(async () => {
+    setSavedBatchResult(null);
     const analyzableFiles = getAnalyzableBatchFiles();
     if (analyzableFiles.length === 1) return analyzeSingle();
     if (analyzableFiles.length > 1) return analyzeBatch();
@@ -1444,7 +1264,12 @@ export default function App() {
               : {},
           subtitle_workbench_url: String(record.subtitle_workbench_url || ""),
         });
+        setSavedBatchResult(null);
         setBatchResultData(null);
+        setIsEditMode(false);
+        setEditedSteps([]);
+        setActiveResultTab("steps");
+        setView("result");
         if (resultsRef.current) {
           resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
         }
@@ -1456,6 +1281,84 @@ export default function App() {
     },
     [fetchJson, hideProgress, showError, showProgress, uiScrollBehavior],
   );
+
+  const openBatchResultItem = useCallback(
+    async (item: BatchResultItem) => {
+      const outputDirName = basename(item.output_dir_name || item.output_dir);
+      if (!outputDirName) {
+        showError("该结果缺少输出目录，无法打开详情");
+        return;
+      }
+      showProgress("加载中", "正在读取分析结果...");
+      const base = `/output/${encodeURIComponent(outputDirName)}`;
+      try {
+        const [stepsRes, markdownRes] = await Promise.all([
+          fetch(`${base}/steps.json`, withHistoryClientHeader()).catch(() => null),
+          fetch(`${base}/operation_guide.md`, withHistoryClientHeader()).catch(() => null),
+        ]);
+        const steps =
+          stepsRes && stepsRes.ok ? ((await stepsRes.json().catch(() => [])) as StepItem[]) : [];
+        const markdown = markdownRes && markdownRes.ok ? await markdownRes.text().catch(() => "") : "";
+
+        setResultData({
+          steps: Array.isArray(steps) ? steps : [],
+          markdown: markdown || "",
+          output_dir: String(item.output_dir || outputDirName),
+          output_dir_name: outputDirName,
+          pdf_path: "",
+          has_steps: Array.isArray(steps) && steps.length > 0,
+          result_mode: String(item.result_mode || ""),
+          fallback_used: Boolean(item.fallback_used),
+          analysis_note: String(item.analysis_note || ""),
+          quality_score: Number(item.quality_score || 0),
+          degrade_reason: String(item.degrade_reason || ""),
+          content_title: String(item.content_title || item.filename || ""),
+          key_points: Array.isArray(item.key_points) ? item.key_points : [],
+          timeline_points: Array.isArray(item.timeline_points) ? item.timeline_points : [],
+          confidence_note: String(item.confidence_note || ""),
+          video_preview_url: String(item.video_preview_url || ""),
+          subtitle_available: Boolean(item.subtitle_available),
+          subtitle_file_name: String(item.subtitle_file_name || ""),
+          subtitle_line_count: Number(item.subtitle_line_count || 0),
+          subtitle_exports:
+            item.subtitle_exports && typeof item.subtitle_exports === "object"
+              ? (item.subtitle_exports as Record<string, string>)
+              : {},
+          subtitle_workbench_url: String(item.subtitle_workbench_url || ""),
+        });
+        setSavedBatchResult(batchResultData);
+        setBatchResultData(null);
+        setIsEditMode(false);
+        setEditedSteps([]);
+        setActiveResultTab("steps");
+        setView("result");
+        if (resultsRef.current) {
+          resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
+        } else if (typeof window !== "undefined") {
+          window.scrollTo({ top: 0, behavior: uiScrollBehavior });
+        }
+      } catch (error) {
+        showError(`打开结果失败: ${String((error as Error).message || error)}`);
+      } finally {
+        hideProgress();
+      }
+    },
+    [batchResultData, hideProgress, showError, showProgress, uiScrollBehavior, withHistoryClientHeader],
+  );
+
+  const returnToBatchResult = useCallback(() => {
+    if (!savedBatchResult) return;
+    setBatchResultData(savedBatchResult);
+    setSavedBatchResult(null);
+    setResultData(null);
+    setIsEditMode(false);
+    setEditedSteps([]);
+    if (resultsRef.current) {
+      resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
+    } else if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: uiScrollBehavior });
+    }
+  }, [savedBatchResult, uiScrollBehavior]);
 
   const openDeleteHistoryConfirm = useCallback(
     (record: HistoryItem) => {
@@ -1529,28 +1432,18 @@ export default function App() {
     setSavingSteps(true);
     showProgress("重新生成中", "根据编辑步骤生成新文档...");
 
-    const requestRegenerate = async (enableWebSearch: boolean) =>
+    const requestRegenerate = async () =>
       fetchJson<SingleResultData>("/regenerate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           steps: editedSteps,
           output_dir: resultData.output_dir,
-          web_search: enableWebSearch,
         }),
       });
 
     try {
-      let data: SingleResultData;
-      try {
-        data = await requestRegenerate(webSearch);
-      } catch (error) {
-        const message = String((error as Error).message || error);
-        const canFallback = webSearch && WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint));
-        if (!canFallback) throw error;
-        setWebSearch(false);
-        data = await requestRegenerate(false);
-      }
+      const data = await requestRegenerate();
 
       setResultData(data);
       setIsEditMode(false);
@@ -1561,7 +1454,7 @@ export default function App() {
       setSavingSteps(false);
       hideProgress();
     }
-  }, [editedSteps, fetchJson, hideProgress, resultData?.output_dir, showError, showProgress, webSearch]);
+  }, [editedSteps, fetchJson, hideProgress, resultData?.output_dir, showError, showProgress]);
 
   const triggerDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -1669,18 +1562,28 @@ export default function App() {
     setSubtitleKeyword("");
   }, [resultData?.output_dir]);
 
-  const downloadSubtitleFile = useCallback(
-    async (format: "srt" | "vtt" | "txt") => {
+  useEffect(() => {
+    const blocked = String(resultData?.result_mode || "").trim().toLowerCase() === "blocked_notice";
+    const single = Boolean(resultData);
+    if (activeResultTab === "document" && !(single && !blocked && Boolean(resultData?.markdown))) {
+      setActiveResultTab("steps");
+      return;
+    }
+    if (activeResultTab === "subtitle" && !(single && !blocked && Boolean(resultData?.output_dir))) {
+      setActiveResultTab("steps");
+    }
+  }, [activeResultTab, resultData]);
+
+  const downloadSubtitleZip = useCallback(
+    async () => {
       const outputDirName = basename(resultData?.output_dir);
       if (!outputDirName) {
         showError("没有可下载字幕的结果");
         return;
       }
       try {
-        const blob = await fetchBlob(
-          `/download_subtitle/${encodeURIComponent(outputDirName)}?format=${encodeURIComponent(format)}`,
-        );
-        triggerDownload(blob, `${outputDirName}_subtitle.${format}`);
+        const blob = await fetchBlob(`/download_subtitles_zip/${encodeURIComponent(outputDirName)}`);
+        triggerDownload(blob, `${outputDirName}_subtitles.zip`);
       } catch (error) {
         showError(`字幕下载失败: ${String((error as Error).message || error)}`);
       }
@@ -1688,12 +1591,41 @@ export default function App() {
     [fetchBlob, resultData?.output_dir, showError, triggerDownload],
   );
 
+  const refreshSubtitleWorkbench = useCallback(async () => {
+    const outputDirName = basename(resultData?.output_dir);
+    if (!outputDirName) {
+      showError("没有可重新加载字幕的结果");
+      return;
+    }
+    setSubtitleRefreshing(true);
+    setSubtitleLoadError("");
+    try {
+      const data = await fetchJson<SubtitleWorkbenchData>(
+        `/refresh_subtitle/${encodeURIComponent(outputDirName)}`,
+        { method: "POST" },
+      );
+      setSubtitleWorkbench(data);
+      setSubtitleLoadError("");
+    } catch (error) {
+      setSubtitleLoadError(String((error as Error).message || error || "字幕重新加载失败"));
+      showError(`字幕重新加载失败: ${String((error as Error).message || error)}`);
+    } finally {
+      setSubtitleRefreshing(false);
+    }
+  }, [fetchJson, resultData?.output_dir, showError]);
+
   const seekVideoTo = useCallback((seconds: number) => {
     const videoEl = subtitleVideoRef.current;
     if (!videoEl) return;
     const targetSeconds = Math.max(0, Number(seconds) || 0);
     videoEl.currentTime = targetSeconds;
     void videoEl.play().catch(() => undefined);
+  }, []);
+
+  const formatSubtitleDisplayTime = useCallback((value: unknown) => {
+    const text = String(value || "").trim();
+    const matched = text.match(/^(\d{1,2}:\d{2}:\d{2})/);
+    return matched?.[1] || text || "00:00:00";
   }, []);
 
   const subtitleLines = useMemo(() => (Array.isArray(subtitleWorkbench?.lines) ? subtitleWorkbench?.lines || [] : []), [subtitleWorkbench?.lines]);
@@ -1755,7 +1687,7 @@ export default function App() {
       : status === "failed"
         ? "失败"
         : status === "processing"
-          ? "处理中"
+          ? "正在准备文件"
           : "待处理";
   const handleOpenHistoryRecord = useCallback(
     (id: string) => {
@@ -1769,50 +1701,6 @@ export default function App() {
     },
     [openDeleteHistoryConfirm],
   );
-  const clampMaxVision = useCallback(
-    (value: number) => Math.max(MAX_VISION_MIN, Math.min(MAX_VISION_MAX, Math.round(Number(value) || 0))),
-    [],
-  );
-  const handleMaxVisionInput = useCallback(
-    (rawValue: string) => {
-      const parsed = Number(rawValue);
-      if (!Number.isFinite(parsed)) {
-        setMaxVision(MAX_VISION_MIN);
-        return;
-      }
-      setMaxVision(clampMaxVision(parsed));
-    },
-    [clampMaxVision],
-  );
-  const increaseMaxVision = useCallback(() => {
-    setMaxVision((prev) => clampMaxVision(prev + 1));
-  }, [clampMaxVision]);
-  const decreaseMaxVision = useCallback(() => {
-    setMaxVision((prev) => clampMaxVision(prev - 1));
-  }, [clampMaxVision]);
-  const clampFps = useCallback((value: number) => {
-    const numeric = Number(value);
-    if (!Number.isFinite(numeric)) return FPS_MIN;
-    const clamped = Math.max(FPS_MIN, Math.min(FPS_MAX, numeric));
-    return Math.round(clamped * 10) / 10;
-  }, []);
-  const handleFpsInput = useCallback(
-    (rawValue: string) => {
-      const parsed = Number(rawValue);
-      if (!Number.isFinite(parsed)) {
-        setFps(FPS_MIN);
-        return;
-      }
-      setFps(clampFps(parsed));
-    },
-    [clampFps],
-  );
-  const increaseFps = useCallback(() => {
-    setFps((prev) => clampFps(prev + FPS_STEP));
-  }, [clampFps]);
-  const decreaseFps = useCallback(() => {
-    setFps((prev) => clampFps(prev - FPS_STEP));
-  }, [clampFps]);
   const analyzableBatchCount = useMemo(
     () => batchFiles.filter((item) => Boolean(String(item.filepath || "").trim())).length,
     [batchFiles],
@@ -1836,9 +1724,149 @@ export default function App() {
   const singleResultSteps = resultData?.steps || EMPTY_STEPS;
   const singleResultMode = String(resultData?.result_mode || "").trim().toLowerCase();
   const isBlockedNoticeResult = singleResultMode === "blocked_notice";
-  const isDegradedResult = singleResultMode === "candidate_steps" || singleResultMode === "timeline_summary";
+  const isResultView = view === "result" && hasAnyResult;
+  const hasDocumentPanel = hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.markdown);
+  const hasSubtitlePanel = hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.output_dir);
+  const showStepsPanel = hasSingleResult && (isBlockedNoticeResult || Boolean(resultData));
+  const confidenceLevel = useMemo<"high" | "medium" | "low" | null>(() => {
+    if (!hasSingleResult || isBlockedNoticeResult) return null;
+    const isDegraded = singleResultMode === "candidate_steps" || singleResultMode === "timeline_summary";
+    const score = Number(resultData?.quality_score || 0);
+    if (isDegraded) return "low";
+    if (score > 0 && score < 0.6) return "low";
+    if (score >= 0.6 && score < 0.8) return "medium";
+    return "high";
+  }, [hasSingleResult, isBlockedNoticeResult, resultData?.quality_score, singleResultMode]);
+  const confidenceLabel =
+    confidenceLevel === "high" ? "结果可信度 高" : confidenceLevel === "medium" ? "结果可信度 中" : "结果可信度 低";
+  const currentResultName = useMemo(() => {
+    if (hasBatchResult) return `批量结果（${batchResultData?.results?.length || 0} 个文件）`;
+    const title = String(resultData?.content_title || "").trim();
+    if (title) return title;
+    const named = batchFiles.find((item) => item.status === "success" && item.filename);
+    return String(named?.filename || "分析结果").trim() || "分析结果";
+  }, [batchFiles, batchResultData?.results?.length, hasBatchResult, resultData?.content_title]);
+  const resultSectionIds = useMemo(() => {
+    const ids: string[] = [];
+    if (hasSubtitlePanel) ids.push("result-panel-subtitle");
+    if (showStepsPanel) ids.push("result-panel-steps");
+    if (hasDocumentPanel) ids.push("result-panel-document");
+    return ids;
+  }, [hasDocumentPanel, hasSubtitlePanel, showStepsPanel]);
+
+  // Scroll-spy: highlight whichever result panel is currently in view.
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof IntersectionObserver === "undefined") return;
+    if (!isResultView || resultSectionIds.length < 2) {
+      setActiveResultSection("");
+      return;
+    }
+    const elements = resultSectionIds
+      .map((id) => document.getElementById(id))
+      .filter((el): el is HTMLElement => Boolean(el));
+    if (elements.length === 0) return;
+
+    const visibility = new Map<string, number>();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) {
+          visibility.set(entry.target.id, entry.isIntersecting ? entry.intersectionRatio : 0);
+        }
+        let topId = "";
+        let topRatio = 0;
+        visibility.forEach((ratio, id) => {
+          if (ratio > topRatio) {
+            topRatio = ratio;
+            topId = id;
+          }
+        });
+        if (topId) setActiveResultSection((prev) => (prev === topId ? prev : topId));
+      },
+      { rootMargin: "-30% 0px -55% 0px", threshold: [0, 0.25, 0.5, 1] },
+    );
+    elements.forEach((el) => observer.observe(el));
+    return () => observer.disconnect();
+  }, [isResultView, resultSectionIds]);
+
+  // Reveal a "back to top" affordance once the result page is scrolled down.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let rafId = 0;
+    const syncVisibility = () => {
+      const scrollTop = window.scrollY || document.documentElement.scrollTop || 0;
+      const next = isResultView && scrollTop > 520;
+      setShowBackToTop((prev) => (prev === next ? prev : next));
+    };
+    const handleScroll = () => {
+      if (rafId) return;
+      rafId = window.requestAnimationFrame(() => {
+        rafId = 0;
+        syncVisibility();
+      });
+    };
+    // Defer the initial sync so we don't setState synchronously in the effect body.
+    const initialRafId = window.requestAnimationFrame(syncVisibility);
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => {
+      window.cancelAnimationFrame(initialRafId);
+      if (rafId) window.cancelAnimationFrame(rafId);
+      window.removeEventListener("scroll", handleScroll);
+    };
+  }, [isResultView]);
+  const goBackToUpload = useCallback(() => {
+    setView("upload");
+    setSavedBatchResult(null);
+    if (typeof window !== "undefined") {
+      window.scrollTo({ top: 0, behavior: uiScrollBehavior });
+    }
+  }, [uiScrollBehavior]);
+  const scrollToPanel = useCallback(
+    (panelId: string) => {
+      if (typeof document === "undefined") return;
+      const target = document.getElementById(panelId);
+      if (target) target.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
+    },
+    [uiScrollBehavior],
+  );
+  const copyTextToClipboard = useCallback(
+    async (text: string, successText: string) => {
+      const content = String(text || "").trim();
+      if (!content) {
+        showError("没有可复制的内容");
+        return;
+      }
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(content);
+        } else {
+          const textarea = document.createElement("textarea");
+          textarea.value = content;
+          textarea.style.position = "fixed";
+          textarea.style.opacity = "0";
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand("copy");
+          document.body.removeChild(textarea);
+        }
+        showSuccess(successText);
+      } catch (error) {
+        showError(`复制失败: ${String((error as Error).message || error)}`);
+      }
+    },
+    [showError, showSuccess],
+  );
+  const copyMarkdownSource = useCallback(() => {
+    void copyTextToClipboard(String(resultData?.markdown || ""), "已复制 Markdown 源码");
+  }, [copyTextToClipboard, resultData?.markdown]);
+  const copyPlainText = useCallback(() => {
+    if (typeof document === "undefined") return;
+    const container = document.createElement("div");
+    container.innerHTML = renderedMarkdown;
+    const plainText = container.textContent || container.innerText || "";
+    void copyTextToClipboard(plainText, "已复制纯文本");
+  }, [copyTextToClipboard, renderedMarkdown]);
   const drawerOverlayActive =
-    historyDrawerOpen || settingsDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
+    historyDrawerOpen || showClearHistoryConfirm || Boolean(pendingDeleteHistory);
   const heroCanvasAnimating = !mobilePerfMode && !drawerOverlayActive && heroAnimationActive;
   void heroCanvasAnimating;
   void CanvasText;
@@ -1917,25 +1945,51 @@ export default function App() {
             <span>Video Insights</span>
           </button>
           <div className="flex items-center gap-2">
+            {hasAnyResult ? (
+              <button
+                type="button"
+                onClick={() => {
+                  if (view === "result") {
+                    goBackToUpload();
+                  } else {
+                    setView("result");
+                    if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: uiScrollBehavior });
+                  }
+                }}
+                className="vi-nav-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
+              >
+                {view === "result" ? (
+                  <>
+                    <UploadIcon className="h-3.5 w-3.5" />
+                    上传
+                  </>
+                ) : (
+                  <>
+                    <StepsIcon className="h-3.5 w-3.5" />
+                    结果
+                  </>
+                )}
+              </button>
+            ) : null}
             <button
               type="button"
-              aria-expanded={settingsDrawerOpen}
-              aria-controls="settings-drawer"
-              onClick={() => {
-                setHistoryDrawerOpen(false);
-                setSettingsDrawerOpen((prev) => !prev);
-              }}
+              onClick={toggleTheme}
+              aria-label={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
+              title={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
               className="vi-nav-pill focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
             >
-              <SettingsIcon className="h-3.5 w-3.5" />
-              设置
+              {theme === "dark" ? (
+                <SunIcon className="h-3.5 w-3.5" />
+              ) : (
+                <MoonIcon className="h-3.5 w-3.5" />
+              )}
+              {theme === "dark" ? "亮色" : "暗色"}
             </button>
             <button
               type="button"
               aria-expanded={historyDrawerOpen}
               aria-controls="history-drawer"
               onClick={() => {
-                setSettingsDrawerOpen(false);
                 setHistoryDrawerOpen((prev) => !prev);
               }}
               className="vi-nav-pill vi-nav-pill--accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500/60"
@@ -1947,12 +2001,14 @@ export default function App() {
         </div>
       </nav>
       <main className="app-main relative z-10 mx-auto w-full max-w-[1320px] space-y-6 px-4 pb-8 pt-[5.25rem] sm:px-6 md:space-y-7 md:px-8 md:pb-10 md:pt-24">
-        <header className="vi-hero hero-panel panel-card motion-enter rounded-xl border-0 bg-transparent p-4">
+        {!isResultView ? (
+          <header className="vi-hero hero-panel panel-card motion-enter rounded-xl border-0 bg-transparent p-4">
           <div className="mx-auto flex w-full max-w-4xl flex-col items-center gap-3 text-center">
             <span className="vi-hero-eyebrow">AI · 视频理解工作台</span>
-            <h1 className="vi-hero-title">
-              视频转文档，
-              <span className="vi-hero-title-accent"> 不止提取，更是理解</span>
+            <h1 className="vi-hero-title vi-hero-title-flip" aria-label="视频转文档，不止提取，更是理解">
+              <motion.div className="relative mx-4 my-4 flex flex-col items-center justify-center gap-4 text-center sm:mx-0 sm:mb-0 sm:flex-row">
+                <LayoutTextFlip text="视频转文档" words={["不止提取", "更是理解"]} />
+              </motion.div>
             </h1>
             <p className="vi-hero-subtitle">
               AI 自动分析视频内容，抓取关键截图，拆解核心步骤，输出结构清晰、重点明确的总结文档。
@@ -1966,9 +2022,11 @@ export default function App() {
             </div>
           </div>
         </header>
+        ) : null}
 
         <div className="app-grid grid items-start gap-5 2xl:gap-6">
           <section className="app-workspace motion-enter motion-delay-2 min-w-0 space-y-4">
+            {!isResultView ? (
             <section className="panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
               <div className="vi-card-head">
                 <div className="vi-card-title">
@@ -2011,9 +2069,6 @@ export default function App() {
                     </button>
                   </div>
                 </div>
-                <p className="vi-url-bar__note">
-                  只需提供链接即可下载并分析；平台播放页链接建议安装 <code>yt-dlp</code> 提升兼容性。
-                </p>
               </div>
               <input
                 ref={fileInputRef}
@@ -2047,32 +2102,10 @@ export default function App() {
                 <p className="vi-drop-title">点击选择 · 或拖拽视频到这里</p>
                 <p className="vi-drop-hint">支持 MP4 / AVI / MOV / MKV / WMV / FLV / WebM / M4V 等</p>
               </div>
-              <div className="vi-kv-grid mt-3">
-                <div className="vi-kv-cell">
-                  <div className="vi-kv-label">标准推荐</div>
-                  <div className="vi-kv-value">20 分钟 · 250 MB 以内</div>
-                  <p className="vi-help">处理速度与稳定性最佳</p>
-                </div>
-                <div className="vi-kv-cell">
-                  <div className="vi-kv-label">长视频模式</div>
-                  <div className="vi-kv-value">自动切片 · 自动压缩</div>
-                  <p className="vi-help">20 分钟 / 250 MB 以上会自动进入，耗时增加</p>
-                </div>
-                <div className="vi-kv-cell">
-                  <div className="vi-kv-label">超长视频</div>
-                  <div className="vi-kv-value">建议先裁剪</div>
-                  <p className="vi-help">45 分钟+ 建议按章节裁剪，90 分钟+ 请拆分</p>
-                </div>
-                <div className="vi-kv-cell">
-                  <div className="vi-kv-label">批量上限</div>
-                  <div className="vi-kv-value">最多 5 个 / 含长视频 ≤ 2</div>
-                  <p className="vi-help">稳定性优先，避免单批过大</p>
-                </div>
-              </div>
               <div className="vi-batch-list">
                 {batchFiles.map((item, index) => (
                   <div
-                    key={`${item.filepath}-${index}`}
+                    key={item.clientId || item.filepath || `${item.filename}-${index}`}
                     className={cn(
                       "vi-batch-row",
                       item.status === "failed" && "vi-batch-row--fail",
@@ -2109,7 +2142,7 @@ export default function App() {
                           <StatusFailedIcon /> 失败
                         </span>
                       ) : item.status === "processing" ? (
-                        <span className="vi-status vi-status--run">处理中</span>
+                        <span className="vi-inline-spinner" aria-label="处理中" />
                       ) : (
                         <span className="vi-status">待处理</span>
                       )}
@@ -2133,6 +2166,7 @@ export default function App() {
                 <button
                   type="button"
                   className="vi-btn vi-btn--block vi-btn--sm mt-2"
+                  disabled={isAnalyzing}
                   onClick={() => setBatchFiles([])}
                 >
                   <ClearIcon className="h-3.5 w-3.5" />
@@ -2148,7 +2182,7 @@ export default function App() {
                   <NoiseBackground
                     containerClassName="mx-auto w-full rounded-full bg-neutral-950/95 p-2 ring-1 ring-white/5"
                     className="w-full"
-                    gradientColors={ANALYZE_BUTTON_GRADIENT_COLORS}
+                    gradientColors={theme === "light" ? ANALYZE_BUTTON_LIGHT_GRADIENT_COLORS : ANALYZE_BUTTON_GRADIENT_COLORS}
                     noiseIntensity={0.07}
                     speed={0.13}
                     animating={shouldAnimateNoiseBackground}
@@ -2157,537 +2191,194 @@ export default function App() {
                   </NoiseBackground>
                 )}
               </div>
-              <button
-                type="button"
-                className={cn(
-                  "vi-btn vi-btn--block vi-btn--sm mt-2",
-                  summaryOnly && "vi-btn--primary",
-                )}
-                disabled={isAnalyzing}
-                onClick={() => setSummaryOnly((prev) => !prev)}
-              >
-                {summaryOnly ? "仅生成摘要版：已开启" : "仅生成摘要版"}
-              </button>
             </section>
+            ) : null}
 
-            {hasAnyResult ? (
-              <div
-                ref={resultsRef}
-                className="results-grid grid items-stretch gap-4 xl:grid-cols-[minmax(0,0.92fr)_minmax(0,1.08fr)]"
-              >
-                {hasBatchResult ? (
-                  <section className="panel-card motion-enter rounded-xl border border-neutral-800 bg-neutral-900/70 p-4 xl:col-span-2">
-                    <div className="mb-2 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <StackIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">批量处理结果</h2>
-                      </div>
-                      <button
-                        className="zip-download-btn flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
-                        onClick={() => void downloadBatchZip()}
-                      >
-                        <DownloadZipIcon className="h-3.5 w-3.5" />
-                        下载批量 ZIP
-                      </button>
-                    </div>
-                    {(batchResultData?.batch_policy_warnings || []).length > 0 ? (
-                      <div className="mb-2 rounded border border-amber-400/35 bg-amber-500/10 p-2 text-xs text-amber-200/95">
-                        <p className="font-semibold">批次策略提醒</p>
-                        <ul className="mt-1 list-disc space-y-1 pl-5">
-                          {(batchResultData?.batch_policy_warnings || []).slice(0, 3).map((tip, idx) => (
-                            <li key={`batch-policy-warning-${idx}`}>{tip}</li>
-                          ))}
-                        </ul>
-                      </div>
-                    ) : null}
-                    {batchResultData?.batch_segment_policy?.summary ? (
-                      <div className="mb-2 rounded border border-sky-400/30 bg-sky-500/8 p-2 text-xs text-sky-100/95">
-                        <p className="font-semibold">
-                          批次分段统计：总计 {Number(batchResultData.batch_segment_policy.summary.total_files || 0)} 个
-                        </p>
-                        <p className="mt-1">
-                          长视频 {Number(batchResultData.batch_segment_policy.summary.long_count || 0)} · 超长{" "}
-                          {Number(batchResultData.batch_segment_policy.summary.super_long_count || 0)} · 裁剪优先{" "}
-                          {Number(batchResultData.batch_segment_policy.summary.trim_required_count || 0)}
-                        </p>
-                      </div>
-                    ) : null}
-                    <div className="space-y-2">
-                      {(batchResultData?.results || []).map((r, i) => (
-                        <div key={`${r.filename}-${i}`} className="list-item-pop rounded border border-neutral-800 bg-neutral-950/60 p-2">
-                          <div className="flex items-center justify-between">
-                            <p className="truncate text-sm font-medium">{r.filename}</p>
-                            <span
-                              className={`text-xs ${
-                                r.success
-                                  ? r.result_mode === "candidate_steps" || r.result_mode === "timeline_summary"
-                                    ? "text-amber-300"
-                                    : "text-emerald-300"
-                                  : r.result_mode === "blocked_notice" || r.code === "content_policy_violation"
-                                    ? "text-amber-300"
-                                    : "text-rose-300"
-                              }`}
-                            >
-                              {r.success
-                                ? r.result_mode === "candidate_steps" || r.result_mode === "timeline_summary"
-                                  ? "已完成（降级）"
-                                  : "成功"
-                                : r.result_mode === "blocked_notice" || r.code === "content_policy_violation"
-                                  ? "已拦截"
-                                  : "失败"}
-                            </span>
-                          </div>
-                          {r.segment_policy ? (
-                            <p className="mt-1 text-[11px] text-sky-200/90">
-                              分段策略：{formatSegmentPolicyLine(r.segment_policy)}
-                            </p>
-                          ) : null}
-                          {(r.segment_guardrails || []).length > 0 ? (
-                            <p className="mt-1 text-[11px] text-amber-200/90">
-                              调整：{String((r.segment_guardrails || [])[0] || "")}
-                            </p>
-                          ) : null}
-                          {r.success ? (
-                            <>
-                              <button
-                                className="zip-download-btn mt-1 flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
-                                onClick={() => void downloadSingleFromBatch(r.output_dir, r.filename)}
-                              >
-                                <DownloadSingleIcon className="h-3.5 w-3.5" />
-                                下载
-                              </button>
-                              {r.fallback_used ? (
-                                <p className="mt-1 text-xs text-amber-300/90">
-                                  {(r.analysis_note || "未识别到标准步骤，已自动生成候选内容。") +
-                                    `（质量分：${Number(r.quality_score || 0).toFixed(2)}）`}
-                                </p>
-                              ) : null}
-                            </>
-                          ) : r.result_mode === "blocked_notice" || r.code === "content_policy_violation" ? (
-                            <div className="mt-1 rounded border border-rose-500/45 bg-rose-500/10 p-2 text-xs text-rose-200/95">
-                              <p className="font-semibold">
-                                {r.blocked_notice?.title || "安全检测未通过（已拦截）"}
-                              </p>
-                              <p className="mt-1">
-                                等级：{String(r.blocked_notice?.risk_level || r.risk?.risk_level || "high")} · 规则：
-                                {String(r.blocked_notice?.reason_code || r.risk?.reason_code || "CONTENT_POLICY_VIOLATION")}
-                              </p>
-                              <p className="mt-1 break-words">
-                                {String(r.blocked_notice?.reason || r.risk?.reason || r.error || CONTENT_POLICY_BLOCK_MESSAGE)}
-                              </p>
-                              {(r.blocked_notice?.suggestions || []).length > 0 ? (
-                                <ul className="mt-1 list-disc space-y-1 pl-4">
-                                  {(r.blocked_notice?.suggestions || []).slice(0, 3).map((tip, idx) => (
-                                    <li key={`b-tip-${i}-${idx}`}>{tip}</li>
-                                  ))}
-                                </ul>
-                              ) : null}
-                            </div>
-                          ) : (
-                            <p className="mt-1 text-xs text-rose-300">{r.error || "处理失败"}</p>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  </section>
-                ) : null}
-
-                {hasSingleResult ? (
-                  <section className="panel-card motion-enter result-heavy-surface flex h-full min-h-0 flex-col rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
-                    <div className="mb-2 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <StepsIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">
-                          {isBlockedNoticeResult
-                            ? "安全检测结果说明"
-                            : isDegradedResult
-                              ? singleResultMode === "timeline_summary"
-                                ? "时间线摘要（自动降级）"
-                                : "候选步骤（自动降级）"
-                              : "识别到的步骤"}
-                        </h2>
-                      </div>
-                      {!isEditMode && !isBlockedNoticeResult ? (
+            {isResultView ? (
+              <div ref={resultsRef} className="result-workspace motion-enter space-y-4">
+                <section className="result-header-bar panel-card rounded-xl border border-neutral-800 bg-neutral-900/70 p-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex min-w-0 items-center gap-2">
+                      {savedBatchResult ? (
                         <button
-                          className="steps-edit-btn flex items-center gap-1 rounded px-2 py-1 text-xs"
-                          onClick={() => {
-                            if (!resultData?.steps?.length) return showError("当前没有可编辑步骤");
-                            setEditedSteps(
-                              clone(resultData.steps).map((s, i) => ({
-                                ...s,
-                                step: i + 1,
-                                time: s.time || "00:00",
-                                title: s.title || "",
-                                description: s.description || "",
-                              })),
-                            );
-                            setIsEditMode(true);
-                          }}
+                          type="button"
+                          onClick={returnToBatchResult}
+                          className="vi-btn vi-btn--sm shrink-0"
                         >
-                          <EditIcon className="h-3.5 w-3.5" />
-                          编辑
+                          ← 返回批量结果
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={goBackToUpload}
+                          className="vi-btn vi-btn--sm shrink-0"
+                        >
+                          ← 返回上传
+                        </button>
+                      )}
+                      <h2 className="truncate text-sm font-semibold text-neutral-100" title={currentResultName}>
+                        {currentResultName}
+                      </h2>
+                    </div>
+                  </div>
+                  {hasSingleResult && !isBlockedNoticeResult ? (
+                    <div className="result-overview mt-3 flex flex-wrap items-center gap-1.5">
+                      {confidenceLevel ? (
+                        <span
+                          className={cn("confidence-badge", `confidence-badge--${confidenceLevel}`)}
+                          title={
+                            resultData?.quality_score
+                              ? `质量分：${Number(resultData.quality_score).toFixed(2)}`
+                              : undefined
+                          }
+                        >
+                          <span className="confidence-badge-dot" />
+                          {confidenceLabel}
+                        </span>
+                      ) : null}
+                      {hasSubtitlePanel ? (
+                        <button
+                          type="button"
+                          className={cn(
+                            "result-overview-chip result-overview-chip--link",
+                            activeResultSection === "result-panel-subtitle" && "result-overview-chip--active",
+                          )}
+                          aria-current={activeResultSection === "result-panel-subtitle" ? "true" : undefined}
+                          onClick={() => scrollToPanel("result-panel-subtitle")}
+                        >
+                          <StepsIcon className="h-3.5 w-3.5" />
+                          字幕工作台
+                        </button>
+                      ) : null}
+                      {showStepsPanel ? (
+                        <button
+                          type="button"
+                          className={cn(
+                            "result-overview-chip result-overview-chip--link",
+                            activeResultSection === "result-panel-steps" && "result-overview-chip--active",
+                          )}
+                          aria-current={activeResultSection === "result-panel-steps" ? "true" : undefined}
+                          onClick={() => scrollToPanel("result-panel-steps")}
+                        >
+                          <StepsIcon className="h-3.5 w-3.5" />
+                          步骤 {singleResultSteps.length}
+                        </button>
+                      ) : null}
+                      {hasDocumentPanel ? (
+                        <button
+                          type="button"
+                          className={cn(
+                            "result-overview-chip result-overview-chip--link",
+                            activeResultSection === "result-panel-document" && "result-overview-chip--active",
+                          )}
+                          aria-current={activeResultSection === "result-panel-document" ? "true" : undefined}
+                          onClick={() => scrollToPanel("result-panel-document")}
+                        >
+                          <DocumentIcon className="h-3.5 w-3.5" />
+                          总结文档
                         </button>
                       ) : null}
                     </div>
-                    {resultData?.analysis_note ? (
-                      <p
-                        className={`mb-2 text-xs ${
-                          isBlockedNoticeResult ? "text-rose-300/90" : "text-amber-300/90"
-                        }`}
-                      >
-                        {resultData.analysis_note}
-                      </p>
-                    ) : null}
-                    {resultData?.segment_policy ? (
-                      <div className="mb-2 rounded border border-sky-400/35 bg-sky-500/8 p-2 text-xs text-sky-100/95">
-                        <p className="font-semibold">分段策略：{formatSegmentPolicyLine(resultData.segment_policy)}</p>
-                        {(resultData.segment_policy.recommendations || []).length > 0 ? (
-                          <ul className="mt-1 list-disc space-y-1 pl-5 text-sky-100/90">
-                            {(resultData.segment_policy.recommendations || []).slice(0, 3).map((tip, idx) => (
-                              <li key={`single-policy-tip-${idx}`}>{tip}</li>
-                            ))}
-                          </ul>
-                        ) : null}
-                        {(resultData.segment_guardrails || []).length > 0 ? (
-                          <ul className="mt-1 list-disc space-y-1 pl-5 text-amber-200/90">
-                            {(resultData.segment_guardrails || []).slice(0, 3).map((tip, idx) => (
-                              <li key={`single-guardrail-${idx}`}>{tip}</li>
-                            ))}
-                          </ul>
-                        ) : null}
-                      </div>
-                    ) : null}
-                    {isBlockedNoticeResult ? (
-                      <div className="rounded border border-rose-500/45 bg-rose-500/10 p-3 text-sm">
-                        <p className="font-semibold text-rose-200">
-                          {resultData?.blocked_notice?.title || "安全检测未通过（已拦截）"}
-                        </p>
-                        <p className="mt-1 text-rose-100/90">
-                          风险等级：{String(resultData?.blocked_notice?.risk_level || resultData?.risk?.risk_level || "high")}
-                        </p>
-                        <p className="text-rose-100/90">
-                          规则码：{String(resultData?.blocked_notice?.reason_code || resultData?.risk?.reason_code || "CONTENT_POLICY_VIOLATION")}
-                        </p>
-                        <p className="mt-1 text-rose-100/95 break-words">
-                          {String(resultData?.blocked_notice?.reason || resultData?.risk?.reason || CONTENT_POLICY_BLOCK_MESSAGE)}
-                        </p>
-                        {(resultData?.blocked_notice?.suggestions || []).length > 0 ? (
-                          <ul className="mt-2 list-disc space-y-1 pl-5 text-rose-100/90">
-                            {(resultData?.blocked_notice?.suggestions || []).slice(0, 4).map((tip, idx) => (
-                              <li key={`bn-tip-${idx}`}>{tip}</li>
-                            ))}
-                          </ul>
-                        ) : null}
-                        {resultData?.blocked_notice?.retry_guidance ? (
-                          <p className="mt-2 text-rose-100/90">{resultData.blocked_notice.retry_guidance}</p>
-                        ) : null}
-                      </div>
-                    ) : !isEditMode ? (
-                      <div className="single-result-scroll history-scroll flex-1 min-h-0 space-y-2 overflow-auto pr-1">
-                        {isDegradedResult ? (
-                          <div className="space-y-2">
-                            <div className="rounded border border-amber-400/40 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200">
-                              置信度较低（质量分：{Number(resultData?.quality_score || 0).toFixed(2)}）。原因：
-                              {formatDegradeReason(resultData?.degrade_reason)}
-                            </div>
-                            {resultData?.content_title ? (
-                              <div className="rounded border border-amber-400/30 bg-amber-500/6 p-2 text-xs text-amber-100/95">
-                                <p className="font-semibold">标题：{resultData.content_title}</p>
-                                {(resultData.key_points || []).length > 0 ? (
-                                  <ul className="mt-1 list-disc space-y-1 pl-5">
-                                    {(resultData.key_points || []).slice(0, 5).map((item, idx) => (
-                                      <li key={`kp-${idx}`}>{item}</li>
-                                    ))}
-                                  </ul>
-                                ) : null}
-                                {(resultData.timeline_points || []).length > 0 ? (
-                                  <p className="mt-1">
-                                    时间点：
-                                    {(resultData.timeline_points || [])
-                                      .slice(0, 5)
-                                      .map((item) => String(item?.time || "00:00"))
-                                      .join(" / ")}
-                                  </p>
-                                ) : null}
-                                {resultData?.confidence_note ? (
-                                  <p className="mt-1">{resultData.confidence_note}</p>
-                                ) : null}
-                              </div>
-                            ) : null}
-                          </div>
-                        ) : null}
-                        <ReadonlyStepsList steps={singleResultSteps} />
-                      </div>
-                    ) : (
-                      <div className="steps-edit-scroll history-scroll flex-1 min-h-0 overflow-auto pr-1">
-                        <div className="steps-edit-actions mb-2 flex gap-2">
-                          <button
-                            type="button"
-                            disabled={savingSteps}
-                            className="steps-edit-save-btn"
-                            onClick={() => void saveEditedSteps()}
-                          >
-                            保存并重生成
-                          </button>
-                          <button
-                            type="button"
-                            disabled={savingSteps}
-                            className="steps-edit-cancel-btn"
-                            onClick={() => {
-                              setIsEditMode(false);
-                              setEditedSteps([]);
-                            }}
-                          >
-                            取消
-                          </button>
-                        </div>
-                        <div className="space-y-2">
-                          {editedSteps.map((step, index) => (
-                            <div
-                              key={`e-${index}`}
-                              draggable
-                              onDragStart={() => setDragIndex(index)}
-                              onDragOver={(e) => {
-                                e.preventDefault();
-                                setDragOverIndex(index);
-                              }}
-                              onDrop={(e) => {
-                                e.preventDefault();
-                                if (dragIndex === null || dragIndex === index) return;
-                                setEditedSteps((prev) => {
-                                  const next = [...prev];
-                                  const [moved] = next.splice(dragIndex, 1);
-                                  if (!moved) return prev;
-                                  next.splice(index, 0, moved);
-                                  return next.map((s, i) => ({ ...s, step: i + 1 }));
-                                });
-                                setDragIndex(null);
-                                setDragOverIndex(null);
-                              }}
-                              onDragEnd={() => {
-                                setDragIndex(null);
-                                setDragOverIndex(null);
-                              }}
-                              className={`rounded border p-2 ${
-                                dragIndex === index
-                                  ? "border-teal-500/50 opacity-60"
-                                  : dragOverIndex === index
-                                    ? "border-teal-400"
-                                    : "border-neutral-800"
-                              }`}
-                            >
-                              <div className="mb-1 flex gap-2">
-                                <input
-                                  className="steps-edit-input flex-1 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
-                                  value={step.title || ""}
-                                  placeholder={NEW_STEP_DEFAULT_TITLE}
-                                  onChange={(e) =>
-                                    setEditedSteps((prev) =>
-                                      prev.map((item, idx) => (idx === index ? { ...item, title: e.target.value } : item)),
-                                    )
-                                  }
-                                />
-                                <input
-                                  className="steps-edit-input w-24 rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
-                                  value={step.time || ""}
-                                  placeholder={NEW_STEP_DEFAULT_TIME}
-                                  onChange={(e) =>
-                                    setEditedSteps((prev) =>
-                                      prev.map((item, idx) => (idx === index ? { ...item, time: e.target.value } : item)),
-                                    )
-                                  }
-                                />
-                              </div>
-                              <textarea
-                                className="steps-edit-textarea min-h-16 w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1 text-sm"
-                                value={step.description || ""}
-                                placeholder={NEW_STEP_DEFAULT_DESCRIPTION}
-                                onChange={(e) =>
-                                  setEditedSteps((prev) =>
-                                    prev.map((item, idx) => (idx === index ? { ...item, description: e.target.value } : item)),
-                                  )
-                                }
-                              />
-                              <button
-                                type="button"
-                                title="删除步骤"
-                                aria-label="删除步骤"
-                                className="mt-1 inline-flex h-7 w-7 items-center justify-center rounded border border-rose-500/40 text-rose-300 transition-colors hover:bg-rose-500/10"
-                                onClick={() =>
-                                  setEditedSteps((prev) =>
-                                    prev.filter((_, idx) => idx !== index).map((s, i) => ({ ...s, step: i + 1 })),
-                                  )
-                                }
-                              >
-                                <TrashIcon />
-                              </button>
-                            </div>
-                          ))}
-                        </div>
-                        <button
-                          className="mt-2 w-full rounded-lg border border-dashed border-teal-400/45 bg-gradient-to-b from-teal-500/8 to-cyan-500/6 px-3 py-2 text-sm font-medium text-teal-100/90 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] transition-all duration-200 hover:-translate-y-0.5 hover:border-teal-300/70 hover:from-teal-500/14 hover:to-cyan-500/12 hover:text-teal-50 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-teal-400/60 focus-visible:ring-offset-2 focus-visible:ring-offset-neutral-950"
-                          onClick={() =>
-                            setEditedSteps((prev) => [
-                              ...prev,
-                              {
-                                step: prev.length + 1,
-                                time: "",
-                                title: "",
-                                description: "",
-                              },
-                            ])
-                          }
-                        >
-                          添加新步骤
-                        </button>
-                      </div>
-                    )}
-                  </section>
+                  ) : null}
+                </section>
+                {hasBatchResult && batchResultData ? (
+                  <BatchResultPanel
+                    data={batchResultData}
+                    onDownloadAll={() => void downloadBatchZip()}
+                    onDownloadItem={(outputDir, filename) =>
+                      void downloadSingleFromBatch(outputDir, filename)
+                    }
+                    onOpenItem={(item) => void openBatchResultItem(item)}
+                  />
                 ) : null}
 
-                {hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.markdown) ? (
-                  <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
-                    <div className="mb-2 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <DocumentIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">生成的总结文档</h2>
-                      </div>
-                      <button
-                        className="zip-download-btn flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs"
-                        onClick={() => void downloadSingleZip()}
-                      >
-                        <DownloadZipIcon className="h-3.5 w-3.5" />
-                        下载 ZIP
-                      </button>
-                    </div>
-                    <MarkdownPreview
-                      html={renderedMarkdown}
-                      className={summaryOnly ? "summary-only-scroll-rail" : undefined}
-                      contentClassName={
-                        summaryOnly ? "summary-only-markdown-content" : "standard-markdown-content"
-                      }
-                    />
-                  </section>
-                ) : null}
-
-                {hasSingleResult && !isBlockedNoticeResult && Boolean(resultData?.output_dir) ? (
-                  <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
-                    <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <StepsIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">字幕工作台</h2>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        <button
-                          type="button"
-                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={subtitleLoading}
-                          onClick={() => void loadSubtitleWorkbench(String(resultData?.output_dir || ""))}
-                        >
-                          {subtitleLoading ? "加载中..." : "刷新字幕"}
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={subtitleLoading}
-                          onClick={() => void downloadSubtitleFile("srt")}
-                        >
-                          导出 SRT
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={subtitleLoading}
-                          onClick={() => void downloadSubtitleFile("vtt")}
-                        >
-                          导出 VTT
-                        </button>
-                        <button
-                          type="button"
-                          className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-                          disabled={subtitleLoading}
-                          onClick={() => void downloadSubtitleFile("txt")}
-                        >
-                          导出 TXT
-                        </button>
-                      </div>
-                    </div>
-
-                    {String(subtitleWorkbench?.video_preview_url || resultData?.video_preview_url || "").trim() ? (
-                      <div className="mb-2 overflow-hidden rounded border border-neutral-800 bg-black/40">
-                        <video
-                          ref={subtitleVideoRef}
-                          controls
-                          preload="metadata"
-                          className="max-h-[300px] w-full bg-black"
-                          src={String(subtitleWorkbench?.video_preview_url || resultData?.video_preview_url || "")}
+                {hasSingleResult && resultData ? (
+                  <div className={cn("result-trio", hasSubtitlePanel && "result-trio--split")}>
+                    {hasSubtitlePanel ? (
+                      <div id="result-panel-subtitle" className="result-trio-aside result-anchor">
+                        <SubtitlePanel
+                          resultData={resultData}
+                          subtitleWorkbench={subtitleWorkbench}
+                          subtitleLines={subtitleLines}
+                          filteredSubtitleLines={filteredSubtitleLines}
+                          subtitleKeyword={subtitleKeyword}
+                          subtitleLoading={subtitleLoading}
+                          subtitleRefreshing={subtitleRefreshing}
+                          subtitleLoadError={subtitleLoadError}
+                          subtitleAssetAvailable={subtitleAssetAvailable}
+                          videoRef={subtitleVideoRef}
+                          onKeywordChange={setSubtitleKeyword}
+                          onRefresh={() => void refreshSubtitleWorkbench()}
+                          onDownload={() => void downloadSubtitleZip()}
+                          onSeek={seekVideoTo}
+                          formatDisplayTime={formatSubtitleDisplayTime}
                         />
                       </div>
                     ) : null}
 
-                    {subtitleLoading ? (
-                      <p className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-300">
-                        正在加载字幕...
-                      </p>
-                    ) : subtitleLines.length > 0 ? (
-                      <>
-                        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                          <input
-                            type="text"
-                            className="w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-500 sm:max-w-xs"
-                            placeholder="搜索字幕内容或时间点"
-                            value={subtitleKeyword}
-                            onChange={(e) => setSubtitleKeyword(e.target.value)}
+                    <div className="result-trio-main space-y-4">
+                      {showStepsPanel ? (
+                        <div id="result-panel-steps" className="result-anchor">
+                          <StepsPanel
+                            resultData={resultData}
+                            steps={singleResultSteps}
+                            isEditMode={isEditMode}
+                            editedSteps={editedSteps}
+                            savingSteps={savingSteps}
+                            dragIndex={dragIndex}
+                            dragOverIndex={dragOverIndex}
+                            setEditedSteps={setEditedSteps}
+                            setIsEditMode={setIsEditMode}
+                            setDragIndex={setDragIndex}
+                            setDragOverIndex={setDragOverIndex}
+                            onShowError={showError}
+                            onSave={() => void saveEditedSteps()}
+                            onSeek={hasSubtitlePanel ? seekVideoTo : undefined}
                           />
-                          <p className="text-xs text-neutral-400">
-                            共 {subtitleLines.length} 行，匹配 {filteredSubtitleLines.length} 行
-                          </p>
                         </div>
-                        <div className="history-scroll max-h-[340px] space-y-1 overflow-auto pr-1">
-                          {filteredSubtitleLines.slice(0, 1200).map((line, idx) => (
-                            <button
-                              type="button"
-                              key={`sub-line-${line.index || idx}-${line.start_time || ""}`}
-                              className="w-full rounded border border-neutral-800 bg-neutral-950/60 px-2 py-1.5 text-left text-xs transition-colors hover:border-teal-400/60 hover:bg-teal-500/10"
-                              onClick={() => seekVideoTo(Number(line.start_seconds || 0))}
-                            >
-                              <p className="font-semibold text-teal-200/95">
-                                {String(line.start_time || "00:00:00,000")} - {String(line.end_time || "00:00:00,000")}
-                              </p>
-                              <p className="mt-0.5 whitespace-pre-wrap text-neutral-200">{String(line.text || "")}</p>
-                            </button>
-                          ))}
+                      ) : null}
+
+                      {hasDocumentPanel ? (
+                        <div id="result-panel-document" className="result-anchor">
+                          <DocumentPanel
+                            html={renderedMarkdown}
+                            summaryOnly={summaryOnly}
+                            onDownloadZip={() => void downloadSingleZip()}
+                            onCopyMarkdown={copyMarkdownSource}
+                            onCopyText={copyPlainText}
+                          />
                         </div>
-                      </>
-                    ) : subtitleAssetAvailable ? (
-                      <div className="rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-100">
-                        <p>
-                          已检测到字幕文件，但当前未加载到字幕行。你可以点击“刷新字幕”，或直接导出 SRT/VTT/TXT。
-                        </p>
-                        {String(subtitleWorkbench?.subtitle_file || resultData?.subtitle_file_name || "").trim() ? (
-                          <p className="mt-1 text-xs text-amber-200/90">
-                            字幕文件：{String(subtitleWorkbench?.subtitle_file || resultData?.subtitle_file_name || "")}
-                            {Number(resultData?.subtitle_line_count || 0) > 0
-                              ? `（约 ${Number(resultData?.subtitle_line_count || 0)} 行）`
-                              : ""}
-                          </p>
-                        ) : null}
-                        {subtitleLoadError ? (
-                          <p className="mt-1 text-xs text-amber-200/90">加载原因：{subtitleLoadError}</p>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <p className="rounded border border-neutral-800 bg-neutral-950/60 px-3 py-2 text-sm text-neutral-300">
-                        当前结果未检测到可用字幕。你可以切换字幕模式重新分析，或检查音频质量后重试。
-                      </p>
-                    )}
-                  </section>
+                      ) : null}
+                    </div>
+                  </div>
                 ) : null}
               </div>
             ) : null}
           </section>
         </div>
       </main>
+
+      {isResultView ? (
+        <button
+          type="button"
+          aria-label="返回结果顶部"
+          title="返回顶部"
+          className={cn("back-to-top-btn", showBackToTop && "back-to-top-btn--visible")}
+          onClick={() => {
+            if (resultsRef.current) {
+              resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
+            } else if (typeof window !== "undefined") {
+              window.scrollTo({ top: 0, behavior: uiScrollBehavior });
+            }
+          }}
+        >
+          <svg viewBox="0 0 24 24" fill="none" className="h-4 w-4" aria-hidden="true">
+            <path d="M12 19V6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            <path d="M6 11l6-6 6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+          <span>顶部</span>
+        </button>
+      ) : null}
 
       {typeof document !== "undefined"
         ? createPortal(
@@ -2733,8 +2424,8 @@ export default function App() {
                         </button>
                       </div>
                     </div>
-                    <p className="mt-2 rounded border border-amber-400/35 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200/95">
-                      提醒：历史记录与服务器生成的总结文件仅保留 72 小时，系统会自动清理。
+                    <p className="history-retention-note mt-2 rounded border border-amber-400/35 bg-amber-500/10 px-2 py-1.5 text-xs text-amber-200/95">
+                      提醒：历史记录生成的总结文件仅保留 72 小时。
                     </p>
                   </div>
                   <VirtualizedHistoryList
@@ -2861,264 +2552,6 @@ export default function App() {
           )
         : null}
 
-      {typeof document !== "undefined"
-        ? createPortal(
-            <div
-              className="history-drawer-overlay fixed inset-0 z-[45]"
-              hidden={!settingsDrawerOpen}
-              aria-hidden={!settingsDrawerOpen}
-            >
-              <button
-                type="button"
-                aria-label="关闭设置侧边栏"
-                className="history-drawer-backdrop absolute inset-0 bg-black/45"
-                onClick={() => setSettingsDrawerOpen(false)}
-              />
-              <div className="pointer-events-none relative h-full w-full">
-                <aside
-                  id="settings-drawer"
-                  className="history-drawer-panel pointer-events-auto ml-auto flex h-full w-[min(92vw,360px)] flex-col border-l border-neutral-700/80 bg-neutral-900/97 py-4 shadow-[-16px_0_34px_rgba(2,6,23,0.45)]"
-                >
-                  <div className="border-b border-neutral-800 px-4 pb-3">
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <SettingsIcon className="h-4 w-4 text-neutral-300" />
-                        <h2 className="text-base font-semibold">设置</h2>
-                      </div>
-                      <button
-                        type="button"
-                        title="关闭侧边栏"
-                        aria-label="关闭侧边栏"
-                        className="inline-flex h-8 w-8 items-center justify-center rounded border border-neutral-700 text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100"
-                        onClick={() => setSettingsDrawerOpen(false)}
-                      >
-                        <CloseIcon className="h-3.5 w-3.5" />
-                      </button>
-                    </div>
-                  </div>
-                  <div className="history-scroll flex-1 overflow-auto px-4 py-3">
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">
-                        <span className="mr-1 text-rose-300">*</span>模型 API Key
-                      </label>
-                      <div className="relative">
-                        <input
-                          ref={apiKeyInputRef}
-                          className={cn(
-                            "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 pr-9 text-sm",
-                            apiKeyGuideActive && "api-key-guide-input",
-                          )}
-                          type={showApiKey ? "text" : "password"}
-                          placeholder="请输入 API Key"
-                          value={apiKey}
-                          onChange={(e) => {
-                            setApiKey(e.target.value);
-                            if (apiKeyGuideActive) setApiKeyGuideActive(false);
-                          }}
-                        />
-                        <button
-                          type="button"
-                          className="absolute inset-y-0 right-0 inline-flex w-8 items-center justify-center rounded-r text-neutral-400 transition-colors hover:text-neutral-100"
-                          title={showApiKey ? "隐藏 API Key" : "显示 API Key"}
-                          aria-label={showApiKey ? "隐藏 API Key" : "显示 API Key"}
-                          onClick={() => setShowApiKey((prev) => !prev)}
-                        >
-                          {showApiKey ? <EyeOffIcon className="h-4 w-4" /> : <EyeIcon className="h-4 w-4" />}
-                        </button>
-                      </div>
-                      <p className="text-xs text-neutral-500">可填写任意兼容平台的 API Key</p>
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">模型预设</label>
-                      <select
-                        className="settings-select"
-                        value={modelPreset}
-                        onChange={(e) => applyModelPreset(e.target.value as ModelPreset)}
-                      >
-                        <option value="ark">{MODEL_PRESETS.ark.label}</option>
-                        <option value="openai">{MODEL_PRESETS.openai.label}</option>
-                        <option value="deepseek">{MODEL_PRESETS.deepseek.label}</option>
-                        <option value="qwen">{MODEL_PRESETS.qwen.label}</option>
-                        <option value="custom">自定义</option>
-                      </select>
-                      <p className="text-xs text-neutral-500">一键填充常见平台的 Base URL（模型名称需手动填写）</p>
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">
-                        {modelPreset === "custom" ? <span className="mr-1 text-rose-300">*</span> : null}
-                        模型接口 Base URL
-                      </label>
-                      <input
-                        ref={modelBaseUrlInputRef}
-                        className={cn(
-                          "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm",
-                          modelPreset === "custom" && modelConfigGuideActive && !String(modelBaseUrl || "").trim() && "model-required-guide-input",
-                        )}
-                        type="text"
-                        placeholder="例如: https://api.openai.com/v1"
-                        value={modelBaseUrl}
-                        required={modelPreset === "custom"}
-                        aria-required={modelPreset === "custom"}
-                        onChange={(e) => {
-                          const nextBaseUrl = e.target.value;
-                          setModelPreset("custom");
-                          setModelBaseUrl(nextBaseUrl);
-                          if (modelConfigGuideActive && nextBaseUrl.trim() && String(modelName || "").trim()) {
-                            setModelConfigGuideActive(false);
-                          }
-                        }}
-                      />
-                      <p className="text-xs text-neutral-500">支持兼容接口（Ark / OpenAI / DeepSeek / Qwen 等）</p>
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">
-                        <span className="mr-1 text-rose-300">*</span>
-                        模型名称
-                      </label>
-                      <input
-                        ref={modelNameInputRef}
-                        className={cn(
-                          "w-full rounded border border-neutral-700 bg-neutral-950 px-2 py-1.5 text-sm",
-                          modelConfigGuideActive && !String(modelName || "").trim() && "model-required-guide-input",
-                        )}
-                        type="text"
-                        placeholder="例如: gpt-5.4 / deepseek-chat / qwen-plus / doubao-seed-2-0-pro-260215"
-                        value={modelName}
-                        required
-                        aria-required
-                        onChange={(e) => {
-                          const nextModelName = e.target.value;
-                          setModelName(nextModelName);
-                          const hasBaseUrl = Boolean(String(modelBaseUrl || "").trim());
-                          if (modelConfigGuideActive && nextModelName.trim() && (modelPreset !== "custom" || hasBaseUrl)) {
-                            setModelConfigGuideActive(false);
-                          }
-                        }}
-                      />
-                      <p className="text-xs text-neutral-500">按你所用平台的模型 ID 填写（必填）</p>
-                      {modelPreset === "custom" ? <p className="text-xs text-rose-300">自定义预设下，Base URL 与模型名称均必填</p> : null}
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <div className="rounded-lg border border-neutral-700/80 bg-neutral-900/70 px-2.5 py-2 text-xs text-neutral-400">
-                        测试链接按钮已停用，模型连通性由后端启动分析时自动处理。
-                      </div>
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">Whisper 字幕识别模型</label>
-                      <select
-                        className="settings-select"
-                        value={whisperModel}
-                        onChange={(e) => setWhisperModel(e.target.value)}
-                      >
-                        <option value="tiny">tiny - 最快，精度较低</option>
-                        <option value="base">base - 快速，平衡精度</option>
-                        <option value="small">small - 中等速度，较高精度</option>
-                        <option value="medium">medium - 较慢，更高精度</option>
-                        <option value="large">large - 最慢，最高精度</option>
-                      </select>
-                    </div>
-
-                    <div className="config-field mb-3 space-y-1">
-                      <label className="text-sm">AI 看图增强次数</label>
-                      <div className="settings-stepper">
-                        <input
-                          className="settings-number-input"
-                          type="number"
-                          min={MAX_VISION_MIN}
-                          max={MAX_VISION_MAX}
-                          value={maxVision}
-                          onChange={(e) => handleMaxVisionInput(e.target.value)}
-                          onBlur={() => setMaxVision((prev) => clampMaxVision(prev))}
-                        />
-                        <div className="settings-stepper-controls">
-                          <button
-                            type="button"
-                            className="settings-stepper-btn"
-                            aria-label="增加 AI 看图增强次数"
-                            onClick={increaseMaxVision}
-                            disabled={maxVision >= MAX_VISION_MAX}
-                          >
-                            ▲
-                          </button>
-                          <button
-                            type="button"
-                            className="settings-stepper-btn"
-                            aria-label="减少 AI 看图增强次数"
-                            onClick={decreaseMaxVision}
-                            disabled={maxVision <= MAX_VISION_MIN}
-                          >
-                            ▼
-                          </button>
-                        </div>
-                      </div>
-                      <p className="text-xs text-neutral-500">对低置信度步骤进行 AI 看图增强（0-10 次）</p>
-                    </div>
-
-                    <label className="feature-toggle mb-3 flex items-start gap-2 text-sm">
-                      <input
-                        className="feature-checkbox mt-0.5"
-                        type="checkbox"
-                        checked={useVideo}
-                        onChange={(e) => setUseVideo(e.target.checked)}
-                      />
-                      <span>
-                        <strong className="block font-semibold">视频上传模式</strong>
-                        <span className="feature-note text-xs text-neutral-500">直接上传视频给 AI 识别（更准确，费用更高）</span>
-                      </span>
-                    </label>
-
-                    {useVideo ? (
-                      <div className="fps-reveal mb-3 space-y-1">
-                        <label className="text-sm">抽帧频率 (FPS)</label>
-                        <div className="settings-stepper">
-                          <input
-                            className="settings-number-input"
-                            type="number"
-                            min={FPS_MIN}
-                            max={FPS_MAX}
-                            step={FPS_STEP}
-                            value={fps}
-                            onChange={(e) => handleFpsInput(e.target.value)}
-                            onBlur={() => setFps((prev) => clampFps(prev))}
-                          />
-                          <div className="settings-stepper-controls">
-                            <button
-                              type="button"
-                              className="settings-stepper-btn"
-                              aria-label="增加抽帧频率"
-                              onClick={increaseFps}
-                              disabled={fps >= FPS_MAX}
-                            >
-                              ▲
-                            </button>
-                            <button
-                              type="button"
-                              className="settings-stepper-btn"
-                              aria-label="减少抽帧频率"
-                              onClick={decreaseFps}
-                              disabled={fps <= FPS_MIN}
-                            >
-                              ▼
-                            </button>
-                          </div>
-                        </div>
-                        <p className="text-xs text-neutral-500">视频上传模式下的抽帧频率，默认 1 帧/秒</p>
-                      </div>
-                    ) : null}
-
-                  </div>
-                </aside>
-              </div>
-            </div>,
-            document.body,
-          )
-        : null}
-
       {progressVisible ? (
         <div className="progress-overlay-anim fixed inset-0 z-40 flex items-center justify-center bg-black/60 p-4">
           <div className="progress-dialog-anim vi-progress-card">
@@ -3179,4 +2612,3 @@ export default function App() {
     </div>
   );
 }
-

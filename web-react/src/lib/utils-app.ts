@@ -132,6 +132,21 @@ export const basename = (value: string | undefined | null) =>
 
 export const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 
+/**
+ * Parse a timestamp string ("HH:MM:SS", "MM:SS", or "SS") into seconds.
+ * Returns null when the input has no usable numeric segments.
+ */
+export const parseTimeToSeconds = (value: string | undefined | null): number | null => {
+  const text = String(value || "").trim();
+  if (!text) return null;
+  const matched = text.match(/(\d+(?:\.\d+)?)/g);
+  if (!matched || matched.length === 0) return null;
+  const parts = matched.slice(-3).map((part) => Number(part));
+  if (parts.some((part) => Number.isNaN(part))) return null;
+  const seconds = parts.reduce((acc, part) => acc * 60 + part, 0);
+  return Number.isFinite(seconds) ? seconds : null;
+};
+
 export const isSameProgressBoard = (a: ProgressBoard, b: ProgressBoard) =>
   a.mode === b.mode &&
   a.percent === b.percent &&

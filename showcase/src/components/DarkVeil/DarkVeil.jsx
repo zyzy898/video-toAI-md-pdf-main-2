@@ -14,6 +14,7 @@ uniform float uNoise;
 uniform float uScan;
 uniform float uScanFreq;
 uniform float uWarp;
+uniform float uLightMix;
 #define iTime uTime
 #define iResolution uResolution
 vec4 buf[8];
@@ -54,6 +55,16 @@ void main(){
   float scanline_val=sin(gl_FragCoord.y*uScanFreq)*0.5+0.5;
   col.rgb*=1.-(scanline_val*scanline_val)*uScan;
   col.rgb+=(rand(gl_FragCoord.xy+uTime)-0.5)*uNoise;
+  if(uLightMix>0.001){
+    // 明主题：把原图亮度"反相"——原本的亮极光线条 → 浅底上的深色/彩色线条，
+    // 保留色相与运动感，整体仍是浅色但线条清晰可见。
+    float lum=dot(col.rgb,vec3(0.299,0.587,0.114));
+    vec3 chroma=col.rgb-vec3(lum);                 // 去亮度的纯色偏移（保住色相）
+    float invLum=1.0-lum;                          // 暗处→亮，亮线条→暗
+    // 浅色底范围 [0.5, 0.97]：原本越亮的线条压得越深，形成对比
+    vec3 lightCol=vec3(0.5+invLum*0.47)+chroma*1.35;
+    col.rgb=mix(col.rgb,clamp(lightCol,0.0,1.0),uLightMix);
+  }
   gl_FragColor=vec4(clamp(col.rgb,0.0,1.0),1.0);
 }`;
 
@@ -64,9 +75,13 @@ export default function DarkVeil({
   speed = 0.5,
   scanlineFrequency = 0,
   warpAmount = 0,
-  resolutionScale = 1
+  resolutionScale = 1,
+  lightMix = 0
 }) {
   const ref = useRef(null);
+  // lightMix 用 ref 透传，避免切换主题时整段重建 canvas（否则会有一闪）
+  const lightMixRef = useRef(lightMix);
+  lightMixRef.current = lightMix;
 
   useEffect(() => {
     const canvas = ref.current;
@@ -90,7 +105,8 @@ export default function DarkVeil({
         uNoise: { value: noiseIntensity },
         uScan: { value: scanlineIntensity },
         uScanFreq: { value: scanlineFrequency },
-        uWarp: { value: warpAmount }
+        uWarp: { value: warpAmount },
+        uLightMix: { value: lightMix }
       }
     });
     const mesh = new Mesh(gl, { geometry, program });
@@ -131,6 +147,9 @@ export default function DarkVeil({
       program.uniforms.uScan.value = scanlineIntensity;
       program.uniforms.uScanFreq.value = scanlineFrequency;
       program.uniforms.uWarp.value = warpAmount;
+      // 朝目标 lightMix 平滑过渡，切换主题时背景渐变而非突变
+      program.uniforms.uLightMix.value +=
+        (lightMixRef.current - program.uniforms.uLightMix.value) * 0.08;
       renderer.render({ scene: mesh });
       frame = requestAnimationFrame(loop);
     };

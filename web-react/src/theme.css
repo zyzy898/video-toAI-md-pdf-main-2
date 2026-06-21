@@ -574,6 +574,21 @@ body {
   background: rgba(59, 130, 246, 0.14);
 }
 
+.vi-inline-spinner {
+  width: 0.875rem;
+  height: 0.875rem;
+  border-radius: 999px;
+  border: 2px solid rgba(148, 163, 184, 0.28);
+  border-top-color: #bae6fd;
+  animation: vi-spin 0.72s linear infinite;
+}
+
+@keyframes vi-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* ---------- Analyze CTA ---------- */
 .vi-cta {
   margin-top: 0.9rem;
@@ -720,4 +735,725 @@ nav.fixed {
 .single-result-scroll,
 .steps-edit-scroll {
   scrollbar-color: rgba(148, 163, 184, 0.32) transparent;
+}
+
+/* =========================================================
+ * Light theme — [data-theme="light"] override layer
+ * Activated by setting data-theme="light" on <html>.
+ * Loads last, so it overrides both index.css and theme.css.
+ * Brand cyan/blue accents preserved, darkened for contrast.
+ * ========================================================= */
+
+:root[data-theme="light"] {
+  --vi-bg-0: #f4f7fb;
+  --vi-bg-1: #eef2f8;
+  --vi-bg-2: #e6ecf5;
+  --vi-surface: rgba(255, 255, 255, 0.82);
+  --vi-surface-solid: #ffffff;
+  --vi-surface-hover: rgba(241, 245, 250, 0.92);
+  --vi-border: rgba(15, 23, 42, 0.12);
+  --vi-border-strong: rgba(15, 23, 42, 0.22);
+  --vi-text-0: #020617;
+  --vi-text-1: #111827;
+  --vi-text-2: #334155;
+  --vi-text-3: #475569;
+
+  --vi-accent: #0891b2;
+  --vi-accent-2: #0d9488;
+  --vi-accent-3: #2563eb;
+  --vi-accent-soft: rgba(8, 145, 178, 0.12);
+  --vi-accent-ring: rgba(8, 145, 178, 0.3);
+  --vi-danger: #e11d48;
+  --vi-danger-soft: rgba(225, 29, 72, 0.1);
+  --vi-warn: #d97706;
+  --vi-warn-soft: rgba(217, 119, 6, 0.12);
+  --vi-success: #059669;
+  --vi-success-soft: rgba(5, 150, 105, 0.12);
+
+  --vi-shadow-sm: 0 4px 10px rgba(15, 23, 42, 0.08);
+  --vi-shadow: 0 10px 30px rgba(15, 23, 42, 0.1), inset 0 1px 0 rgba(255, 255, 255, 0.6);
+  --vi-shadow-lg: 0 24px 60px -20px rgba(15, 23, 42, 0.2), inset 0 1px 0 rgba(255, 255, 255, 0.7);
+
+  color-scheme: light;
+}
+
+/* Smooth cross-fade when toggling themes */
+body {
+  transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* ---------- Page base ---------- */
+:root[data-theme="light"] body {
+  background:
+    radial-gradient(1200px 600px at 12% -10%, rgba(8, 145, 178, 0.07), transparent 60%),
+    radial-gradient(900px 500px at 110% 10%, rgba(37, 99, 235, 0.07), transparent 60%),
+    var(--vi-bg-0);
+  color: var(--vi-text-1);
+}
+
+.vi-hero-title-flip {
+  font-size: inherit;
+}
+
+.vi-hero-title-flip > div {
+  margin-top: 0.85rem;
+  margin-bottom: 0;
+}
+
+.vi-hero-title-flip :is(span) {
+  font-size: clamp(2.15rem, 4.6vw + 0.6rem, 4.65rem);
+  line-height: 1.08;
+}
+
+.vi-hero-title-flip > div > span:first-child {
+  letter-spacing: -0.035em;
+}
+
+.vi-hero-title-flip > div > span:last-child {
+  padding: 0.42em 0.58em;
+}
+
+:root[data-theme="light"] .vi-hero-title-flip > div > span:last-child {
+  border-color: rgba(14, 116, 144, 0.22) !important;
+  background:
+    radial-gradient(circle at 20% 15%, rgba(255, 255, 255, 0.96), transparent 42%),
+    linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(224, 242, 254, 0.94) 48%, rgba(219, 234, 254, 0.9)) !important;
+  color: #0f172a !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.95),
+    0 14px 34px -18px rgba(14, 116, 144, 0.55),
+    0 0 0 1px rgba(37, 99, 235, 0.1) !important;
+  ring-color: rgba(14, 116, 144, 0.18);
+}
+
+:root[data-theme="light"] .app-root :is(h1, h2, h3, h4, strong) {
+  color: var(--vi-text-0);
+}
+
+:root[data-theme="light"] .app-root :is(p, label, li, span) {
+  text-rendering: optimizeLegibility;
+}
+
+:root[data-theme="light"] .text-neutral-100,
+:root[data-theme="light"] .text-neutral-200,
+:root[data-theme="light"] .text-neutral-300 {
+  color: var(--vi-text-0) !important;
+}
+
+:root[data-theme="light"] .text-neutral-400,
+:root[data-theme="light"] .text-neutral-500 {
+  color: var(--vi-text-2) !important;
+}
+
+:root[data-theme="light"] .text-sky-100,
+:root[data-theme="light"] .text-sky-200,
+:root[data-theme="light"] .text-sky-300 {
+  color: #075985 !important;
+}
+
+:root[data-theme="light"] .text-amber-200,
+:root[data-theme="light"] .text-amber-300 {
+  color: #92400e !important;
+}
+
+:root[data-theme="light"] .text-emerald-200,
+:root[data-theme="light"] .text-emerald-300 {
+  color: #065f46 !important;
+}
+
+:root[data-theme="light"] .text-rose-200,
+:root[data-theme="light"] .text-rose-300 {
+  color: #be123c !important;
+}
+
+/* ---------- Navigation ---------- */
+:root[data-theme="light"] .vi-nav,
+:root[data-theme="light"] nav.fixed {
+  border-bottom: 1px solid var(--vi-border) !important;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(255, 255, 255, 0.72)) !important;
+}
+
+:root[data-theme="light"] .vi-nav-pill {
+  background: rgba(15, 23, 42, 0.03);
+}
+
+:root[data-theme="light"] .vi-nav-pill:hover {
+  background: rgba(15, 23, 42, 0.06);
+}
+
+:root[data-theme="light"] .vi-nav-pill--accent {
+  color: #0e7490;
+  border-color: rgba(8, 145, 178, 0.34);
+  background: rgba(8, 145, 178, 0.1);
+}
+
+:root[data-theme="light"] .vi-nav-pill--accent:hover {
+  border-color: rgba(8, 145, 178, 0.55);
+  background: rgba(8, 145, 178, 0.16);
+}
+
+/* ---------- White micro-overlays → dark overlays ---------- */
+:root[data-theme="light"] .vi-chip {
+  background: rgba(15, 23, 42, 0.03);
+  color: var(--vi-text-1);
+}
+:root[data-theme="light"] .vi-chip:hover {
+  background: rgba(15, 23, 42, 0.06);
+}
+:root[data-theme="light"] .vi-btn {
+  background: rgba(15, 23, 42, 0.04);
+}
+:root[data-theme="light"] .vi-btn:hover:not(:disabled),
+:root[data-theme="light"] .vi-btn--ghost:hover:not(:disabled) {
+  background: rgba(15, 23, 42, 0.07);
+}
+:root[data-theme="light"] .vi-icon-btn {
+  background: rgba(15, 23, 42, 0.03);
+}
+:root[data-theme="light"] .vi-icon-btn:hover:not(:disabled) {
+  background: rgba(15, 23, 42, 0.07);
+}
+:root[data-theme="light"] .vi-batch-row {
+  background: rgba(15, 23, 42, 0.02);
+}
+:root[data-theme="light"] .vi-batch-row:hover {
+  background: rgba(15, 23, 42, 0.05);
+}
+:root[data-theme="light"] .vi-status {
+  background: rgba(15, 23, 42, 0.04);
+  color: var(--vi-text-1);
+}
+:root[data-theme="light"] .vi-kv-cell {
+  background: rgba(15, 23, 42, 0.03);
+}
+:root[data-theme="light"] .vi-progress-track {
+  background: rgba(15, 23, 42, 0.08);
+}
+
+/* ---------- Panels / cards ---------- */
+:root[data-theme="light"] .panel-card {
+  border-color: var(--vi-border) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0)),
+    var(--vi-surface) !important;
+}
+
+:root[data-theme="light"] .config-field {
+  border: 1px solid var(--vi-border) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0)),
+    rgba(248, 250, 252, 0.9) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 10px 18px rgba(15, 23, 42, 0.06) !important;
+}
+
+:root[data-theme="light"] .config-field > label {
+  color: var(--vi-text-1);
+}
+:root[data-theme="light"] .config-field > p {
+  color: var(--vi-text-2);
+}
+
+:root[data-theme="light"] .vi-hero-title {
+  color: var(--vi-text-0);
+  text-shadow: 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+:root[data-theme="light"] .vi-hero-subtitle,
+:root[data-theme="light"] .vi-card-sub,
+:root[data-theme="light"] .vi-help,
+:root[data-theme="light"] .vi-drop-hint {
+  color: var(--vi-text-2);
+}
+
+:root[data-theme="light"] .vi-card-title,
+:root[data-theme="light"] .vi-drop-title,
+:root[data-theme="light"] .vi-label {
+  color: var(--vi-text-0);
+}
+
+:root[data-theme="light"] .vi-url-bar {
+  background: linear-gradient(140deg, rgba(14, 116, 144, 0.12), rgba(37, 99, 235, 0.1));
+  border-color: rgba(14, 116, 144, 0.34);
+}
+
+:root[data-theme="light"] .vi-input::placeholder,
+:root[data-theme="light"] .vi-textarea::placeholder {
+  color: #64748b;
+}
+
+:root[data-theme="light"] .feature-toggle {
+  border: 1px solid var(--vi-border) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.7), rgba(255, 255, 255, 0)),
+    rgba(248, 250, 252, 0.85) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6), 0 8px 16px rgba(15, 23, 42, 0.05) !important;
+}
+
+:root[data-theme="light"] .hero-chip {
+  background: linear-gradient(140deg, rgba(226, 232, 240, 0.7), rgba(241, 245, 249, 0.5));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 3px 8px rgba(15, 23, 42, 0.08);
+}
+
+/* ---------- Inputs / selects ---------- */
+:root[data-theme="light"] .vi-input,
+:root[data-theme="light"] .vi-textarea,
+:root[data-theme="light"] .vi-select {
+  background: rgba(255, 255, 255, 0.9);
+  border: 1px solid var(--vi-border);
+  color: var(--vi-text-0);
+}
+:root[data-theme="light"] .vi-input:focus,
+:root[data-theme="light"] .vi-textarea:focus,
+:root[data-theme="light"] .vi-select:focus {
+  background: #ffffff;
+}
+
+:root[data-theme="light"] .settings-select,
+:root[data-theme="light"] .settings-number-input {
+  background:
+    rgba(255, 255, 255, 0.95) padding-box,
+    linear-gradient(120deg, rgba(8, 145, 178, 0.4), rgba(37, 99, 235, 0.3)) border-box !important;
+  border-color: transparent !important;
+  color: var(--vi-text-0) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 6px 12px rgba(15, 23, 42, 0.05) !important;
+}
+:root[data-theme="light"] .settings-select option {
+  background: #ffffff;
+  color: var(--vi-text-0);
+}
+:root[data-theme="light"] .settings-stepper-btn {
+  background: linear-gradient(160deg, rgba(241, 245, 249, 0.95), rgba(226, 232, 240, 0.9));
+  border-color: var(--vi-border-strong);
+  color: #0e7490;
+}
+
+/* ---------- Dialogs / drawers / progress ---------- */
+:root[data-theme="light"] .vi-progress-card,
+:root[data-theme="light"] .progress-dialog-anim {
+  border-color: var(--vi-border-strong) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0)),
+    var(--vi-surface-solid) !important;
+  box-shadow: var(--vi-shadow-lg) !important;
+}
+
+:root[data-theme="light"] .history-drawer-panel,
+:root[data-theme="light"] aside#settings-drawer,
+:root[data-theme="light"] aside#history-drawer {
+  background: rgba(255, 255, 255, 0.97) !important;
+  border-color: var(--vi-border) !important;
+  color: var(--vi-text-1);
+}
+
+:root[data-theme="light"] .history-nav-btn,
+:root[data-theme="light"] .history-refresh-btn,
+:root[data-theme="light"] .zip-download-btn,
+:root[data-theme="light"] .clear-list-btn,
+:root[data-theme="light"] .steps-edit-cancel-btn {
+  background: linear-gradient(145deg, rgba(255, 255, 255, 0.95), rgba(241, 245, 249, 0.85)) !important;
+  border-color: var(--vi-border-strong) !important;
+  color: var(--vi-text-1) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7), 0 6px 14px rgba(15, 23, 42, 0.07) !important;
+}
+
+:root[data-theme="light"] .history-retention-note {
+  border-color: rgba(180, 83, 9, 0.28) !important;
+  background: linear-gradient(135deg, rgba(255, 251, 235, 0.96), rgba(254, 243, 199, 0.72)) !important;
+  color: #92400e !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
+}
+
+/* ---------- Markdown / result text ---------- */
+:root[data-theme="light"] .summary-only-markdown-content,
+:root[data-theme="light"] .standard-markdown-content {
+  color: var(--vi-text-1);
+}
+:root[data-theme="light"] .summary-only-markdown-content :is(h1, h2, h3, h4),
+:root[data-theme="light"] .standard-markdown-content :is(h1, h2, h3, h4),
+:root[data-theme="light"] .standard-markdown-content strong {
+  color: var(--vi-text-0);
+}
+:root[data-theme="light"] .summary-only-markdown-content blockquote,
+:root[data-theme="light"] .standard-markdown-content blockquote {
+  background: rgba(15, 23, 42, 0.04);
+  color: var(--vi-text-2);
+}
+:root[data-theme="light"] .summary-only-markdown-content :not(pre) > code,
+:root[data-theme="light"] .standard-markdown-content :not(pre) > code,
+:root[data-theme="light"] .summary-only-markdown-content pre,
+:root[data-theme="light"] .standard-markdown-content pre {
+  background: rgba(15, 23, 42, 0.05);
+  border-color: var(--vi-border);
+  color: #0e7490;
+}
+
+/* ---------- Status / badges (pale text → readable) ---------- */
+:root[data-theme="light"] .vi-status--ok {
+  color: #047857;
+  background: rgba(5, 150, 105, 0.12);
+}
+:root[data-theme="light"] .vi-status--fail {
+  color: #be123c;
+  background: rgba(225, 29, 72, 0.1);
+}
+:root[data-theme="light"] .vi-status--run {
+  color: #1d4ed8;
+  background: rgba(37, 99, 235, 0.12);
+}
+:root[data-theme="light"] .vi-btn--danger,
+:root[data-theme="light"] .vi-icon-btn--danger {
+  color: #be123c;
+  border-color: rgba(225, 29, 72, 0.4);
+  background: rgba(225, 29, 72, 0.07);
+}
+:root[data-theme="light"] .vi-required {
+  color: #e11d48;
+}
+:root[data-theme="light"] .vi-nav-pill--accent,
+:root[data-theme="light"] .vi-hero-eyebrow,
+:root[data-theme="light"] .vi-card-title-ico,
+:root[data-theme="light"] .vi-drop-icon,
+:root[data-theme="light"] .vi-url-bar__title {
+  color: #0e7490;
+}
+
+/* ---------- Scrollbars ---------- */
+:root[data-theme="light"] .history-scroll {
+  scrollbar-color: rgba(8, 145, 178, 0.45) rgba(15, 23, 42, 0.06);
+}
+:root[data-theme="light"] .history-scroll::-webkit-scrollbar-track {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background: linear-gradient(180deg, rgba(241, 245, 249, 0.9), rgba(226, 232, 240, 0.9));
+}
+:root[data-theme="light"] .history-scroll::-webkit-scrollbar-thumb {
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  background: linear-gradient(180deg, rgba(8, 145, 178, 0.6), rgba(37, 99, 235, 0.5));
+}
+
+/* ---------- App root background (let light body show through) ---------- */
+:root[data-theme="light"] .app-root {
+  background: transparent !important;
+  color: var(--vi-text-1) !important;
+}
+
+/* Decorative beams are tuned for dark; soften on light so they don't muddy */
+:root[data-theme="light"] .app-root > .pointer-events-none {
+  opacity: 0.55;
+  mix-blend-mode: multiply;
+}
+
+/* Panel cards on light: opaque-ish frosted white over the gradient body */
+:root[data-theme="light"] .panel-card {
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(255, 255, 255, 0.7)),
+    var(--vi-surface-solid) !important;
+}
+
+/* Inner dark Tailwind surfaces inside results / lists */
+:root[data-theme="light"] .list-item-pop,
+:root[data-theme="light"] .result-heavy-surface .bg-neutral-950\/60,
+:root[data-theme="light"] .steps-edit-input,
+:root[data-theme="light"] .steps-edit-textarea {
+  background: rgba(255, 255, 255, 0.92) !important;
+  border-color: var(--vi-border) !important;
+  color: var(--vi-text-1) !important;
+}
+
+/* ---------- Result steps: make title and content visually distinct ---------- */
+.readonly-step-card {
+  overflow: hidden;
+}
+
+.readonly-step-meta {
+  margin-bottom: 0.35rem;
+  letter-spacing: 0.02em;
+}
+
+/* Clickable step timestamp → seeks the subtitle video */
+.step-time-jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.1rem 0.45rem;
+  border-radius: 999px;
+  border: 1px solid rgba(125, 211, 252, 0.32);
+  background: rgba(34, 211, 238, 0.1);
+  color: #7dd3fc;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background-color 0.16s ease;
+}
+
+.step-time-jump:hover {
+  color: #e0f2fe;
+  border-color: rgba(125, 211, 252, 0.6);
+  background: rgba(34, 211, 238, 0.18);
+}
+
+.step-time-jump:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(34, 211, 238, 0.5);
+}
+
+/* Active subtitle line synced to the video playhead */
+.subtitle-line-row {
+  scroll-margin: 0.5rem;
+}
+
+.subtitle-line-row--active {
+  box-shadow: 0 0 0 1px rgba(45, 212, 191, 0.4), 0 6px 18px rgba(13, 148, 136, 0.22);
+}
+
+:root[data-theme="light"] .step-time-jump {
+  border-color: rgba(8, 145, 178, 0.4);
+  background: rgba(8, 145, 178, 0.1);
+  color: #0e7490;
+}
+
+:root[data-theme="light"] .step-time-jump:hover {
+  color: #155e75;
+  border-color: rgba(8, 145, 178, 0.6);
+  background: rgba(8, 145, 178, 0.16);
+}
+
+:root[data-theme="light"] .subtitle-line-row--active {
+  box-shadow: 0 0 0 1px rgba(13, 148, 136, 0.5), 0 6px 18px rgba(13, 148, 136, 0.16);
+}
+
+.readonly-step-title {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  margin-bottom: 0.45rem;
+  border-radius: 999px;
+  padding: 0.28rem 0.65rem;
+  background: linear-gradient(120deg, rgba(34, 211, 238, 0.16), rgba(96, 165, 250, 0.12));
+  color: #e0f2fe;
+  border: 1px solid rgba(125, 211, 252, 0.22);
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.readonly-step-desc {
+  border-left: 3px solid rgba(34, 211, 238, 0.34);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.65rem;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--vi-text-1);
+  line-height: 1.65;
+}
+
+:root[data-theme="light"] .readonly-step-card {
+  border-color: rgba(15, 23, 42, 0.14) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(248, 250, 252, 0.9)) !important;
+  box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+}
+
+:root[data-theme="light"] .readonly-step-meta {
+  color: #64748b !important;
+}
+
+:root[data-theme="light"] .readonly-step-title {
+  background: linear-gradient(120deg, rgba(14, 116, 144, 0.14), rgba(37, 99, 235, 0.12));
+  border-color: rgba(14, 116, 144, 0.34);
+  color: #0f172a !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75);
+}
+
+:root[data-theme="light"] .readonly-step-desc {
+  border-left-color: #2563eb;
+  background: rgba(241, 245, 249, 0.92);
+  color: #1e293b !important;
+}
+
+:root[data-theme="light"] .steps-edit-title-input {
+  border-color: rgba(14, 116, 144, 0.38) !important;
+  background: rgba(236, 254, 255, 0.82) !important;
+  color: #0f172a !important;
+  font-weight: 700;
+}
+
+:root[data-theme="light"] .steps-edit-desc-textarea {
+  border-left: 3px solid #2563eb !important;
+  background: rgba(248, 250, 252, 0.96) !important;
+  color: #1e293b !important;
+  line-height: 1.6;
+}
+
+/* ---------- Subtitle local refresh animation ---------- */
+.subtitle-refresh-anim {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 0.42rem;
+  height: 2.35rem;
+  overflow: hidden;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(45, 212, 191, 0.28);
+  background:
+    radial-gradient(circle at 18% 50%, rgba(45, 212, 191, 0.2), transparent 32%),
+    rgba(15, 23, 42, 0.54);
+  padding: 0 0.85rem;
+}
+
+.subtitle-refresh-anim__dot {
+  position: relative;
+  z-index: 1;
+  width: 0.48rem;
+  height: 0.48rem;
+  border-radius: 999px;
+  background: #5eead4;
+  box-shadow: 0 0 12px rgba(45, 212, 191, 0.75);
+  animation: subtitle-refresh-dot 0.92s ease-in-out infinite;
+}
+
+.subtitle-refresh-anim__dot:nth-child(2) {
+  animation-delay: 0.14s;
+}
+
+.subtitle-refresh-anim__dot:nth-child(3) {
+  animation-delay: 0.28s;
+}
+
+.subtitle-refresh-anim__track {
+  position: absolute;
+  left: 0.85rem;
+  right: 0.85rem;
+  bottom: 0.45rem;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(45, 212, 191, 0.16);
+}
+
+.subtitle-refresh-anim__track::after {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  left: -35%;
+  width: 35%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, #5eead4, #60a5fa, transparent);
+  animation: subtitle-refresh-track 1.35s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+}
+
+@keyframes subtitle-refresh-dot {
+  0%, 100% {
+    transform: translateY(0) scale(0.88);
+    opacity: 0.58;
+  }
+  45% {
+    transform: translateY(-0.34rem) scale(1.08);
+    opacity: 1;
+  }
+}
+
+@keyframes subtitle-refresh-track {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(385%);
+  }
+}
+
+:root[data-theme="light"] .subtitle-refresh-anim {
+  border-color: rgba(14, 116, 144, 0.28);
+  background:
+    radial-gradient(circle at 18% 50%, rgba(14, 165, 233, 0.16), transparent 34%),
+    rgba(239, 246, 255, 0.9);
+}
+
+:root[data-theme="light"] .subtitle-refresh-anim__dot {
+  background: #0e7490;
+  box-shadow: 0 0 12px rgba(14, 116, 144, 0.42);
+}
+
+:root[data-theme="light"] .subtitle-refresh-anim__track {
+  background: rgba(14, 116, 144, 0.14);
+}
+
+:root[data-theme="light"] .subtitle-refresh-anim__track::after {
+  background: linear-gradient(90deg, transparent, #0e7490, #2563eb, transparent);
+}
+
+:root[data-theme="light"] .subtitle-search-input {
+  border-color: rgba(14, 116, 144, 0.34) !important;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(240, 249, 255, 0.9)) padding-box,
+    linear-gradient(120deg, rgba(14, 116, 144, 0.42), rgba(37, 99, 235, 0.28)) border-box !important;
+  color: #0f172a !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 8px 18px rgba(15, 23, 42, 0.06) !important;
+}
+
+:root[data-theme="light"] .subtitle-search-input::placeholder {
+  color: #64748b !important;
+}
+
+:root[data-theme="light"] .subtitle-search-input:focus {
+  outline: none;
+  border-color: transparent !important;
+  background:
+    linear-gradient(180deg, #ffffff, rgba(240, 249, 255, 0.96)) padding-box,
+    linear-gradient(120deg, #0e7490, #2563eb) border-box !important;
+  box-shadow:
+    0 0 0 3px rgba(14, 165, 233, 0.18),
+    0 10px 22px rgba(14, 116, 144, 0.14) !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .subtitle-refresh-anim__dot,
+  .subtitle-refresh-anim__track::after {
+    animation: none;
+  }
+}
+
+/* ---------- Start-analyze button (primary CTA) ---------- */
+/* Wrapper pill around the analyze button */
+:root[data-theme="light"] .vi-cta > div {
+  background: linear-gradient(135deg, rgba(8, 47, 73, 0.2), rgba(30, 64, 175, 0.16)) !important;
+  box-shadow:
+    0 16px 34px -18px rgba(30, 64, 175, 0.62),
+    0 0 22px rgba(8, 145, 178, 0.22),
+    inset 0 0 0 1px rgba(14, 116, 144, 0.3) !important;
+}
+
+/* The button itself: dark gradient → vivid brand cyan→blue */
+:root[data-theme="light"] .start-analyze-btn {
+  background-image: linear-gradient(120deg, #0e7490 0%, #2563eb 48%, #4f46e5 100%) !important;
+  color: #ffffff !important;
+  box-shadow:
+    0 1px 0 0 rgba(255, 255, 255, 0.24) inset,
+    0 10px 24px -8px rgba(30, 64, 175, 0.72),
+    0 0 0 1px rgba(15, 23, 42, 0.1) !important;
+}
+
+:root[data-theme="light"] .start-analyze-btn:hover:not(:disabled) {
+  filter: brightness(1.08) saturate(1.14);
+}
+
+:root[data-theme="light"] .start-analyze-btn:disabled {
+  background-image: linear-gradient(120deg, #94a3b8 0%, #cbd5e1 100%) !important;
+  color: rgba(255, 255, 255, 0.85) !important;
+  box-shadow: none !important;
+}
+
+/* Animated wrapper (.analyze-action-btn) base shadow on light */
+:root[data-theme="light"] .analyze-action-btn {
+  box-shadow:
+    0 14px 28px -14px rgba(30, 64, 175, 0.68),
+    0 0 0 1px rgba(14, 116, 144, 0.38) inset !important;
+}
+
+/* Running state: dark→light gradient was near-white (invisible on light);
+   give it a visible cool-grey shimmer instead */
+:root[data-theme="light"] .analyze-action-btn.is-running {
+  background-image: linear-gradient(110deg, #e0f2fe 0%, #dbeafe 30%, #bfdbfe 52%, #e0e7ff 74%, #e0f2fe 100%) !important;
+  box-shadow:
+    0 10px 20px rgba(37, 99, 235, 0.18),
+    0 0 0 1px rgba(37, 99, 235, 0.2) inset !important;
 }

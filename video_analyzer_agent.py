@@ -1,4 +1,5 @@
-﻿import os
+﻿import asyncio
+import os
 import json
 import logging
 import subprocess
@@ -118,6 +119,7 @@ class VideoAnalyzerAgent:
         self.client = self.llm_client
         self.whisper_model = whisper_model
         self.whisper_threads = self._resolve_whisper_threads()
+        self.ffmpeg_cmd = self._prepare_ffmpeg_command()
         if transcriber is not None:
             self.transcriber = transcriber
         else:
@@ -125,11 +127,11 @@ class VideoAnalyzerAgent:
                 model_size=str(self.whisper_model or "base"),
                 threads=int(self.whisper_threads),
                 language="zh",
+                ffmpeg_cmd=self.ffmpeg_cmd,
             )
         self.whisper_backend = getattr(self.transcriber, "name", "faster_whisper")
         self._parsed_srt_cache_key: tuple[str, int, int] | None = None
         self._parsed_srt_cache_value: List[Dict[str, Any]] | None = None
-        self.ffmpeg_cmd = self._prepare_ffmpeg_command()
         try:
             self.SUBTITLE_CACHE_ROOT.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
@@ -417,6 +419,121 @@ class VideoAnalyzerAgent:
         self._save_subtitle_to_cache(video_file, srt_path, cache_identity=cache_identity)
         print(f"字幕已生成: {srt_path}")
         return str(srt_path)
+
+    # ========== 字幕 LLM 同音字纠错（可选增强，上下文感知） ==========
+
+    async def correct_subtitles_with_llm(
+        self,
+        srt_path: str,
+        *,
+        glossary: Optional[str] = None,
+        batch_size: int = 40,
+    ) -> int:
+        """对已生成的 SRT 字幕做一次 LLM 上下文同音字纠错并就地回写。
+
+        把字幕按批送给模型，要求"仅修正同音/近音错别字、不得改写语义"，
+        并通过长度比例护栏拒绝任何疑似改写，保证不会破坏原意。
+
+        :param srt_path: SRT 文件路径
+        :param glossary: 可选的正确术语提示（逗号/空格分隔），辅助模型判断
+        :param batch_size: 每次调用模型处理的字幕行数
+        :return: 实际被修正的字幕行数
+        """
+        from asr.subtitle_correct import (
+            apply_corrections,
+            build_correction_messages,
+            chunk_lines,
+            parse_correction_response,
+        )
+
+        path = Path(srt_path)
+        if not path.exists() or path.stat().st_size <= 0:
+            return 0
+
+        subtitles = self.parse_srt(srt_path)
+        if not subtitles:
+            return 0
+
+        texts = [str(sub.get("text", "") or "") for sub in subtitles]
+        glossary = glossary or os.getenv("SUBTITLE_CORRECT_GLOSSARY") or None
+
+        async def _correct_batch(batch):
+            messages = build_correction_messages(batch, glossary=glossary)
+            try:
+                reply = await self._chat_completion_text(messages, temperature=0.0)
+            except Exception as exc:  # noqa: BLE001 - never block on a bad batch
+                logging.warning("[correct_subtitles] 批次纠错调用失败，保留原文: %s", exc)
+                return {}
+            return parse_correction_response(reply)
+
+        batches = chunk_lines(texts, batch_size=batch_size)
+        print(f"正在对 {len(texts)} 行字幕做 LLM 同音字纠错（{len(batches)} 批）...")
+
+        batch_results = await asyncio.gather(
+            *(_correct_batch(batch) for batch in batches),
+            return_exceptions=True,
+        )
+
+        merged: Dict[int, str] = {}
+        for item in batch_results:
+            if isinstance(item, Exception):
+                logging.warning("[correct_subtitles] 批次异常，已跳过: %s", item)
+                continue
+            if isinstance(item, dict):
+                merged.update(item)
+
+        corrected_texts, changed = apply_corrections(texts, merged)
+        if changed <= 0:
+            print("字幕纠错完成：未发现需要修正的同音字。")
+            return 0
+
+        # 收集发生变化的行（带时间戳），用于记录复查日志 + 沉淀热词。
+        changes = [
+            {
+                "time": str(subtitles[i].get("start_time", "") or ""),
+                "original": texts[i],
+                "corrected": corrected_texts[i],
+            }
+            for i in range(len(texts))
+            if texts[i] != corrected_texts[i]
+        ]
+        try:
+            from asr.correction_log import record_and_learn
+
+            _written, added = record_and_learn(changes, video=Path(srt_path).stem)
+            if added:
+                print(f"已沉淀 {len(added)} 个新热词到方案A词表: {', '.join(added)}")
+        except Exception as exc:  # noqa: BLE001 - logging must never block纠错
+            logging.warning("[correct_subtitles] 纠错记录/热词沉淀失败: %s", exc)
+
+        self._rewrite_srt_text(srt_path, subtitles, corrected_texts)
+        # 字幕内容变了，让解析缓存失效，下游重新读取纠错后的文本。
+        self._parsed_srt_cache_key = None
+        self._parsed_srt_cache_value = None
+        print(f"字幕纠错完成：共修正 {changed} 行。")
+        return changed
+
+    def _rewrite_srt_text(
+        self,
+        srt_path: str,
+        subtitles: List[Dict[str, Any]],
+        new_texts: List[str],
+    ) -> None:
+        """用纠错后的文本就地重写 SRT，保留原有时间轴与序号。"""
+        from asr.base import SubtitleSegment
+        from asr import write_srt_file
+
+        segments: List[SubtitleSegment] = []
+        for sub, text in zip(subtitles, new_texts):
+            try:
+                start = float(sub.get("start_seconds", 0.0) or 0.0)
+                end = self.time_to_seconds(sub.get("end_time", sub.get("start_time", "00:00:00,000")))
+            except Exception:
+                start = float(sub.get("start_seconds", 0.0) or 0.0)
+                end = start
+            segments.append(SubtitleSegment(start=start, end=float(end), text=str(text)))
+        write_srt_file(Path(srt_path), segments)
+
     # ========== 字幕分析：识别操作步骤（默认模式，纯文本，便宜） ==========
 
     async def analyze_subtitles(self, srt_path: str) -> List[Dict]:
@@ -757,22 +874,31 @@ class VideoAnalyzerAgent:
         if srt_path and os.path.exists(srt_path):
             subtitles = self.parse_srt(srt_path)
 
+        raw_concurrency = str(os.getenv("VISION_MAX_CONCURRENCY", "")).strip()
+        try:
+            vision_concurrency = int(raw_concurrency) if raw_concurrency else 4
+        except (TypeError, ValueError):
+            vision_concurrency = 4
+        vision_concurrency = max(1, min(vision_concurrency, 8))
+        vision_semaphore = asyncio.Semaphore(vision_concurrency)
+
         print(
-            f"将对 {len(to_enhance)} 个低自信度步骤进行 AI 看图增强（最多 {max_calls} 次）"
+            f"将对 {len(to_enhance)} 个低自信度步骤进行 AI 看图增强"
+            f"（最多 {max_calls} 次，并发 {vision_concurrency}）"
         )
 
-        for idx, step in to_enhance:
+        async def _enhance_one(idx, step):
             step_num = step.get("step", idx + 1)
             confidence = step.get("confidence", 0)
             img_path = Path(image_dir) / f"step_{step_num:02d}.jpg"
 
             if not img_path.exists():
                 print(f"  步骤{step_num}: 截图不存在，跳过")
-                continue
+                return None
 
             if not step.get("title") or not step.get("description"):
                 print(f"  步骤{step_num}: 缺少 title 或 description，跳过")
-                continue
+                return None
 
             # 读取图片转 base64
             with open(img_path, "rb") as f:
@@ -815,7 +941,7 @@ class VideoAnalyzerAgent:
 
             print(f"  步骤{step_num} (confidence={confidence:.1f}): AI 看图分析中...")
 
-            try:
+            async with vision_semaphore:
                 result = await self._chat_completion_text(
                     [
                         {
@@ -825,17 +951,29 @@ class VideoAnalyzerAgent:
                         {"role": "user", "content": user_content},
                     ]
                 )
-                enhanced = self._parse_json_object_response(result)
+            enhanced = self._parse_json_object_response(result)
+            return idx, enhanced
 
-                old_title = steps[idx]["title"]
-                steps[idx]["title"] = enhanced.get("title", steps[idx]["title"])
-                steps[idx]["description"] = enhanced.get(
-                    "description", steps[idx]["description"]
-                )
-                steps[idx]["enhanced"] = True
-                print(f"    ✓ 已增强: 「{old_title}」→「{steps[idx]['title']}」")
-            except Exception as e:
-                print(f"    解析增强结果失败: {e}，保留原始结果")
+        enhance_results = await asyncio.gather(
+            *(_enhance_one(idx, step) for idx, step in to_enhance),
+            return_exceptions=True,
+        )
+        for item in enhance_results:
+            if isinstance(item, Exception):
+                print(f"    解析增强结果失败: {item}，保留原始结果")
+                continue
+            if not item:
+                continue
+            idx, enhanced = item
+            if not isinstance(enhanced, dict):
+                continue
+            old_title = steps[idx]["title"]
+            steps[idx]["title"] = enhanced.get("title", steps[idx]["title"])
+            steps[idx]["description"] = enhanced.get(
+                "description", steps[idx]["description"]
+            )
+            steps[idx]["enhanced"] = True
+            print(f"    ✓ 已增强: 「{old_title}」→「{steps[idx]['title']}」")
 
         return steps
 
@@ -886,11 +1024,28 @@ class VideoAnalyzerAgent:
 
     def _build_document_from_steps(self, steps: List[Dict], image_dir: str = "images") -> str:
         """Build a deterministic document from user-edited steps as a strict fallback."""
+        # 用最后一步的时间戳粗略估算预计耗时（不可解析时省略）。
+        estimated = ""
+        for step in reversed(steps):
+            raw_time = str(step.get("time", "") or "").strip()
+            if not raw_time:
+                continue
+            try:
+                total_seconds = self._parse_timestamp(raw_time)
+            except (TypeError, ValueError):
+                continue
+            minutes = max(1, round(total_seconds / 60))
+            estimated = f"约 {minutes} 分钟（按视频时长估算，实际操作可能更久）"
+            break
+
         lines: List[str] = [
             "# 操作步骤总结",
             "",
-            "## 概览",
-            f"- 共 {len(steps)} 个步骤。",
+            "## 概述",
+            f"- **适用人群**：需要按视频完成本套操作的读者",
+            "- **前置条件**：请提前准备好视频中涉及的账号、软件或权限",
+            f"- **预计耗时**：{estimated or '视实际操作熟练度而定'}",
+            f"- **简介**：本指南共 {len(steps)} 个步骤，按视频内容整理为可照做的操作流程。",
             "- 本文档按用户编辑后的步骤内容生成。",
             "",
         ]
@@ -974,7 +1129,11 @@ class VideoAnalyzerAgent:
 3. 操作说明要具体、准确，让读者能照着操作
 4. 结合联网搜索到的信息，补充更丰富的上下文（如软件介绍、功能说明、注意事项等）
 5. 如果有字幕内容，结合字幕让描述更加准确和详细
-6. 在文档开头添加一个简短的概述（可结合搜索到的产品介绍）
+6. 在文档开头添加结构化的「## 概述」章节，必须包含以下要点（用无序列表呈现，可结合搜索到的产品介绍）：
+   - **适用人群**：这份指南适合哪些读者
+   - **前置条件**：开始操作前需要准备的账号/软件/权限等
+   - **预计耗时**：完成全部步骤大约需要多长时间
+   - **简介**：一句话说明本指南能帮读者完成什么
 7. 保持语言简洁专业
 8. 在文档末尾添加「## 参考资料」章节，列出所有搜索引用的信息来源（标题+链接）
 9. 直接返回 Markdown 内容，不要添加其他说明"""
@@ -986,7 +1145,11 @@ class VideoAnalyzerAgent:
 2. 每个步骤包含：标题（## 步骤 X：标题）、截图、详细操作说明
 3. 操作说明要具体、准确，让读者能照着操作
 4. 如果有字幕内容，结合字幕让描述更加准确和详细
-5. 在文档开头添加一个简短的概述
+5. 在文档开头添加结构化的「## 概述」章节，必须包含以下要点（用无序列表呈现）：
+   - **适用人群**：这份指南适合哪些读者
+   - **前置条件**：开始操作前需要准备的账号/软件/权限等
+   - **预计耗时**：完成全部步骤大约需要多长时间
+   - **简介**：一句话说明本指南能帮读者完成什么
 6. 保持语言简洁专业
 7. 直接返回 Markdown 内容，不要添加其他说明"""
 
@@ -1080,13 +1243,45 @@ IMPORTANT:
 
     def generate_pdf(self, md_path: str, pdf_path: str = None) -> str:
         """
-        将 Markdown 文档转换为 PDF（图片嵌入）
+        将 Markdown 文档转换为 PDF。
+
+        优先使用 Playwright（Chromium 无头浏览器）渲染：完整保留表格、代码块、
+        嵌套列表、链接样式与中文排版。Chromium 不可用时自动回退到 FPDF 逐行渲染，
+        保证任何环境下都能出 PDF。
+
+        可用 PDF_RENDER_ENGINE=fpdf 强制走旧引擎；默认 auto（优先 Playwright）。
+        :param md_path: Markdown 文件路径
+        :param pdf_path: PDF 输出路径（默认同名 .pdf）
+        :return: PDF 文件路径
+        """
+        if not pdf_path:
+            pdf_path = str(Path(md_path).with_suffix(".pdf"))
+
+        engine = str(os.getenv("PDF_RENDER_ENGINE", "auto")).strip().lower()
+        if engine != "fpdf":
+            try:
+                from services import pdf_render
+
+                if pdf_render.render_markdown_to_pdf(md_path, pdf_path):
+                    print(f"PDF 文档已生成 (Chromium): {pdf_path}")
+                    return pdf_path
+                logging.info("Playwright 渲染不可用，回退 FPDF 引擎。")
+            except Exception as exc:
+                logging.warning("Playwright 渲染异常，回退 FPDF: %s", str(exc)[:200])
+
+        return self._generate_pdf_fpdf(md_path, pdf_path)
+
+    def _generate_pdf_fpdf(self, md_path: str, pdf_path: str = None) -> str:
+        """
+        将 Markdown 文档转换为 PDF（FPDF 逐行渲染，图片嵌入）。
+        作为 Playwright 渲染不可用时的兜底实现。
         :param md_path: Markdown 文件路径
         :param pdf_path: PDF 输出路径（默认同名 .pdf）
         :return: PDF 文件路径
         """
         import markdown
         from fpdf import FPDF, XPos, YPos
+        from PIL import Image
 
         if not pdf_path:
             pdf_path = str(Path(md_path).with_suffix(".pdf"))
@@ -1107,9 +1302,14 @@ IMPORTANT:
 
         class PDF(FPDF):
             def header(self):
+                # 仅第一页保留 "Video Analysis" 标题，其余页面不重复标题，
+                # 内容直接从顶部边距开始，避免每页顶部留出大段空白。
+                if self.page_no() != 1:
+                    return
                 self.set_font(font_family, "B", 15)
-                self.cell(0, 10, "Video Analysis", border=False, align="C")
-                self.ln(20)
+                self.cell(0, 10, "Video Analysis", border=False, align="C",
+                          new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+                self.ln(4)
 
         pdf = PDF()
 
@@ -1207,6 +1407,10 @@ IMPORTANT:
                 pdf.ln(5)
             elif line.startswith("=="):
                 title = line.strip("= ").strip()
+                # 每个步骤标题前另起一页，保证“步骤标题 + 截图 + 操作说明”
+                # 始终落在同一页，而不是截图与说明被拆到相邻两页。
+                if pdf.get_y() > pdf.t_margin + 1:
+                    pdf.add_page()
                 pdf.set_font(current_font, "B", 14)
                 pdf.set_text_color(44, 62, 80)
                 pdf.cell(0, 8, title, border=False, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
@@ -1224,7 +1428,22 @@ IMPORTANT:
                     img_full_path = base_dir / img_path
                     if img_full_path.exists():
                         try:
-                            pdf.image(str(img_full_path), w=170)
+                            # 同时按可用宽度与最大高度约束尺寸：竖屏手机截图
+                            # 很高，若只限宽会撑满整页把操作说明挤到下一页。
+                            # 这里限制图片高度，并水平居中，让标题/图/说明同页。
+                            epw = pdf.w - pdf.l_margin - pdf.r_margin
+                            max_w = min(epw, 90.0)
+                            max_h = 150.0
+                            with Image.open(img_full_path) as im:
+                                iw, ih = im.size
+                            ratio = (iw / ih) if ih else 1.0
+                            draw_w = max_w
+                            draw_h = draw_w / ratio if ratio else max_h
+                            if draw_h > max_h:
+                                draw_h = max_h
+                                draw_w = draw_h * ratio
+                            x = pdf.l_margin + (epw - draw_w) / 2.0
+                            pdf.image(str(img_full_path), x=x, w=draw_w, h=draw_h)
                             pdf.ln(3)
                         except Exception:
                             pdf.cell(

@@ -2,14 +2,16 @@
 
 这是一个用于"项目效果展示"的 React 单页应用，沿用与 React Bits 的 `<DarkVeil />`
 组件相同的技术栈（**React 19 + Vite + 原生 CSS + ogl + react-router-dom**），
-首页是一个全屏 DarkVeil 的着陆页，点击 "开始演示" 才进入完整的演示内容。
+首页是一个全屏 DarkVeil 的着陆页，提供「开始使用」（跳转线上工作台）、「观看演示」（进入完整演示内容）与「查看源码」三个入口。
+
+> 「开始使用」的线上地址在 [`src/pages/LandingPage.jsx`](src/pages/LandingPage.jsx) 顶部的 `APP_URL` 常量里配置，部署完成后替换即可。
 
 ## 路由
 
 | 路径 | 页面 | 说明 |
 |------|------|------|
-| `/` | LandingPage | 首页着陆页：DarkVeil 全屏 + 品牌 + 主标语 + CTA |
-| `/showcase` | ShowcasePage | 详细演示：Hero / 能力 / 工作台 / Pipeline / Result / Tech |
+| `/` | LandingPage | 首页着陆页：DarkVeil 全屏 + 品牌 + 主标语 + CTA（开始使用 / 观看演示 / 查看源码） |
+| `/showcase` | ShowcasePage | 详细演示：导览 / 能力 / 工作台 / Pipeline / Result / Tech |
 | 其它 | → `/` | 兜底重定向 |
 
 ## 技术栈

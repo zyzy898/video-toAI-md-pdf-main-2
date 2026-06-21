@@ -3,6 +3,7 @@
  */
 export const navLinks = [
   { href: '#intro', label: '导览', mobileLabel: '页面导览' },
+  { href: '#showdown', label: '效果对照', mobileLabel: '输入↔输出对照' },
   { href: '#capabilities', label: '能力', mobileLabel: '核心能力' },
   { href: '#workspace', label: '工作台', mobileLabel: '工作台预览' },
   { href: '#pipeline', label: '处理链路', mobileLabel: '处理链路' },

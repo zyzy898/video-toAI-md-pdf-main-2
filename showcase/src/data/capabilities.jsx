@@ -51,11 +51,12 @@ export const capabilities = [
   {
     tag: '字幕',
     Icon: SubtitleIcon,
-    title: '字幕工作台',
-    desc: 'Whisper 常驻 + CLI 兜底，一键导出 SRT / VTT / TXT；可关键词检索字幕，点哪行视频跳哪行。',
+    title: '高精度字幕工作台',
+    desc: 'faster-whisper（CTranslate2）常驻转写，三层精度增强叠加：ffmpeg 降噪归一化 + 热词偏置 + LLM 同音字纠错；一键导出 SRT / VTT / TXT，可关键词检索、点哪行视频跳哪行。',
     tags: [
-      { label: 'SRT · VTT · TXT', accent: true },
-      { label: '关键词检索' },
+      { label: '同音字纠错', accent: true },
+      { label: '降噪归一化' },
+      { label: 'SRT · VTT · TXT' },
       { label: '点选跳转' }
     ]
   },

@@ -4,6 +4,14 @@ import TextType from '../components/TextType/TextType.jsx';
 import { PlayIcon, ArrowRightIcon } from '../components/icons/Icons.jsx';
 import useFadeUpReveal from '../hooks/useFadeUpReveal.js';
 import useIsMobile from '../hooks/useIsMobile.js';
+import useTheme from '../hooks/useTheme.js';
+
+/**
+ * 「开始使用」按钮跳转的线上工作台地址。
+ * TODO: 部署完成后替换为真实的线上地址（例如 https://your-app.example.com）。
+ */
+const APP_URL = '#';
+
 const heroChips = [
   'AI 视频理解',
   'Whisper ASR',
@@ -26,12 +34,13 @@ const heroStats = [
 export default function LandingPage() {
   useFadeUpReveal();
   const isMobile = useIsMobile(768);
+  const [theme] = useTheme();
 
   return (
     <div className="landing">
-      {/* DarkVeil 占满整个 landing：使用文档示例同款参数，不在上面叠暗罩 */}
+      {/* DarkVeil 占满整个 landing：明主题下传 lightMix 让背景反相为浅色 */}
       <div className="landing-bg" aria-hidden="true">
-        <DarkVeil hueShift={43} speed={isMobile ? 0.5 : 0.7} />
+        <DarkVeil hueShift={43} speed={isMobile ? 0.5 : 0.7} lightMix={theme === 'light' ? 1 : 0} />
       </div>
 
       <main className="landing-main">
@@ -69,19 +78,19 @@ export default function LandingPage() {
         </div>
 
         <div className="landing-cta fade-up delay-3">
-          <Link to="/showcase" className="btn btn--primary btn--xl">
-            <PlayIcon />
-            开始演示
-          </Link>
           <a
-            href="https://github.com/zyzy898/video-toAI-md-pdf-main-2"
+            href={APP_URL}
             target="_blank"
             rel="noreferrer"
-            className="btn btn--xl btn--ghost"
+            className="btn btn--primary btn--xl"
           >
-            查看源码
-            <ArrowRightIcon />
+            <PlayIcon />
+            开始使用
           </a>
+          <Link to="/showcase" className="btn btn--xl btn--ghost">
+            观看演示
+            <ArrowRightIcon />
+          </Link>
         </div>
 
         <div className="landing-stats fade-up delay-3">

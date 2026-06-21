@@ -32,7 +32,7 @@ function splitByKeyword(text, keyword) {
 }
 
 export default function Result() {
-  const [keyword, setKeyword] = useState('点击');
+  const [keyword, setKeyword] = useState('招聘');
   const [activeStepId, setActiveStepId] = useState(null);
   const mdContainerRef = useRef(null);
 
@@ -81,7 +81,7 @@ export default function Result() {
           <span className="section-tag">REAL OUTPUT SAMPLE</span>
           <h2 className="section-title">分析结果 · 真实输出样例</h2>
           <p className="section-sub">
-            一份典型的"产品操作演示"分析结果：步骤、截图、Markdown 文档与字幕工作台一站式呈现。
+            一份真实的"高效求职渠道指南"分析结果：步骤、截图、Markdown 文档与字幕工作台一站式呈现，可直接下载体验。
           </p>
         </div>
 
@@ -135,35 +135,39 @@ export default function Result() {
                 </span>
                 生成的总结文档
               </div>
-              <button className="btn" style={{ fontSize: '0.76rem', padding: '0.4rem 0.7rem' }}>
+              <a
+                className="btn"
+                style={{ fontSize: '0.76rem', padding: '0.4rem 0.7rem' }}
+                href="/sample/operation_guide.pdf"
+                target="_blank"
+                rel="noreferrer"
+                download
+              >
                 <DownloadIcon />
-                下载 ZIP
-              </button>
+                下载 PDF
+              </a>
             </div>
             <div className="md" ref={mdContainerRef}>
-              <h1>产品操作演示 · 完整使用指南</h1>
+              <h1>高效求职渠道操作指南</h1>
               <blockquote>
-                本文档由 <strong>Video Insights</strong> 自动生成。原视频时长约 <code>03:24</code>，识别 6
-                个核心操作步骤，附 4 张关键截图。
+                本文档由 <strong>Video Insights</strong> 自动生成。原视频时长约 <code>02:28</code>，识别 6
+                个核心操作步骤，附 6 张关键截图。
               </blockquote>
 
               <h2>📖 概述</h2>
-              <p>
-                本视频演示了如何使用客户端从零完成首次项目分析，覆盖账号登录、项目创建、分析参数配置、结果回看与编辑导出五个主要场景。
-              </p>
-
-              <h2>🎯 关键要点</h2>
               <ul>
                 <li>
-                  登录后建议立即在设置中开启 <strong>多设备绑定</strong>，避免后续切换设备频繁验证。
+                  <strong>适用人群</strong>：在校大学生、应届生、待业求职者、计划换工作的在职人员，有求职、找实习需求的所有人群
                 </li>
                 <li>
-                  素材导入后会自动生成预览缩略图，<strong>缩略图加载即代表素材就绪</strong>。
+                  <strong>前置条件</strong>：可正常使用的微信、小红书、脉脉/领英账号，可正常访问网页的网络环境
                 </li>
                 <li>
-                  分析参数中"视频理解"成本更高但准确度更好，<strong>建议短视频开启</strong>。
+                  <strong>预计耗时</strong>：15~30 分钟（不含岗位筛选、简历投递时间）
                 </li>
-                <li>历史抽屉按客户端隔离，本机历史不会与其他设备混淆。</li>
+                <li>
+                  <strong>简介</strong>：本指南分享 6 个小众靠谱的求职渠道，帮助用户规避低含金量岗位，降低求职竞争，提高简历投递成功率。
+                </li>
               </ul>
 
               <h2>📝 操作步骤</h2>
@@ -187,13 +191,13 @@ export default function Result() {
               <h2>🧾 文档信息</h2>
               <ul>
                 <li>
-                  生成时间：<code>2026-05-13 21:54</code>
+                  生成时间：<code>2026-06-21 19:14</code>
                 </li>
                 <li>分析模式：字幕模式 + 视觉增强</li>
                 <li>
-                  输出目录：<code>{'outputs/<video>_<timestamp>/'}</code>
+                  输出目录：<code>outputs/test2_5_20260621_191017/</code>
                 </li>
-                <li>包含资源：operation_guide.md · operation_guide.pdf · steps.json · 4 张截图 · 字幕 SRT / VTT / TXT</li>
+                <li>包含资源：operation_guide.md · operation_guide.pdf · steps.json · 6 张截图 · 字幕 SRT / VTT / TXT</li>
               </ul>
             </div>
           </div>
@@ -210,13 +214,17 @@ export default function Result() {
             </div>
             <div style={{ display: 'flex', gap: '0.45rem' }}>
               {['SRT', 'VTT', 'TXT'].map((fmt) => (
-                <button
+                <a
                   key={fmt}
                   className="btn"
                   style={{ fontSize: '0.74rem', padding: '0.36rem 0.65rem' }}
+                  href={`/sample/subtitles.${fmt.toLowerCase()}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  download
                 >
                   导出 {fmt}
-                </button>
+                </a>
               ))}
             </div>
           </div>
@@ -286,7 +294,7 @@ export default function Result() {
           <div style={{ display: 'grid', gap: '0.3rem', fontSize: '0.78rem', color: 'var(--vi-text-3)' }}>
             <p style={{ margin: 0 }}>阶段：vision_enhance · 第 4/6 步</p>
             <p style={{ margin: 0, color: 'rgba(94, 234, 212, 0.9)' }}>
-              当前文件：tutorial_setup_walkthrough.mp4
+              当前文件：test2_5.mp4
             </p>
           </div>
         </div>

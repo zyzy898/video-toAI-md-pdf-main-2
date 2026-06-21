@@ -28,8 +28,20 @@ scrapling[fetchers]>=0.4.0
 # =========================
 faster-whisper>=1.0.0
 
+# Traditional -> Simplified Chinese normalisation for transcripts
+zhconv>=1.4.3
+
+# Chinese word segmentation for subtitle-correction term extraction (Plan A feedback loop)
+jieba>=0.42.1
+
 # =========================
 # Document generation
 # =========================
 markdown>=3.5.0
 fpdf2>=2.7.0
+# Image sizing for PDF embedding (constrain screenshot height)
+Pillow>=10.0.0
+# High-fidelity Markdown -> PDF via headless Chromium (tables/code/CJK layout).
+# Optional: when absent, generate_pdf falls back to the FPDF renderer.
+# First-time setup also needs the browser binary:  python -m playwright install chromium
+playwright>=1.40.0

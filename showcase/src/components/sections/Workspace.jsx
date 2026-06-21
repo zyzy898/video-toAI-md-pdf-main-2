@@ -2,39 +2,37 @@ import {
   PlayIcon,
   UploadIcon,
   ClockIcon,
-  SettingsIcon,
   InboxIcon,
   CheckIcon,
   SubtitleIcon,
-  EditIcon
+  SunIcon
 } from '../icons/Icons.jsx';
 
-const chips = ['Whisper ASR', '批量处理', 'Markdown · PDF', '链接直达'];
+const chips = ['Whisper ASR', '批量处理', 'Markdown · PDF 导出', '链接直达分析'];
 
-const kvUpload = [
-  { label: '标准推荐', value: '20 分钟 · 250 MB 以内', help: '处理速度与稳定性最佳' },
-  { label: '长视频模式', value: '自动切片 · 自动压缩', help: '20 分钟 / 250 MB+ 自动进入' },
-  { label: '超长视频', value: '建议先裁剪', help: '90 分钟+ 请拆分' },
-  { label: '批量上限', value: '5 个 / 含长视频 ≤ 2', help: '稳定性优先' }
-];
-
+// 真实进度浮层字段（取自 web-react 的 STAGE_LABELS / 进度对话框）
 const kvProgress = [
-  { label: '阶段', value: 'vision_enhance', help: '视觉增强标题与描述' },
+  { label: '阶段', value: '视觉增强', help: 'vision · 提升低置信步骤' },
   { label: '已完成', value: '2 个', help: '输出包就绪可下载', valueColor: '#6ee7b7' },
   { label: '失败', value: '0 个', help: '超长视频会自动降级', valueColor: '#fda4af' },
   {
     label: '当前文件',
-    value: 'product_demo…',
+    value: 'test2_5.mp4',
     help: '视觉增强 · 第 4/6 步',
     valueStyle: { fontSize: '0.8rem', color: 'rgba(165, 243, 252, 0.95)' }
   }
 ];
 
-const kvAnalysis = [
-  { label: 'Provider', value: 'Ark · Doubao' },
-  { label: 'Whisper', value: 'base' },
-  { label: '视觉增强', value: '最多 10 次' },
-  { label: '视频模式', value: '字幕分析' }
+// 真实处理阶段（取自 web-react STAGE_LABELS 顺序），演示停在"视觉增强"
+const stageFlow = [
+  { label: '上传中', state: 'done' },
+  { label: '安全检测', state: 'done' },
+  { label: '字幕识别', state: 'done' },
+  { label: '内容分析', state: 'done' },
+  { label: '截图生成', state: 'done' },
+  { label: '视觉增强', state: 'active' },
+  { label: '文档生成', state: 'idle' },
+  { label: 'PDF 生成', state: 'idle' }
 ];
 
 export default function Workspace() {
@@ -45,7 +43,7 @@ export default function Workspace() {
           <span className="section-tag">WORKSPACE PREVIEW</span>
           <h2 className="section-title">前端工作台 · 实际界面预览</h2>
           <p className="section-sub">
-            React 19 + TypeScript + Vite + Tailwind 4 构建。深色科技感视觉，支持移动性能模式自动降级。
+            React 19 + TypeScript + Vite + Tailwind 4 构建。模型配置由后端 .env 统一托管，前端专注上传、进度与结果。支持移动性能模式自动降级。
           </p>
         </div>
 
@@ -75,8 +73,8 @@ export default function Workspace() {
               </span>
               <div className="nav-links">
                 <span className="nav-pill">
-                  <SettingsIcon className="ico-sm" />
-                  设置
+                  <SunIcon className="ico-sm" />
+                  亮色
                 </span>
                 <span className="nav-pill nav-pill--accent">
                   <ClockIcon className="ico-sm" />
@@ -92,7 +90,7 @@ export default function Workspace() {
                 视频转文档，<span className="accent-text">不止提取，更是理解</span>
               </h2>
               <p className="ws-hero-sub">
-                AI 自动分析视频内容，抓取关键截图，拆解核心步骤，输出结构清晰、重点明确的总结文档。
+                AI 自动分析视频内容，抓取关键截图，拆解核心步骤，输出结构清晰、重点明确的总结文档。让信息沉淀更高效 — Turn insights into docs.
               </p>
               <div className="hero-chips" style={{ marginTop: '1.1rem' }}>
                 {chips.map((c) => (
@@ -142,26 +140,6 @@ export default function Workspace() {
                       链接直达分析
                     </button>
                   </div>
-                  <p
-                    style={{
-                      margin: 0,
-                      color: 'rgba(186, 230, 253, 0.78)',
-                      fontSize: '0.72rem'
-                    }}
-                  >
-                    只需提供链接即可下载并分析；平台播放页链接建议安装{' '}
-                    <code
-                      style={{
-                        background: 'rgba(2,6,23,0.5)',
-                        padding: '0.05em 0.32em',
-                        borderRadius: '0.25rem',
-                        border: '1px solid var(--vi-border)'
-                      }}
-                    >
-                      yt-dlp
-                    </code>{' '}
-                    提升兼容性。
-                  </p>
                 </div>
 
                 <div className="drop">
@@ -172,29 +150,19 @@ export default function Workspace() {
                   <p className="drop-hint">支持 MP4 / AVI / MOV / MKV / WMV / FLV / WebM / M4V 等</p>
                 </div>
 
-                <div className="kv-grid" style={{ marginTop: '0.9rem' }}>
-                  {kvUpload.map((kv) => (
-                    <div key={kv.label} className="kv-cell">
-                      <div className="kv-label">{kv.label}</div>
-                      <div className="kv-value">{kv.value}</div>
-                      <p className="kv-help">{kv.help}</p>
-                    </div>
-                  ))}
-                </div>
-
                 <div className="files" style={{ marginTop: '0.85rem' }}>
                   <FileRow
-                    name="tutorial_setup_walkthrough.mp4"
-                    info="分析完成 · 6 步骤 · 4 张截图 · 字幕 132 行"
+                    name="test2_5.mp4"
+                    info="分析完成 · 6 步骤 · 6 张截图 · 字幕 111 行"
                     state="ok"
                   />
                   <FileRow
-                    name="product_demo_release_notes.mp4"
+                    name="product_demo_release.mp4"
                     info="阶段：视觉增强中 · 进度 64%"
                     state="run"
                   />
                   <FileRow
-                    name="onboarding_screencast_v3.mov"
+                    name="onboarding_screencast.mov"
                     info="已上传 · 等待批次启动"
                     state="idle"
                   />
@@ -203,7 +171,7 @@ export default function Workspace() {
                 <div className="cta-row">
                   <button className="btn btn--primary">
                     <PlayIcon />
-                    开始分析（3 个文件）
+                    开始分析
                   </button>
                 </div>
               </div>
@@ -265,20 +233,25 @@ export default function Workspace() {
 
                 <div className="divider"></div>
 
-                <div className="card-head" style={{ marginBottom: '0.7rem' }}>
+                <div className="card-head" style={{ marginBottom: '0.6rem' }}>
                   <div className="card-title" style={{ fontSize: '0.92rem' }}>
                     <span className="card-title-ico">
-                      <EditIcon />
+                      <ClockIcon />
                     </span>
-                    分析参数
+                    处理阶段
                   </div>
                 </div>
-                <div className="kv-grid">
-                  {kvAnalysis.map((kv) => (
-                    <div key={kv.label} className="kv-cell">
-                      <div className="kv-label">{kv.label}</div>
-                      <div className="kv-value">{kv.value}</div>
-                    </div>
+                <div className="ws-stage-flow">
+                  {stageFlow.map((s) => (
+                    <span
+                      key={s.label}
+                      className={`ws-stage-chip${s.state === 'done' ? ' ws-stage-chip--done' : ''}${
+                        s.state === 'active' ? ' ws-stage-chip--active' : ''
+                      }`}
+                    >
+                      {s.state === 'done' && <CheckIcon className="ico-sm" />}
+                      {s.label}
+                    </span>
                   ))}
                 </div>
               </div>

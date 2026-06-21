@@ -2,6 +2,7 @@ import { useEffect } from 'react';
 import DarkVeil from '../components/DarkVeil/DarkVeil.jsx';
 import Footer from '../components/Footer.jsx';
 import ShowcaseIntro from '../components/sections/ShowcaseIntro.jsx';
+import Showdown from '../components/sections/Showdown.jsx';
 import Capabilities from '../components/sections/Capabilities.jsx';
 import Workspace from '../components/sections/Workspace.jsx';
 import Pipeline from '../components/sections/Pipeline.jsx';
@@ -11,6 +12,7 @@ import useFadeUpReveal from '../hooks/useFadeUpReveal.js';
 import useSmoothAnchor from '../hooks/useSmoothAnchor.js';
 import useSectionReveal from '../hooks/useSectionReveal.js';
 import useIsMobile from '../hooks/useIsMobile.js';
+import useTheme from '../hooks/useTheme.js';
 
 /**
  * /showcase · 详细演示页
@@ -22,6 +24,7 @@ export default function ShowcasePage() {
   useSmoothAnchor();
   useSectionReveal();
   const isMobile = useIsMobile(768);
+  const [theme] = useTheme();
 
   // 给 body 临时加 .has-snap 类，启用整页 scroll-snap，离开 /showcase 路由时自动移除
   useEffect(() => {
@@ -32,10 +35,14 @@ export default function ShowcasePage() {
   return (
     <div className="showcase-page">
       <div className="darkveil-bg" aria-hidden="true">
-        <DarkVeil hueShift={43} speed={isMobile ? 0.5 : 0.7} />
+        <DarkVeil hueShift={43} speed={isMobile ? 0.5 : 0.7} lightMix={theme === 'light' ? 1 : 0} />
       </div>
 
       <ShowcaseIntro />
+
+      <SectionWrapper variant="scale">
+        <Showdown />
+      </SectionWrapper>
 
       <SectionWrapper variant="up">
         <Capabilities />
