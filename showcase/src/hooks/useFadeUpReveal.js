@@ -21,7 +21,9 @@ export default function useFadeUpReveal() {
           }
         });
       },
-      { threshold: 0.12 }
+      // threshold 0：任何一部分进入视口即触发，避免比视口高很多的元素
+      // 永远达不到阈值而停在隐藏态（同 useSectionReveal）。
+      { threshold: 0, rootMargin: '0px 0px -8% 0px' }
     );
 
     document.querySelectorAll('.fade-up').forEach((el) => observer.observe(el));

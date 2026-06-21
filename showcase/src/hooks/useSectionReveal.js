@@ -28,7 +28,11 @@ export default function useSectionReveal() {
         });
       },
       {
-        threshold: 0.12,
+        // 用 0 而不是 0.12：内容富集的 section（如 Result：6 步截图 + 117 行字幕，
+        // 手机端 max-height 解除后高度可达 6000px+）在窄视口里最大可见比例都
+        // 达不到 12%，会导致 isIntersecting 永远为 false → 永远停在 opacity:0。
+        // 任何一部分进入视口就触发，杜绝"整段不显示"。
+        threshold: 0,
         // 提前一点触发，让滚动节奏更自然
         rootMargin: '0px 0px -8% 0px'
       }
