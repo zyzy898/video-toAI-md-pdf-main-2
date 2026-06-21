@@ -152,17 +152,7 @@ class FasterWhisperBackend(TranscriberBackend):
             cached = self._model_cache.get(cache_key)
             if cached is not None:
                 return cached
-            try:
-                model = WhisperModel(  # type: ignore[misc]
-                    self.model_size,
-                    device=self.device,
-                    compute_type=self.compute_type,
-                    cpu_threads=self.threads,
-                )
-            except Exception as exc:
-                raise TranscriberInitError(
-                    f"faster-whisper 初始化失败: {exc}"
-                ) from exc
+            model = self._load_model()
             self._model_cache[cache_key] = model
             logging.info(
                 "faster-whisper 模型已加载: %s (device=%s, compute=%s, threads=%s)",
@@ -172,6 +162,35 @@ class FasterWhisperBackend(TranscriberBackend):
                 self.threads,
             )
             return model
+
+    def _load_model(self):
+        """加载 WhisperModel：优先离线读本地缓存（绕开代理/网络问题），
+        本地无缓存时再尝试联网下载。"""
+        kwargs = dict(
+            device=self.device,
+            compute_type=self.compute_type,
+            cpu_threads=self.threads,
+        )
+        # 1) 离线优先：模型已缓存时直接用本地文件，不触网（避免被系统代理/SSL 中断）。
+        try:
+            return WhisperModel(  # type: ignore[misc]
+                self.model_size, local_files_only=True, **kwargs
+            )
+        except Exception as offline_exc:
+            logging.info(
+                "faster-whisper 本地缓存未命中（%s），尝试联网下载: %s",
+                self.model_size,
+                offline_exc,
+            )
+        # 2) 回退：联网下载（首次使用或缓存缺失时）。
+        try:
+            return WhisperModel(  # type: ignore[misc]
+                self.model_size, local_files_only=False, **kwargs
+            )
+        except Exception as exc:
+            raise TranscriberInitError(
+                f"faster-whisper 初始化失败: {exc}"
+            ) from exc
 
     def transcribe(self, video_path: Path, *, language: str = "zh") -> TranscribeResult:
         video_path = Path(video_path)

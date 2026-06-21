@@ -79,9 +79,14 @@ DEFAULT_UPLOAD_CHUNK_SIZE = 8 * 1024 * 1024
 MAX_UPLOAD_CHUNK_SIZE = 32 * 1024 * 1024
 UPLOAD_IN_MEMORY_MAX_FILE_SIZE = 64 * 1024 * 1024
 UPLOAD_IN_MEMORY_MAX_TOTAL_BYTES = 256 * 1024 * 1024
-DEFAULT_MODEL_NAME = "doubao-seed-2-0-pro-260215"
-DEFAULT_MODEL_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-WEB_SEARCH_ACTIVATION_URL = "https://console.volcengine.com/common-buy/CC_content_plugin"
+# 模型配置一律以 .env 为准，绝不写死模型名称/地址。
+# 未在 .env 中配置时，这里解析为空字符串，由调用方在使用时报错并提示前端补全配置。
+# 注意：本项目的视觉风控 / 视频理解依赖「视觉模型（支持图片输入）」，
+# 请在 .env 的 MODEL_NAME 填写具备视觉能力的模型。
+DEFAULT_MODEL_NAME = _env_text(("MODEL_NAME", "RISK_FALLBACK_MODEL_NAME"), "")
+DEFAULT_MODEL_BASE_URL = _env_text(("MODEL_BASE_URL", "RISK_FALLBACK_MODEL_BASE_URL"), "")
+# 联网搜索开通引导链接：纯前端提示用途，可在 .env 覆盖；留空则不展示引导链接。
+WEB_SEARCH_ACTIVATION_URL = _env_text(("WEB_SEARCH_ACTIVATION_URL",), "")
 RISK_MAX_FRAMES = max(1, _env_int("RISK_MAX_FRAMES", 4))
 RISK_MIN_FRAMES = max(1, min(3, RISK_MAX_FRAMES))
 RISK_DYNAMIC_MAX_FRAMES = max(RISK_MAX_FRAMES, _env_int("RISK_DYNAMIC_MAX_FRAMES", 8))

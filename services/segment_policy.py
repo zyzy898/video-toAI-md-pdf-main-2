@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from config import (
-    DEFAULT_MODEL_BASE_URL,
     VIDEO_SEGMENT_BATCH_LONG_MAX_FILES,
     VIDEO_SEGMENT_BATCH_STANDARD_RECOMMENDED_MAX_FILES,
     VIDEO_SEGMENT_BATCH_STANDARD_RECOMMENDED_MAX_TOTAL_DURATION_SECONDS,
@@ -210,7 +209,7 @@ def _provider_supports_video_understanding() -> bool:
     except Exception:
         return True  # Fail open; Ark remains the historical default.
 
-    base_url = _env_text(("MODEL_BASE_URL",), DEFAULT_MODEL_BASE_URL)
+    base_url = _env_text(("MODEL_BASE_URL", "RISK_FALLBACK_MODEL_BASE_URL"), "")
     provider_hint = _env_text(("MODEL_PROVIDER",), "")
     return resolve_provider(provider_hint=provider_hint, base_url=base_url) == "ark"
 

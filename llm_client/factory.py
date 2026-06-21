@@ -28,6 +28,22 @@ _OPENAI_HOST_HINTS = (
     "api.openai.com",
 )
 
+# 模型名称/地址一律以 .env 为准，绝不写死。未配置时返回空，由 build_llm_client 报错。
+def _env_default_base_url() -> str:
+    for name in ("MODEL_BASE_URL", "RISK_FALLBACK_MODEL_BASE_URL"):
+        value = str(os.getenv(name, "")).strip()
+        if value:
+            return value
+    return ""
+
+
+def _env_default_model_name() -> str:
+    for name in ("MODEL_NAME", "RISK_FALLBACK_MODEL_NAME"):
+        value = str(os.getenv(name, "")).strip()
+        if value:
+            return value
+    return ""
+
 
 def resolve_provider(
     *,
@@ -69,8 +85,12 @@ def build_llm_client(
 
     if not api_key:
         raise ValueError("API Key 未设置，无法构建 LLM 客户端")
-    base_url = str(base_url or "").strip() or "https://ark.cn-beijing.volces.com/api/v3"
-    model = str(model or "").strip() or "doubao-seed-2-0-pro-260215"
+    base_url = str(base_url or "").strip() or _env_default_base_url()
+    model = str(model or "").strip() or _env_default_model_name()
+    if not base_url:
+        raise ValueError("模型 Base URL 未配置，请在 .env 中设置 MODEL_BASE_URL")
+    if not model:
+        raise ValueError("模型名称未配置，请在 .env 中设置 MODEL_NAME（需使用支持图片输入的视觉模型）")
 
     provider = resolve_provider(provider_hint=provider_hint, base_url=base_url)
 

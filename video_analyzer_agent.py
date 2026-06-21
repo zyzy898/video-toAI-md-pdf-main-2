@@ -29,6 +29,10 @@ except Exception:  # pragma: no cover - 兜底兼容
 from asr import build_transcriber, write_srt_file
 from asr.base import TranscriberBackend, TranscriberError
 
+# 模型默认值统一从 config 读取（config 以 .env 为准），避免在此处写死模型名/地址。
+from config import DEFAULT_MODEL_NAME as _CONFIG_DEFAULT_MODEL_NAME
+from config import DEFAULT_MODEL_BASE_URL as _CONFIG_DEFAULT_MODEL_BASE_URL
+
 # 配置日志
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -36,8 +40,9 @@ logging.basicConfig(
 
 
 class VideoAnalyzerAgent:
-    DEFAULT_MODEL_NAME = "doubao-seed-2-0-pro-260215"
-    DEFAULT_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+    # 默认模型名/地址以 .env 为准（经 config 统一解析），此处不再写死。
+    DEFAULT_MODEL_NAME = _CONFIG_DEFAULT_MODEL_NAME
+    DEFAULT_BASE_URL = _CONFIG_DEFAULT_MODEL_BASE_URL
     DEFAULT_CHAT_TEMPERATURE = 0.2
     SUBTITLE_CACHE_ROOT = (Path(__file__).resolve().parent / "outputs" / ".subtitle_cache").resolve()
     _subtitle_cache_lock = RLock()

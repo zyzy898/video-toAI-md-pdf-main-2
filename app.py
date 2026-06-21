@@ -507,13 +507,17 @@ def _read_scrape_env_model_options() -> Tuple[str, str, str]:
     )
     model_name = _env_text(
         ("SCRAPE_MODEL_NAME", "MODEL_NAME", "RISK_FALLBACK_MODEL_NAME"),
-        DEFAULT_MODEL_NAME,
+        "",
     )
     model_base_url = _env_text(
         ("SCRAPE_MODEL_BASE_URL", "MODEL_BASE_URL", "RISK_FALLBACK_MODEL_BASE_URL"),
-        DEFAULT_MODEL_BASE_URL,
+        "",
     )
-    return api_key, model_name or DEFAULT_MODEL_NAME, model_base_url or DEFAULT_MODEL_BASE_URL
+    return (
+        str(api_key or "").strip(),
+        str(model_name or "").strip(),
+        str(model_base_url or "").strip(),
+    )
 
 
 def _extract_video_candidates_with_env_model(
@@ -525,7 +529,7 @@ def _extract_video_candidates_with_env_model(
         return {}
 
     api_key, model_name, model_base_url = _read_scrape_env_model_options()
-    if not api_key:
+    if not api_key or not model_name or not model_base_url:
         return {}
 
     snapshot = str(html_text or "").strip()
@@ -2078,7 +2082,7 @@ def _build_env_visual_fallback_agent(primary_agent: VideoAnalyzerAgent) -> Video
     primary_api_key = str(getattr(primary_agent, "api_key", "")).strip()
     primary_model_name = str(getattr(primary_agent, "model", "")).strip()
     primary_base_url = str(getattr(primary_agent, "base_url", "")).strip()
-    normalized_base_url = model_base_url or DEFAULT_MODEL_BASE_URL
+    normalized_base_url = str(model_base_url or "").strip()
 
     # Skip meaningless self-fallback to the exact same visual model config.
     if (
@@ -2600,10 +2604,8 @@ class UploadRiskService:
         if not risk_api_key:
             raise ValueError("上传风控模型 API Key 未配置")
 
-        risk_model_name = str(shared_model_name or "").strip() or DEFAULT_MODEL_NAME
-        risk_model_base_url = (
-            str(shared_model_base_url or "").strip() or DEFAULT_MODEL_BASE_URL
-        )
+        risk_model_name = str(shared_model_name or "").strip()
+        risk_model_base_url = str(shared_model_base_url or "").strip()
         return VideoAnalyzerAgent(
             api_key=risk_api_key,
             whisper_model="tiny",
@@ -2846,7 +2848,7 @@ def _read_shared_backend_model_options(require_api_key: bool = True) -> Tuple[st
             "RISK_MODEL_NAME",
             "RISK_FALLBACK_MODEL_NAME",
         ),
-        DEFAULT_MODEL_NAME,
+        "",
     )
     model_base_url = _env_text(
         (
@@ -2855,18 +2857,26 @@ def _read_shared_backend_model_options(require_api_key: bool = True) -> Tuple[st
             "RISK_MODEL_BASE_URL",
             "RISK_FALLBACK_MODEL_BASE_URL",
         ),
-        DEFAULT_MODEL_BASE_URL,
+        "",
     )
 
-    if require_api_key and not api_key:
-        raise ValueError(
-            "后端模型未配置：请在 .env 中设置 MODEL_API_KEY（或 ARK_API_KEY / OPENAI_API_KEY）。"
-        )
+    if require_api_key:
+        missing: list[str] = []
+        if not api_key:
+            missing.append("MODEL_API_KEY（或 ARK_API_KEY / OPENAI_API_KEY）")
+        if not model_name:
+            missing.append("MODEL_NAME（需使用支持图片输入的视觉模型）")
+        if not model_base_url:
+            missing.append("MODEL_BASE_URL")
+        if missing:
+            raise ValueError(
+                "后端模型未配置：请在 .env 中设置 " + "、".join(missing) + "。"
+            )
 
     return (
         str(api_key or "").strip(),
-        str(model_name or DEFAULT_MODEL_NAME).strip() or DEFAULT_MODEL_NAME,
-        str(model_base_url or DEFAULT_MODEL_BASE_URL).strip() or DEFAULT_MODEL_BASE_URL,
+        str(model_name or "").strip(),
+        str(model_base_url or "").strip(),
     )
 
 
