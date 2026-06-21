@@ -198,14 +198,6 @@ export const SubtitlePanel = memo(function SubtitlePanel({
           <button
             type="button"
             className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
-            disabled={subtitleRefreshing}
-            onClick={onRefresh}
-          >
-            {subtitleRefreshing ? "重新加载中..." : "重新加载字幕"}
-          </button>
-          <button
-            type="button"
-            className="rounded border border-neutral-700 px-2 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 hover:text-neutral-100 disabled:cursor-not-allowed disabled:opacity-60"
             disabled={subtitleLoading || subtitleRefreshing}
             onClick={onDownload}
           >
