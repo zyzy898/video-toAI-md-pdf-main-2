@@ -9,7 +9,7 @@ import useTheme from '../hooks/useTheme.js';
 /**
  * 「开始使用」按钮跳转的线上工作台地址。
  */
-const APP_URL = 'https://video-to-ai-md-pdf-main-2-onlyweb.vercel.app/';
+const APP_URL = 'https://onlywebreact.zzynbplus.top/';
 
 const heroChips = [
   'AI 视频理解',
