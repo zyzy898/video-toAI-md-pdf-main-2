@@ -22,6 +22,12 @@ from config import (
     LONG_VIDEO_PREPROCESS_PRESET,
     LONG_VIDEO_PREPROCESS_SLICE_SECONDS,
     LONG_VIDEO_PREPROCESS_TARGET_FPS,
+    WEB_PREVIEW_AUDIO_BITRATE,
+    WEB_PREVIEW_CRF,
+    WEB_PREVIEW_ENABLED,
+    WEB_PREVIEW_MAX_LONG_EDGE,
+    WEB_PREVIEW_PRESET,
+    WEB_PREVIEW_SKIP_BELOW_MB,
 )
 from services.segment_policy import _probe_video_duration_seconds
 from video_analyzer_agent import VideoAnalyzerAgent
@@ -366,3 +372,116 @@ def _prepare_long_video_analysis_source(
     meta["used"] = True
     meta["reason"] = "ok"
     return final_proxy_path, meta
+
+
+def _build_web_preview_scale_filter(max_long_edge: int) -> str:
+    """Downscale so the longest edge <= max_long_edge, preserving aspect ratio.
+
+    Only scales down (never up) and keeps both dimensions even for yuv420p.
+    Handles landscape and portrait sources via a single expression.
+    """
+    edge = max(2, int(max_long_edge))
+    # If width >= height, cap width to `edge`; otherwise cap height to `edge`.
+    target_w = f"if(gte(iw,ih),min({edge},iw),-2)"
+    target_h = f"if(gte(iw,ih),-2,min({edge},ih))"
+    return f"scale='{target_w}':'{target_h}':flags=lanczos"
+
+
+def generate_web_preview_video(
+    *,
+    ffmpeg_cmd: str,
+    source_path: Path,
+    output_path: Path,
+) -> Tuple[bool, Dict[str, Any]]:
+    """Produce a web-friendly H.264 + faststart preview for browser playback.
+
+    Returns (ok, meta). On failure callers should fall back to the original
+    video. The moov atom is moved to the front (+faststart) so HTML5 <video>
+    can start playback and seek without buffering the whole file.
+    """
+    meta: Dict[str, Any] = {
+        "enabled": bool(WEB_PREVIEW_ENABLED),
+        "used": False,
+        "reason": "",
+        "source_size_mb": 0.0,
+        "preview_size_mb": 0.0,
+    }
+    if not WEB_PREVIEW_ENABLED:
+        meta["reason"] = "disabled_by_config"
+        return False, meta
+
+    if not source_path.exists() or not source_path.is_file():
+        meta["reason"] = "source_missing"
+        return False, meta
+
+    try:
+        source_size_mb = float(source_path.stat().st_size) / (1024.0 * 1024.0)
+    except OSError:
+        source_size_mb = 0.0
+    meta["source_size_mb"] = round(source_size_mb, 2)
+
+    if source_size_mb > 0 and source_size_mb < float(WEB_PREVIEW_SKIP_BELOW_MB):
+        meta["reason"] = "below_skip_threshold"
+        return False, meta
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    vf_expr = _build_web_preview_scale_filter(int(WEB_PREVIEW_MAX_LONG_EDGE))
+
+    cmd: List[str] = [
+        str(ffmpeg_cmd or "ffmpeg"),
+        "-y",
+        "-i",
+        str(source_path),
+        "-vf",
+        vf_expr,
+        "-c:v",
+        "libx264",
+        "-preset",
+        str(WEB_PREVIEW_PRESET),
+        "-crf",
+        str(max(18, int(WEB_PREVIEW_CRF))),
+        "-pix_fmt",
+        "yuv420p",
+        "-c:a",
+        "aac",
+        "-b:a",
+        str(WEB_PREVIEW_AUDIO_BITRATE),
+        "-ac",
+        "2",
+        "-movflags",
+        "+faststart",
+        str(output_path),
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+        )
+    except Exception as exc:
+        meta["reason"] = f"ffmpeg_exception:{exc}"
+        return False, meta
+
+    if not (result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0):
+        stderr_tail = (result.stderr or "").strip()[-300:]
+        meta["reason"] = f"ffmpeg_failed:rc={result.returncode},stderr={stderr_tail}"
+        # Drop any partial/zero-byte artifact so it never gets served.
+        try:
+            if output_path.exists():
+                output_path.unlink()
+        except OSError:
+            pass
+        return False, meta
+
+    try:
+        preview_size_mb = float(output_path.stat().st_size) / (1024.0 * 1024.0)
+    except OSError:
+        preview_size_mb = 0.0
+    meta["preview_size_mb"] = round(preview_size_mb, 2)
+    meta["used"] = True
+    meta["reason"] = "ok"
+    return True, meta

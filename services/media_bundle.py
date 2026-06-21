@@ -12,7 +12,7 @@ from urllib.parse import quote
 
 from werkzeug.utils import secure_filename
 
-from config import ALLOWED_EXTENSIONS, OUTPUT_ROOT, allowed_file
+from config import ALLOWED_EXTENSIONS, OUTPUT_ROOT, WEB_PREVIEW_BASENAME, allowed_file
 from path_utils import _assert_within
 from utils import _safe_float
 from asr.zh_simplify import to_simplified
@@ -134,6 +134,9 @@ def _find_output_video_file(output_dir: Path, preferred_video_name: str = "") ->
     candidates: List[Tuple[float, Path]] = []
     for ext in ALLOWED_EXTENSIONS:
         for path in output_dir.glob(f"*.{ext}"):
+            # The generated web preview is a derivative, not the source video.
+            if path.name == WEB_PREVIEW_BASENAME:
+                continue
             resolved = path.resolve(strict=False)
             if resolved.is_symlink() or not resolved.is_file():
                 continue
@@ -146,6 +149,18 @@ def _find_output_video_file(output_dir: Path, preferred_video_name: str = "") ->
         return None
     candidates.sort(key=lambda item: item[0], reverse=True)
     return candidates[0][1]
+
+
+def _find_web_preview_video(output_dir: Path) -> Path | None:
+    preview_path = (output_dir / WEB_PREVIEW_BASENAME).resolve(strict=False)
+    if (
+        preview_path.exists()
+        and preview_path.is_file()
+        and not preview_path.is_symlink()
+        and preview_path.stat().st_size > 0
+    ):
+        return preview_path
+    return None
 
 
 def _should_refresh_export_file(target_path: Path, source_path: Path) -> bool:
@@ -239,8 +254,14 @@ def _build_output_media_bundle(
     )
     if video_file is not None:
         bundle["video_file_name"] = video_file.name
+        # Prefer the web-optimized preview (H.264 + faststart) for playback;
+        # the original file stays in the output dir and is reported separately
+        # via video_file_name.
+        preview_file = _find_web_preview_video(output_dir_resolved)
+        playback_file = preview_file if preview_file is not None else video_file
+        bundle["video_preview_optimized"] = preview_file is not None
         bundle["video_preview_url"] = (
-            f"/output/{output_dir_name_encoded}/{quote(video_file.name)}"
+            f"/output/{output_dir_name_encoded}/{quote(playback_file.name)}"
         )
 
     preferred_srt = str(preferred_srt_path or "").strip()

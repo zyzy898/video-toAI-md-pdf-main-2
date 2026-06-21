@@ -174,6 +174,21 @@ LONG_VIDEO_PREPROCESS_TARGET_FPS = 12
 LONG_VIDEO_PREPROCESS_CRF = 30
 LONG_VIDEO_PREPROCESS_PRESET = "veryfast"
 LONG_VIDEO_PREPROCESS_AUDIO_BITRATE = "64k"
+# Web-friendly preview transcode for the result-page subtitle workbench player.
+# Generates an H.264 + faststart copy (moov atom at the front) so seeking and
+# playback stay smooth even when the source is high-bitrate/high-resolution.
+WEB_PREVIEW_ENABLED = (
+    str(os.getenv("WEB_PREVIEW_ENABLED", "1")).strip().lower()
+    in {"1", "true", "yes", "on"}
+)
+WEB_PREVIEW_BASENAME = "web_preview.mp4"
+# Longest edge cap (px); 1280 keeps 720p landscape / portrait equivalents.
+WEB_PREVIEW_MAX_LONG_EDGE = int(os.getenv("WEB_PREVIEW_MAX_LONG_EDGE", "1280"))
+WEB_PREVIEW_CRF = int(os.getenv("WEB_PREVIEW_CRF", "26"))
+WEB_PREVIEW_PRESET = str(os.getenv("WEB_PREVIEW_PRESET", "veryfast")).strip() or "veryfast"
+WEB_PREVIEW_AUDIO_BITRATE = str(os.getenv("WEB_PREVIEW_AUDIO_BITRATE", "128k")).strip() or "128k"
+# Skip re-encoding for tiny sources that already play smoothly (falls back to original).
+WEB_PREVIEW_SKIP_BELOW_MB = float(os.getenv("WEB_PREVIEW_SKIP_BELOW_MB", "6"))
 VIDEO_SEGMENT_STANDARD_MAX_DURATION_SECONDS = 20 * 60
 VIDEO_SEGMENT_LONG_MAX_DURATION_SECONDS = 45 * 60
 VIDEO_SEGMENT_SUPER_LONG_MAX_DURATION_SECONDS = 90 * 60
@@ -330,6 +345,13 @@ __all__ = [
     "LONG_VIDEO_PREPROCESS_CRF",
     "LONG_VIDEO_PREPROCESS_PRESET",
     "LONG_VIDEO_PREPROCESS_AUDIO_BITRATE",
+    "WEB_PREVIEW_ENABLED",
+    "WEB_PREVIEW_BASENAME",
+    "WEB_PREVIEW_MAX_LONG_EDGE",
+    "WEB_PREVIEW_CRF",
+    "WEB_PREVIEW_PRESET",
+    "WEB_PREVIEW_AUDIO_BITRATE",
+    "WEB_PREVIEW_SKIP_BELOW_MB",
     "VIDEO_SEGMENT_STANDARD_MAX_DURATION_SECONDS",
     "VIDEO_SEGMENT_LONG_MAX_DURATION_SECONDS",
     "VIDEO_SEGMENT_SUPER_LONG_MAX_DURATION_SECONDS",

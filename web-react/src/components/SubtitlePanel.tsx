@@ -1,4 +1,4 @@
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { RefObject } from "react";
 import type { SingleResultData, SubtitleLine, SubtitleWorkbenchData } from "../types/api";
 import { StepsIcon } from "./icons";
@@ -21,6 +21,58 @@ type SubtitlePanelProps = {
   formatDisplayTime: (value: unknown) => string;
 };
 
+// Approximate height of one rendered subtitle row (timestamp + one text line).
+// Used only to window the list; exact per-row height is not required.
+const ESTIMATED_ROW_HEIGHT = 52;
+const LIST_VIEWPORT_HEIGHT = 340;
+const OVERSCAN_ROWS = 6;
+const MAX_RENDERED_LINES = 5000;
+// Throttle interval for the playhead -> active-line sync (ms).
+const ACTIVE_SYNC_INTERVAL = 200;
+
+const lineKey = (line: SubtitleLine, idx: number) =>
+  `${line.index ?? idx}:${Number(line.start_seconds ?? -1)}`;
+
+type SubtitleRowProps = {
+  line: SubtitleLine;
+  top: number;
+  isActive: boolean;
+  rowRef: ((el: HTMLButtonElement | null) => void) | null;
+  onSeek: (seconds: number) => void;
+  formatDisplayTime: (value: unknown) => string;
+};
+
+// Memoized so windowed rows only re-render when their own active state flips,
+// not on every parent render or playhead tick.
+const SubtitleRow = memo(function SubtitleRow({
+  line,
+  top,
+  isActive,
+  rowRef,
+  onSeek,
+  formatDisplayTime,
+}: SubtitleRowProps) {
+  return (
+    <button
+      type="button"
+      ref={rowRef}
+      aria-current={isActive ? "true" : undefined}
+      style={{ position: "absolute", top, left: 0, right: 0 }}
+      className={`subtitle-line-row block w-full rounded border px-2 py-1.5 text-left text-xs transition-colors ${
+        isActive
+          ? "subtitle-line-row--active border-teal-400/70 bg-teal-500/15"
+          : "border-neutral-800 bg-neutral-950/60 hover:border-teal-400/60 hover:bg-teal-500/10"
+      }`}
+      onClick={() => onSeek(Number(line.start_seconds || 0))}
+    >
+      <p className="font-semibold text-teal-200/95">
+        {formatDisplayTime(line.start_time)} - {formatDisplayTime(line.end_time)}
+      </p>
+      <p className="mt-0.5 truncate text-neutral-200">{String(line.text || "")}</p>
+    </button>
+  );
+});
+
 export const SubtitlePanel = memo(function SubtitlePanel({
   resultData,
   subtitleWorkbench,
@@ -41,66 +93,99 @@ export const SubtitlePanel = memo(function SubtitlePanel({
   const videoSrc = String(subtitleWorkbench?.video_preview_url || resultData?.video_preview_url || "").trim();
   const subtitleFile = String(subtitleWorkbench?.subtitle_file || resultData?.subtitle_file_name || "").trim();
 
-  const [activeLineId, setActiveLineId] = useState<string | null>(null);
+  const [activeIndex, setActiveIndex] = useState<number>(-1);
+  const [scrollTop, setScrollTop] = useState<number>(0);
   const listScrollRef = useRef<HTMLDivElement | null>(null);
   const activeLineRef = useRef<HTMLButtonElement | null>(null);
 
-  const lineId = (line: SubtitleLine, idx: number) =>
-    `${line.index ?? idx}:${Number(line.start_seconds ?? -1)}`;
+  const renderLines = useMemo(
+    () => filteredSubtitleLines.slice(0, MAX_RENDERED_LINES),
+    [filteredSubtitleLines],
+  );
 
-  // Track the subtitle line under the current playhead while the video plays.
+  // Active line is tracked against the (filtered) rendered list so highlighting
+  // and auto-scroll stay aligned with what's actually on screen.
   useEffect(() => {
     const videoEl = videoRef.current;
-    if (!videoEl || subtitleLines.length === 0) return;
+    if (!videoEl || renderLines.length === 0) {
+      // Defer the reset so we don't setState synchronously in the effect body.
+      const resetId = window.requestAnimationFrame(() => setActiveIndex(-1));
+      return () => window.cancelAnimationFrame(resetId);
+    }
+
+    let lastRun = 0;
+    let rafId = 0;
 
     const computeActiveLine = () => {
       const currentTime = videoEl.currentTime || 0;
-      let matchedId: string | null = null;
-      for (let idx = 0; idx < subtitleLines.length; idx += 1) {
-        const line = subtitleLines[idx];
+      let matchedIndex = -1;
+      for (let idx = 0; idx < renderLines.length; idx += 1) {
+        const line = renderLines[idx];
         const start = Number(line.start_seconds ?? NaN);
         if (Number.isNaN(start) || start > currentTime) continue;
-        const next = subtitleLines[idx + 1];
+        const next = renderLines[idx + 1];
         const end = Number(
           line.end_seconds ?? (next ? Number(next.start_seconds ?? NaN) : NaN),
         );
         const withinEnd = Number.isNaN(end) ? true : currentTime < end;
         if (withinEnd) {
-          matchedId = lineId(line, idx);
+          matchedIndex = idx;
           break;
         }
       }
-      setActiveLineId((prev) => (prev === matchedId ? prev : matchedId));
+      setActiveIndex((prev) => (prev === matchedIndex ? prev : matchedIndex));
     };
 
-    // Defer the initial sync so we don't setState synchronously in the effect body.
-    const rafId = window.requestAnimationFrame(computeActiveLine);
-    videoEl.addEventListener("timeupdate", computeActiveLine);
+    // timeupdate fires ~4x/s; throttle so we never recompute more than needed.
+    const onTimeUpdate = () => {
+      const now = Date.now();
+      if (now - lastRun < ACTIVE_SYNC_INTERVAL) return;
+      lastRun = now;
+      computeActiveLine();
+    };
+
+    rafId = window.requestAnimationFrame(computeActiveLine);
+    videoEl.addEventListener("timeupdate", onTimeUpdate);
     videoEl.addEventListener("seeked", computeActiveLine);
     return () => {
       window.cancelAnimationFrame(rafId);
-      videoEl.removeEventListener("timeupdate", computeActiveLine);
+      videoEl.removeEventListener("timeupdate", onTimeUpdate);
       videoEl.removeEventListener("seeked", computeActiveLine);
     };
-  }, [subtitleLines, videoRef]);
+  }, [renderLines, videoRef]);
 
-  // Keep the active subtitle line visible inside its own scroll container.
+  const onListScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    setScrollTop(event.currentTarget.scrollTop);
+  }, []);
+
+  // Keep the active subtitle line centered within its scroll container.
   useEffect(() => {
-    if (!activeLineId) return;
-    const target = activeLineRef.current;
+    if (activeIndex < 0) return;
     const container = listScrollRef.current;
-    if (!target || !container) return;
-    const targetTop = target.offsetTop;
-    const targetBottom = targetTop + target.offsetHeight;
+    if (!container) return;
+    const targetTop = activeIndex * ESTIMATED_ROW_HEIGHT;
+    const targetBottom = targetTop + ESTIMATED_ROW_HEIGHT;
     const viewTop = container.scrollTop;
     const viewBottom = viewTop + container.clientHeight;
     if (targetTop < viewTop || targetBottom > viewBottom) {
       container.scrollTo({
-        top: targetTop - container.clientHeight / 2 + target.offsetHeight / 2,
+        top: Math.max(0, targetTop - container.clientHeight / 2 + ESTIMATED_ROW_HEIGHT / 2),
         behavior: "smooth",
       });
     }
-  }, [activeLineId]);
+  }, [activeIndex]);
+
+  // Windowing: only mount the rows visible in the viewport (+ overscan).
+  const totalHeight = renderLines.length * ESTIMATED_ROW_HEIGHT;
+  const firstVisible = Math.max(
+    0,
+    Math.floor(scrollTop / ESTIMATED_ROW_HEIGHT) - OVERSCAN_ROWS,
+  );
+  const lastVisible = Math.min(
+    renderLines.length,
+    Math.ceil((scrollTop + LIST_VIEWPORT_HEIGHT) / ESTIMATED_ROW_HEIGHT) + OVERSCAN_ROWS,
+  );
+  const windowedLines = renderLines.slice(firstVisible, lastVisible);
 
   return (
     <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
@@ -134,7 +219,8 @@ export const SubtitlePanel = memo(function SubtitlePanel({
           <video
             ref={videoRef}
             controls
-            preload="metadata"
+            preload="auto"
+            playsInline
             className="max-h-[300px] w-full bg-black"
             src={videoSrc}
           />
@@ -168,30 +254,28 @@ export const SubtitlePanel = memo(function SubtitlePanel({
               共 {subtitleLines.length} 行，匹配 {filteredSubtitleLines.length} 行
             </p>
           </div>
-          <div ref={listScrollRef} className="history-scroll max-h-[340px] space-y-1 overflow-auto pr-1">
-            {filteredSubtitleLines.slice(0, 1200).map((line, idx) => {
-              const id = lineId(line, idx);
-              const isActive = id === activeLineId;
-              return (
-                <button
-                  type="button"
-                  ref={isActive ? activeLineRef : null}
-                  key={`sub-line-${line.index || idx}-${line.start_time || ""}`}
-                  aria-current={isActive ? "true" : undefined}
-                  className={`subtitle-line-row w-full rounded border px-2 py-1.5 text-left text-xs transition-colors ${
-                    isActive
-                      ? "subtitle-line-row--active border-teal-400/70 bg-teal-500/15"
-                      : "border-neutral-800 bg-neutral-950/60 hover:border-teal-400/60 hover:bg-teal-500/10"
-                  }`}
-                  onClick={() => onSeek(Number(line.start_seconds || 0))}
-                >
-                  <p className="font-semibold text-teal-200/95">
-                    {formatDisplayTime(line.start_time)} - {formatDisplayTime(line.end_time)}
-                  </p>
-                  <p className="mt-0.5 whitespace-pre-wrap text-neutral-200">{String(line.text || "")}</p>
-                </button>
-              );
-            })}
+          <div
+            ref={listScrollRef}
+            onScroll={onListScroll}
+            className="history-scroll max-h-[340px] overflow-auto pr-1"
+          >
+            <div style={{ position: "relative", height: totalHeight }}>
+              {windowedLines.map((line, localIdx) => {
+                const idx = firstVisible + localIdx;
+                const isActive = idx === activeIndex;
+                return (
+                  <SubtitleRow
+                    key={lineKey(line, idx)}
+                    line={line}
+                    top={idx * ESTIMATED_ROW_HEIGHT}
+                    isActive={isActive}
+                    rowRef={isActive ? (el) => (activeLineRef.current = el) : null}
+                    onSeek={onSeek}
+                    formatDisplayTime={formatDisplayTime}
+                  />
+                );
+              })}
+            </div>
           </div>
         </>
       ) : subtitleAssetAvailable ? (

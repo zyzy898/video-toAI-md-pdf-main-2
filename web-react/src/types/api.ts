@@ -197,6 +197,7 @@ export type SubtitleWorkbenchData = {
   line_count?: number;
   lines?: SubtitleLine[];
   video_preview_url?: string;
+  video_preview_optimized?: boolean;
   subtitle_exports?: Record<string, string>;
 };
 

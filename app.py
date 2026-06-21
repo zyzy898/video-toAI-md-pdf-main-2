@@ -72,7 +72,10 @@ from services.segment_policy import (
     _evaluate_batch_segment_policy,
     _probe_video_duration_seconds,
 )
-from services.video_preprocess import _prepare_long_video_analysis_source
+from services.video_preprocess import (
+    _prepare_long_video_analysis_source,
+    generate_web_preview_video,
+)
 from services.step_quality import _resolve_quality_score
 from services.media_bundle import (
     _append_output_bundle_to_zip,
@@ -3480,6 +3483,27 @@ class VideoProcessingService:
         video_dest = output_dir / video_path.name
         if not video_dest.exists():
             shutil.copy2(video_path, video_dest)
+
+        # Generate a web-friendly preview (H.264 + faststart, capped resolution)
+        # for smooth playback/seeking on the result-page subtitle workbench.
+        # Falls back silently to the original file if transcoding is unavailable.
+        try:
+            report("prepare", "正在生成网页预览视频...")
+            preview_ffmpeg_cmd = str(getattr(agent, "ffmpeg_cmd", "")).strip() or "ffmpeg"
+            preview_path = output_dir / WEB_PREVIEW_BASENAME
+            if not preview_path.exists():
+                preview_ok, preview_meta = generate_web_preview_video(
+                    ffmpeg_cmd=preview_ffmpeg_cmd,
+                    source_path=video_dest,
+                    output_path=preview_path,
+                )
+                if not preview_ok:
+                    logger.info(
+                        "网页预览视频未生成，播放将回退原始视频: %s",
+                        preview_meta.get("reason", "unknown"),
+                    )
+        except Exception as exc:
+            logger.warning("网页预览视频生成异常，回退原始视频: %s", exc)
 
         report("prepare", "正在评估长视频预处理策略...")
         analysis_video_path, analysis_preprocess_meta = _prepare_long_video_analysis_source(
