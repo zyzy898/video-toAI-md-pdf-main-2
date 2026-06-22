@@ -11,6 +11,11 @@
 - **输出**：Markdown、PDF、步骤截图、`steps.json`、字幕（SRT/VTT/TXT）
 - **管理**：历史记录隔离、批量 ZIP 下载、自动清理（24h 上传 / 72h 历史）
 
+<img width="2553" height="1224" alt="438dc3dcfa83ee7e9f24b6a5ecf0fc7f" src="https://github.com/user-attachments/assets/fe060649-bd21-449a-a4a4-a490b95069ba" />
+
+<img width="2526" height="1217" alt="49ce0fc466b80577bbe0ceac75e0ee51" src="https://github.com/user-attachments/assets/60016c0a-a931-4ed2-869f-0db3f74e9065" />
+
+
 ## 🚀 快速开始
 
 **环境**：Python 3.10+、Node.js 18+、ffmpeg（未装则自动用 `imageio-ffmpeg`）
