@@ -73,6 +73,7 @@ import type {
   SubtitleWorkbenchData,
 } from "./types/api";
 import { ApiRequestError } from "./lib/api-error";
+import { buildUploadSourceKey, dedupeBatchUploadFiles } from "./lib/upload-dedupe";
 import {
   basename,
   buildModelConfigSignature,
@@ -771,7 +772,17 @@ export default function App() {
 
   const uploadBatchFiles = useCallback(
     async (fileList: FileList | File[]) => {
-      const files = Array.from(fileList || []).filter((file) => isValidVideo(file.name));
+      const selectedFiles = Array.from(fileList || []).filter((file) => isValidVideo(file.name));
+      const existingSourceKeys = batchFilesRef.current
+        .map((item) => item.sourceKey || "")
+        .filter(Boolean);
+      const { files, duplicateCount } = dedupeBatchUploadFiles(selectedFiles, existingSourceKeys);
+      if (duplicateCount > 0) {
+        showError(`检测到 ${duplicateCount} 个重复视频源，已自动跳过去重，请勿重复上传。`);
+      }
+      if (files.length === 0 && duplicateCount > 0) {
+        return;
+      }
       if (files.length === 0) {
         showError("没有可用的视频文件");
         return;
@@ -782,6 +793,7 @@ export default function App() {
 
       const placeholders = files.map((file) => ({
         filename: file.name,
+        sourceKey: buildUploadSourceKey(file),
         filepath: "",
         status: "processing" as FileStatus,
         error: "等待上传...",
@@ -816,6 +828,7 @@ export default function App() {
               status: "pending",
               error: "",
               clientId: placeholder.clientId,
+              sourceKey: placeholder.sourceKey,
             });
           } catch (error) {
             const apiError = error instanceof ApiRequestError ? error : null;
@@ -833,6 +846,7 @@ export default function App() {
               status: "failed",
               error: formatInlineErrorMessage(message),
               clientId: placeholder.clientId,
+              sourceKey: placeholder.sourceKey,
             });
             uploadedFailed += 1;
           }
@@ -2528,7 +2542,7 @@ export default function App() {
                   </h3>
                 </div>
                 <p className="text-sm text-neutral-300">删除后将无法通过历史列表快速找回该结果。</p>
-                <p className="mt-2 rounded bg-neutral-900/96 px-2 py-1 text-center text-xs text-neutral-300 break-all">
+                <p className="history-delete-record-name mt-2 rounded bg-neutral-900/96 px-2 py-1 text-center text-xs text-neutral-300 break-all">
                   {pendingDeleteHistory.video_name || "未命名记录"}
                 </p>
                 <div className="mt-4 flex items-center justify-end gap-2">

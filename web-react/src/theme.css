@@ -1108,6 +1108,17 @@ body {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
 }
 
+:root[data-theme="light"] .history-delete-record-name {
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.9), rgba(255, 255, 255, 0)),
+    linear-gradient(135deg, rgba(248, 250, 252, 0.98), rgba(241, 245, 249, 0.94)) !important;
+  color: var(--vi-text-1) !important;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.86),
+    0 8px 18px rgba(15, 23, 42, 0.06);
+}
+
 /* ---------- Markdown / result text ---------- */
 :root[data-theme="light"] .summary-only-markdown-content,
 :root[data-theme="light"] .standard-markdown-content {

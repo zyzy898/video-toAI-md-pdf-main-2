@@ -35,6 +35,7 @@ export type BatchFileItem = {
   status: FileStatus;
   error: string;
   clientId?: string;
+  sourceKey?: string;
 };
 
 export type RiskResult = {
