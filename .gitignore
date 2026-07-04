@@ -28,6 +28,7 @@ ENV/
 # -----------------------------
 node_modules/
 web-react/node_modules/
+web-react/tests
 web-react/dist/
 static/dist/
 *.log
