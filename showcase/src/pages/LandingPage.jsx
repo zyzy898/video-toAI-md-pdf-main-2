@@ -9,7 +9,7 @@ import useTheme from '../hooks/useTheme.js';
 /**
  * 「开始使用」按钮跳转的线上工作台地址。
  */
-const APP_URL = 'https://onlywebreact.zzynbplus.top/';
+const APP_URL = '';
 
 const heroChips = [
   'AI 视频理解',
