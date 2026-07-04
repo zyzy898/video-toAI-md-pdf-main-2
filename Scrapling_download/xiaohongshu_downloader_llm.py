@@ -11,10 +11,6 @@ XiaoHongShu Video Downloader - 小红书视频下载器 (带LLM智能分析版)
 使用方法:
     python xiaohongshu_downloader_llm.py <笔记链接或分享文本> [输出文件名]
     
-示例:
-    python xiaohongshu_downloader_llm.py "https://www.xiaohongshu.com/explore/699473ba000000001d02758e"
-    python xiaohongshu_downloader_llm.py "这种轻轻咬着嘬是啥意思？ http://xhslink.com/o/2BOIVJaEtms 复制后打开【小红书】查看笔记！"
-
 LLM配置:
     在 .env 中设置以下变量：
     - LLM_API_KEY: 你的API密钥

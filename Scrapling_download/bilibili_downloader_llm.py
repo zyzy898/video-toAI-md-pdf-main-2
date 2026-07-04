@@ -11,10 +11,6 @@ Bilibili Video Downloader - 哔哩哔哩视频下载器 (带LLM智能分析版)
 使用方法:
     python bilibili_downloader_llm.py <视频链接或分享文本> [输出文件名]
     
-示例:
-    python bilibili_downloader_llm.py "https://www.bilibili.com/video/BV11XwuzRET8"
-    python bilibili_downloader_llm.py "【漂白鸡爪、量子长高、万能神药：今年315晚会，都曝光了啥？-哔哩哔哩】 https://b23.tv/FwARg66"
-
 LLM配置:
     在 .env 中设置以下变量：
     - LLM_API_KEY: 你的API密钥

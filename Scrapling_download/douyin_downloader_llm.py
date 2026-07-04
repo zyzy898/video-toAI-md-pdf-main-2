@@ -7,10 +7,6 @@
 使用方法:
     python douyin_downloader_llm.py <抖音视频URL> [输出文件名]
     
-示例:
-    python douyin_downloader_llm.py https://www.douyin.com/video/7600716080790165155
-    python douyin_downloader_llm.py https://v.douyin.com/Ksb4dKSz9y0/ my_video.mp4
-
 LLM配置:
     在 .env 中设置以下变量：
     - LLM_API_KEY: 你的API密钥
