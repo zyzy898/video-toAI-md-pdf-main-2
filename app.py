@@ -1,17 +1,12 @@
 ﻿import asyncio
 import base64
-import html
 import hashlib
-import ipaddress
 import json
 import logging
-import mimetypes
 import os
-import random
 import re
 import secrets
 import shutil
-import socket
 import subprocess
 import time
 import traceback
@@ -23,7 +18,7 @@ from pathlib import Path
 from threading import Lock, RLock, Thread
 from typing import Any, Callable, Dict, List, Tuple
 from urllib.error import HTTPError, URLError
-from urllib.parse import parse_qs, quote, unquote, urljoin, urlparse
+from urllib.parse import quote, urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import uuid4
 
@@ -51,18 +46,88 @@ except Exception:
             return []
 
 from video_analyzer_agent import VideoAnalyzerAgent
-from llm_client import ProviderFeatureUnsupportedError
-
 # Centralized configuration: env loading, path roots, and all tunable
 # constants live in config.py. Importing it also calls load_dotenv() and
 # ensures the runtime directories exist.
 from config import *  # noqa: F401,F403  (constants/helpers re-exported via __all__)
-from utils import _normalize_risk_score, _safe_float, _safe_int
+from utils import (
+    _is_image_input_not_supported_error,
+    _normalize_risk_score,
+    _risk_decision_from_rank,
+    _risk_decision_rank,
+    _risk_level_from_decision,
+    _safe_float,
+    _safe_int,
+)
 from path_utils import _assert_within, _resolve_output_dir, _resolve_upload_filepath
 from services.progress import ProgressStateService
 from services.risk_fallback_env import RiskFallbackEnvService
 from services.risk_blocklist import RiskBlocklistService
 from services.risk_cache import RiskResultCacheService
+from services.risk_sampling import (
+    build_risk_timestamps as _build_risk_timestamps_impl,
+    resolve_risk_frame_count as _resolve_risk_frame_count_impl,
+    stable_risk_sampling_seed as _stable_risk_sampling_seed,
+)
+from services.video_filename import (
+    extract_filename_from_content_disposition as _extract_filename_from_content_disposition_impl,
+    guess_video_filename_from_url as _guess_video_filename_from_url_impl,
+    safe_video_filename as _safe_video_filename_impl,
+)
+from services.source_url import (
+    append_unique_url_candidate as _append_unique_url_candidate,
+    build_source_url_candidates as _build_source_url_candidates,
+    extract_media_ids_from_text as _extract_media_ids_from_text,
+    extract_media_ids_from_url as _extract_media_ids_from_url,
+    extract_numeric_media_id as _extract_numeric_media_id,
+    extract_video_urls_from_json_payload as _extract_video_urls_from_json_payload,
+    looks_like_video_candidate_url as _looks_like_video_candidate_url,
+    normalize_source_url as _normalize_source_url,
+    url_contains_media_id as _url_contains_media_id,
+)
+from services.provider_errors import (
+    as_bool as _as_bool,
+    extract_http_status_code as _extract_http_status_code,
+    extract_request_id as _extract_request_id,
+    normalize_provider_error as _normalize_provider_error_impl,
+)
+from services.ytdlp_cookies import (
+    build_yt_dlp_cookie_sources as _build_yt_dlp_cookie_sources_impl,
+    parse_csv_text as _parse_csv_text,
+    parse_yt_dlp_browser_spec as _parse_yt_dlp_browser_spec,
+    write_ytdlp_cookiefile_from_header as _write_ytdlp_cookiefile_from_header_impl,
+)
+from services.scrape_helpers import (
+    detect_human_verification_signals as _detect_human_verification_signals,
+    parse_env_mapping as _parse_env_mapping,
+)
+from services.url_safety import (
+    assert_url_not_internal as _assert_url_not_internal_impl,
+    is_disallowed_ip as _is_disallowed_ip,
+    looks_like_html_payload as _looks_like_html_payload,
+)
+from services.batch_workers import resolve_batch_analyze_workers as _resolve_batch_analyze_workers_impl
+from services.risk_policy import should_block_by_risk as _should_block_by_risk_impl
+from services.risk_payloads import build_blocked_notice_payload as _build_blocked_notice_payload_impl
+from services.file_ops import safe_remove_file as _safe_remove_file_impl
+from services.text_helpers import compact_text as _compact_text_impl
+from services.step_defaults import ensure_minimum_step_count as _ensure_minimum_step_count_impl
+from services.step_summary import (
+    build_key_points_from_steps as _build_key_points_from_steps_impl,
+    extract_timeline_from_steps as _extract_timeline_from_steps_impl,
+)
+from services.subtitle_steps import (
+    extract_action_phrase_from_subtitle as _extract_action_phrase_from_subtitle_impl,
+    pick_timeline_points_from_subtitles as _pick_timeline_points_from_subtitles_impl,
+)
+from services.path_builders import (
+    build_unique_quarantine_path as _build_unique_quarantine_path_impl,
+    build_unique_upload_path as _build_unique_upload_path_impl,
+    build_upload_staging_path as _build_upload_staging_path_impl,
+    create_unique_output_dir as _create_unique_output_dir_impl,
+    find_cleanup_output_dirs as _find_cleanup_output_dirs,
+    reason_code_slug as _reason_code_slug_impl,
+)
 from services.history import HistoryService, HistoryRetentionCleanupService
 from services.upload_session import UploadSessionService, UploadVideoAutoCleanupService
 from services.segment_policy import (
@@ -163,273 +228,6 @@ def _update_single_progress(owner_id: str, task_id: str, **kwargs: Any) -> None:
 
 
 
-def _normalize_source_url(raw_url: Any) -> str:
-    url_text = str(raw_url or "").strip()
-    if not url_text:
-        raise ValueError("请输入视频链接")
-    if len(url_text) > 1500:
-        raise ValueError("链接长度超出限制，请精简后重试")
-
-    if not re.match(r"^https?://", url_text, flags=re.IGNORECASE):
-        match = re.search(r"https?://[^\s\"'<>]+", url_text, flags=re.IGNORECASE)
-        if match:
-            url_text = match.group(0).strip()
-        else:
-            share_link_patterns = (
-                r"v\.douyin\.com/[A-Za-z0-9/_-]+",
-                r"(?:www\.)?douyin\.com/[^\s\"'<>]+",
-                r"(?:www\.)?iesdouyin\.com/[^\s\"'<>]+",
-                r"xhslink\.com/[A-Za-z0-9/_-]+",
-                r"(?:www\.)?xiaohongshu\.com/[^\s\"'<>]+",
-                r"b23\.tv/[^\s\"'<>]+",
-                r"(?:www\.)?bilibili\.com/[^\s\"'<>]+",
-            )
-            extracted = ""
-            for pattern in share_link_patterns:
-                candidate_match = re.search(pattern, url_text, flags=re.IGNORECASE)
-                if candidate_match:
-                    extracted = str(candidate_match.group(0) or "").strip()
-                    break
-            if extracted:
-                url_text = f"https://{extracted.lstrip('/')}"
-
-    url_text = url_text.lstrip(" \t\r\n<([{\"'“‘")
-    url_text = url_text.rstrip(" \t\r\n'\"),.;!?，。！？；：】）》」")
-    parsed = urlparse(url_text)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("仅支持 http/https 视频链接")
-    return url_text
-
-
-def _extract_numeric_media_id(raw_value: Any) -> str:
-    text = str(raw_value or "").strip()
-    if not text:
-        return ""
-    digits = re.sub(r"[^\d]", "", text)
-    if len(digits) < 8:
-        return ""
-    return digits
-
-
-def _build_source_url_candidates(raw_url: Any) -> List[str]:
-    normalized = _normalize_source_url(raw_url)
-    candidates: List[str] = [normalized]
-    parsed = urlparse(normalized)
-    host = str(parsed.netloc or "").lower()
-    path = str(parsed.path or "")
-    query_map = parse_qs(str(parsed.query or ""), keep_blank_values=False)
-
-    def _append_candidate(url_text: str) -> None:
-        text = str(url_text or "").strip()
-        if text and text not in candidates:
-            candidates.append(text)
-
-    if "douyin.com" in host or "iesdouyin.com" in host:
-        media_id = ""
-        for key in ("modal_id", "aweme_id", "video_id", "item_id"):
-            values = query_map.get(key) or []
-            if not values:
-                continue
-            candidate_id = _extract_numeric_media_id(values[0])
-            if candidate_id:
-                media_id = candidate_id
-                break
-        if not media_id:
-            fallback_match = re.search(
-                r"(?:modal_id|aweme_id|video_id|item_id)=([0-9]{8,25})",
-                normalized,
-            )
-            if fallback_match:
-                media_id = fallback_match.group(1)
-        if not media_id:
-            path_match = re.search(r"/(?:video|note|share/video)/(\d{8,25})", path)
-            if path_match:
-                media_id = path_match.group(1)
-
-        if media_id:
-            _append_candidate(f"https://www.douyin.com/video/{media_id}")
-            _append_candidate(f"https://www.iesdouyin.com/share/video/{media_id}/")
-
-    return candidates
-
-
-def _append_unique_url_candidate(
-    candidates: List[str],
-    candidate_url: Any,
-    *,
-    base_url: str = "",
-) -> None:
-    text = html.unescape(str(candidate_url or "").strip())
-    if not text:
-        return
-    text = (
-        text.replace("\\/", "/")
-        .replace("\\u002F", "/")
-        .replace("\\u002f", "/")
-        .rstrip(" \t\r\n'\"),.;!?，。！？；：】）")
-    )
-    if not text:
-        return
-    if text.startswith("//"):
-        text = f"https:{text}"
-    if text.startswith("/") and base_url:
-        text = urljoin(base_url, text)
-    parsed = urlparse(text)
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-        return
-    if text not in candidates:
-        candidates.append(text)
-
-
-def _extract_media_ids_from_text(raw_text: Any) -> List[str]:
-    text = str(raw_text or "")
-    if not text:
-        return []
-
-    patterns = (
-        r"(?:modal_id|aweme_id|video_id|item_id)\D{0,24}([0-9]{8,25})",
-        r"/(?:video|note|share/video)/([0-9]{8,25})",
-    )
-    ids: List[str] = []
-    for pattern in patterns:
-        for match in re.findall(pattern, text):
-            media_id = _extract_numeric_media_id(match)
-            if media_id and media_id not in ids:
-                ids.append(media_id)
-    return ids
-
-
-def _extract_media_ids_from_url(raw_url: Any) -> List[str]:
-    url_text = str(raw_url or "").strip()
-    if not url_text:
-        return []
-    parsed = urlparse(url_text)
-    host = str(parsed.netloc or "").lower()
-    query_map = parse_qs(str(parsed.query or ""), keep_blank_values=False)
-
-    ids: List[str] = []
-    for key in ("modal_id", "aweme_id", "video_id", "item_id"):
-        values = query_map.get(key) or []
-        for value in values:
-            media_id = _extract_numeric_media_id(value)
-            if media_id and media_id not in ids:
-                ids.append(media_id)
-
-    path = str(parsed.path or "")
-    path_match = re.search(r"/(?:video|note|share/video)/([0-9]{8,25})", path)
-    if path_match:
-        media_id = _extract_numeric_media_id(path_match.group(1))
-        if media_id and media_id not in ids:
-            ids.append(media_id)
-
-    if not ids and ("douyin.com" in host or "iesdouyin.com" in host):
-        ids = _extract_media_ids_from_text(url_text)
-    return ids[:8]
-
-
-def _url_contains_media_id(raw_url: Any, media_id: str) -> bool:
-    target = _extract_numeric_media_id(media_id)
-    if not target:
-        return False
-    text = str(raw_url or "")
-    if target in text:
-        return True
-    for item in _extract_media_ids_from_url(raw_url):
-        if item == target:
-            return True
-    return False
-
-
-def _looks_like_video_candidate_url(raw_url: Any) -> bool:
-    text = str(raw_url or "").strip().lower()
-    if not text:
-        return False
-    if re.search(r"\.(mp4|m3u8|mov|webm)(?:$|[?#])", text):
-        return True
-    if any(token in text for token in ("/video/", "/share/video/", "/note/")):
-        return True
-    if any(token in text for token in ("modal_id=", "aweme_id=", "video_id=", "item_id=")):
-        return True
-    return False
-
-
-def _extract_video_urls_from_json_payload(
-    payload: Any,
-    collected: List[str],
-    *,
-    base_url: str = "",
-    key_hint: str = "",
-) -> None:
-    if isinstance(payload, dict):
-        for key, value in payload.items():
-            _extract_video_urls_from_json_payload(
-                value,
-                collected,
-                base_url=base_url,
-                key_hint=str(key or "").strip().lower(),
-            )
-        return
-    if isinstance(payload, list):
-        for value in payload:
-            _extract_video_urls_from_json_payload(
-                value, collected, base_url=base_url, key_hint=key_hint
-            )
-        return
-    if not isinstance(payload, str):
-        return
-
-    normalized = html.unescape(payload).strip()
-    if not normalized:
-        return
-
-    likely_video_key = key_hint in {
-        "contenturl",
-        "embedurl",
-        "url",
-        "src",
-        "playaddr",
-        "play_addr",
-        "playurl",
-        "play_url",
-        "downloadurl",
-        "download_url",
-    }
-    if likely_video_key or _looks_like_video_candidate_url(normalized):
-        _append_unique_url_candidate(collected, normalized, base_url=base_url)
-
-
-def _parse_env_mapping(raw_value: str) -> Dict[str, str]:
-    text = str(raw_value or "").strip()
-    if not text:
-        return {}
-
-    parsed: Dict[str, Any] = {}
-    try:
-        data = json.loads(text)
-    except Exception:
-        data = None
-    if isinstance(data, dict):
-        parsed = data
-    else:
-        parsed = {}
-        for token in re.split(r"[;\n]+", text):
-            part = str(token or "").strip()
-            if not part or "=" not in part:
-                continue
-            key, value = part.split("=", 1)
-            key_text = str(key or "").strip()
-            value_text = str(value or "").strip()
-            if key_text:
-                parsed[key_text] = value_text
-
-    normalized: Dict[str, str] = {}
-    for key, value in parsed.items():
-        key_text = str(key or "").strip()
-        value_text = str(value or "").strip()
-        if key_text and value_text:
-            normalized[key_text] = value_text
-    return normalized
-
 
 def _build_scrapling_reader_settings() -> ScraplingReaderSettings:
     return ScraplingReaderSettings(
@@ -463,38 +261,6 @@ SCRAPLING_PAGE_READER = ScraplingPageReader(
 )
 PLATFORM_LINK_DOWNLOADER = PlatformLinkDownloader(logger_obj=logger, use_llm=True)
 
-
-def _detect_human_verification_signals(
-    status_code: int,
-    final_url: str,
-    html_text: str,
-) -> List[str]:
-    signals: List[str] = []
-    if status_code in {403, 429, 503}:
-        signals.append(f"http_{status_code}")
-
-    final_url_lower = str(final_url or "").strip().lower()
-    if any(token in final_url_lower for token in ("captcha", "challenge", "verify", "security")):
-        signals.append("url_challenge_hint")
-
-    snapshot = str(html_text or "").lower()[:120000]
-    pattern_map = {
-        "captcha": r"\bcaptcha\b",
-        "turnstile": r"\bturnstile\b",
-        "cf_challenge": r"cf[-_]?challenge|cloudflare",
-        "human_check_en": r"verify you are human|security check|access denied",
-        "human_check_zh": r"人机验证|安全验证|请完成验证|滑块验证|行为验证|风控校验",
-    }
-    for label, pattern in pattern_map.items():
-        if re.search(pattern, snapshot, flags=re.IGNORECASE):
-            signals.append(label)
-
-    unique: List[str] = []
-    for item in signals:
-        text = str(item or "").strip()
-        if text and text not in unique:
-            unique.append(text)
-    return unique[:8]
 
 
 def _read_scrape_env_model_options() -> Tuple[str, str, str]:
@@ -597,153 +363,25 @@ def _extract_video_candidates_with_env_model(
     }
 
 
-def _parse_csv_text(raw_value: Any) -> List[str]:
-    text = str(raw_value or "").strip()
-    if not text:
-        return []
-    items: List[str] = []
-    for token in re.split(r"[,\n;]+", text):
-        candidate = str(token or "").strip()
-        if candidate and candidate not in items:
-            items.append(candidate)
-    return items
-
-
-def _parse_yt_dlp_browser_spec(raw_spec: Any) -> Tuple[Any, ...] | None:
-    spec = str(raw_spec or "").strip()
-    if not spec:
-        return None
-    parts = [part.strip() for part in spec.split(":")]
-    browser = str(parts[0] or "").strip().lower()
-    if not browser:
-        return None
-
-    # Supported browsers in yt-dlp cookies module.
-    supported = {
-        "chrome",
-        "edge",
-        "firefox",
-        "safari",
-        "opera",
-        "brave",
-        "chromium",
-        "vivaldi",
-        "whale",
-    }
-    if browser not in supported:
-        return None
-
-    profile = parts[1] if len(parts) > 1 and parts[1] else None
-    keyring = parts[2] if len(parts) > 2 and parts[2] else None
-    container = parts[3] if len(parts) > 3 and parts[3] else None
-    return (browser, profile, keyring, container)
-
-
 def _write_ytdlp_cookiefile_from_header(cookie_header: str, host: str) -> Path | None:
-    header_text = str(cookie_header or "").strip()
-    host_text = str(host or "").strip().lower()
-    if not header_text or not host_text:
-        return None
-    host_text = host_text.split(":", 1)[0]
-    if not host_text:
-        return None
-
-    cookie_items: List[Tuple[str, str]] = []
-    for segment in header_text.split(";"):
-        pair = str(segment or "").strip()
-        if not pair or "=" not in pair:
-            continue
-        key, value = pair.split("=", 1)
-        key_text = str(key or "").strip()
-        value_text = str(value or "").strip()
-        if not key_text:
-            continue
-        cookie_items.append((key_text, value_text))
-    if not cookie_items:
-        return None
-
-    cache_dir = (UPLOAD_STAGING_ROOT / ".yt_dlp_cookie_cache").resolve()
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    cache_key = hashlib.sha256(f"{host_text}|{header_text}".encode("utf-8")).hexdigest()[:16]
-    cookie_file = cache_dir / f"{host_text}_{cache_key}.cookies.txt"
-    lines = ["# Netscape HTTP Cookie File", ""]
-    cookie_domain = host_text
-    if host_text.endswith(".douyin.com"):
-        cookie_domain = ".douyin.com"
-    elif host_text.endswith(".iesdouyin.com"):
-        cookie_domain = ".iesdouyin.com"
-    elif host_text.startswith("."):
-        cookie_domain = host_text
-    else:
-        cookie_domain = f".{host_text}"
-    for key_text, value_text in cookie_items:
-        lines.append(f"{cookie_domain}\tTRUE\t/\tTRUE\t0\t{key_text}\t{value_text}")
-    cookie_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    return cookie_file
+    return _write_ytdlp_cookiefile_from_header_impl(
+        cookie_header,
+        host,
+        cache_root=UPLOAD_STAGING_ROOT / ".yt_dlp_cookie_cache",
+    )
 
 
 def _build_yt_dlp_cookie_sources(raw_url: str = "") -> List[Dict[str, Any]]:
-    sources: List[Dict[str, Any]] = []
-    seen: set[Tuple[str, str]] = set()
-
-    def _add_source(label: str, opts: Dict[str, Any]) -> None:
-        normalized_label = str(label or "").strip() or "unknown"
-        if "cookiefile" in opts:
-            key = ("file", str(opts.get("cookiefile", "")).strip().lower())
-        elif "cookiesfrombrowser" in opts:
-            browser_tuple = tuple(opts.get("cookiesfrombrowser") or ())
-            key = ("browser", "|".join(str(item or "") for item in browser_tuple).lower())
-        else:
-            key = ("none", "none")
-        if key in seen:
-            return
-        seen.add(key)
-        payload = dict(opts)
-        payload["label"] = normalized_label
-        sources.append(payload)
-
-    parsed = urlparse(str(raw_url or "").strip())
-    host = str(parsed.netloc or "").strip()
-    if YTDLP_COOKIE_HEADER and host:
-        generated_cookie_file = _write_ytdlp_cookiefile_from_header(
-            YTDLP_COOKIE_HEADER, host
-        )
-        if generated_cookie_file is not None and generated_cookie_file.exists():
-            _add_source(
-                f"cookieheader:{generated_cookie_file.name}",
-                {"cookiefile": str(generated_cookie_file)},
-            )
-
-    cookies_file = str(YTDLP_COOKIES_FILE or "").strip()
-    if cookies_file:
-        cookie_path = Path(cookies_file).expanduser().resolve(strict=False)
-        if cookie_path.exists() and cookie_path.is_file():
-            _add_source(
-                f"cookiefile:{cookie_path.name}",
-                {"cookiefile": str(cookie_path)},
-            )
-        else:
-            logger.warning("YTDLP_COOKIES_FILE 不存在或不可读: %s", cookie_path)
-
-    for browser_spec in _parse_csv_text(YTDLP_COOKIES_FROM_BROWSER):
-        parsed = _parse_yt_dlp_browser_spec(browser_spec)
-        if parsed is not None:
-            _add_source(
-                f"browser:{parsed[0]}",
-                {"cookiesfrombrowser": parsed},
-            )
-
-    if YTDLP_PREFER_BROWSER_COOKIES:
-        for browser_spec in _parse_csv_text(YTDLP_BROWSER_FALLBACKS):
-            parsed = _parse_yt_dlp_browser_spec(browser_spec)
-            if parsed is not None:
-                _add_source(
-                    f"browser:{parsed[0]}",
-                    {"cookiesfrombrowser": parsed},
-                )
-
-    _add_source("no_cookies", {})
-    return sources
+    return _build_yt_dlp_cookie_sources_impl(
+        raw_url,
+        cookie_header=YTDLP_COOKIE_HEADER,
+        cookies_file=YTDLP_COOKIES_FILE,
+        cookies_from_browser=YTDLP_COOKIES_FROM_BROWSER,
+        prefer_browser_cookies=YTDLP_PREFER_BROWSER_COOKIES,
+        browser_fallbacks=YTDLP_BROWSER_FALLBACKS,
+        cache_root=UPLOAD_STAGING_ROOT / ".yt_dlp_cookie_cache",
+        logger_obj=logger,
+    )
 
 
 def _scrape_page_info_with_scrapling(raw_url: str) -> Dict[str, Any]:
@@ -930,33 +568,15 @@ def _scrape_page_info_with_scrapling(raw_url: str) -> Dict[str, Any]:
 
 
 def _safe_video_filename(raw_name: str, fallback_stem: str = "url_video") -> str:
-    safe_name = secure_filename(str(raw_name or "").strip())
-    fallback = secure_filename(fallback_stem) or "url_video"
-    stem = secure_filename(Path(safe_name).stem) if safe_name else fallback
-    if not stem:
-        stem = fallback
-    suffix = Path(safe_name).suffix.lower() if safe_name else ""
-    if not suffix or suffix.lstrip(".") not in ALLOWED_EXTENSIONS:
-        suffix = ".mp4"
-    return f"{stem}{suffix}"
+    return _safe_video_filename_impl(
+        raw_name,
+        fallback_stem=fallback_stem,
+        allowed_extensions=ALLOWED_EXTENSIONS,
+    )
 
 
 def _extract_filename_from_content_disposition(header_value: str) -> str:
-    text = str(header_value or "").strip()
-    if not text:
-        return ""
-
-    match_ext = re.search(r"filename\*\s*=\s*([^;]+)", text, flags=re.IGNORECASE)
-    if match_ext:
-        value = match_ext.group(1).strip().strip('"')
-        if "''" in value:
-            value = value.split("''", 1)[1]
-        return unquote(value).strip()
-
-    match_plain = re.search(r'filename\s*=\s*"?([^";]+)"?', text, flags=re.IGNORECASE)
-    if match_plain:
-        return unquote(match_plain.group(1)).strip()
-    return ""
+    return _extract_filename_from_content_disposition_impl(header_value)
 
 
 def _guess_video_filename_from_url(
@@ -965,84 +585,21 @@ def _guess_video_filename_from_url(
     content_type: str = "",
     fallback: str = "url_video.mp4",
 ) -> str:
-    candidate = _extract_filename_from_content_disposition(content_disposition)
-    if not candidate:
-        parsed = urlparse(raw_url)
-        candidate = unquote(Path(parsed.path).name)
-
-    safe_candidate = secure_filename(candidate)
-    stem = secure_filename(Path(safe_candidate).stem) if safe_candidate else ""
-    suffix = Path(safe_candidate).suffix.lower() if safe_candidate else ""
-    if stem and suffix and suffix.lstrip(".") in ALLOWED_EXTENSIONS:
-        return f"{stem}{suffix}"
-
-    content_type_value = str(content_type or "").split(";")[0].strip().lower()
-    guessed_ext = mimetypes.guess_extension(content_type_value) or ""
-    guessed_ext = guessed_ext.lower()
-    if guessed_ext.startswith(".") and guessed_ext[1:] in ALLOWED_EXTENSIONS:
-        if not stem:
-            stem = secure_filename(Path(fallback).stem) or "url_video"
-        return f"{stem}{guessed_ext}"
-
-    fallback_stem = stem or secure_filename(Path(fallback).stem) or "url_video"
-    return _safe_video_filename(fallback, fallback_stem=fallback_stem)
-
-
-def _is_disallowed_ip(ip_obj: "ipaddress._BaseAddress") -> bool:
-    """判断 IP 是否属于内网/保留/回环/链路本地等禁止访问的范围。"""
-    return bool(
-        ip_obj.is_private
-        or ip_obj.is_loopback
-        or ip_obj.is_link_local
-        or ip_obj.is_multicast
-        or ip_obj.is_reserved
-        or ip_obj.is_unspecified
+    return _guess_video_filename_from_url_impl(
+        raw_url,
+        content_disposition=content_disposition,
+        content_type=content_type,
+        fallback=fallback,
+        allowed_extensions=ALLOWED_EXTENSIONS,
     )
 
 
 def _assert_url_not_internal(raw_url: str) -> None:
-    """SSRF 防护：解析主机名的所有 IP，拒绝指向内网/保留地址的请求。
-
-    在实际连接前对域名做 DNS 解析并逐个校验，覆盖直接传入内网地址、
-    以及域名解析到内网地址（含部分 DNS rebinding）两类情况。
-    """
-    if URL_IMPORT_ALLOW_PRIVATE_HOSTS:
-        return
-
-    parsed = urlparse(str(raw_url or "").strip())
-    if parsed.scheme.lower() not in {"http", "https"}:
-        raise ValueError("仅支持 http/https 视频链接")
-
-    hostname = (parsed.hostname or "").strip()
-    if not hostname:
-        raise ValueError("无法解析链接主机名")
-
-    # 主机本身就是 IP 字面量时直接校验
-    try:
-        literal_ip = ipaddress.ip_address(hostname)
-    except ValueError:
-        literal_ip = None
-    if literal_ip is not None:
-        if _is_disallowed_ip(literal_ip):
-            raise ValueError("出于安全考虑，禁止访问内网或保留地址")
-        return
-
-    try:
-        addr_infos = socket.getaddrinfo(hostname, parsed.port or None, proto=socket.IPPROTO_TCP)
-    except socket.gaierror as exc:
-        raise ValueError(f"无法解析链接主机名：{hostname}") from exc
-
-    resolved_ips = {info[4][0] for info in addr_infos if info and info[4]}
-    if not resolved_ips:
-        raise ValueError(f"无法解析链接主机名：{hostname}")
-
-    for ip_text in resolved_ips:
-        try:
-            ip_obj = ipaddress.ip_address(ip_text)
-        except ValueError:
-            continue
-        if _is_disallowed_ip(ip_obj):
-            raise ValueError("出于安全考虑，禁止访问内网或保留地址")
+    """SSRF guard: reject URLs that resolve to private/reserved addresses."""
+    return _assert_url_not_internal_impl(
+        raw_url,
+        allow_private_hosts=URL_IMPORT_ALLOW_PRIVATE_HOSTS,
+    )
 
 
 class _SSRFGuardRedirectHandler(HTTPRedirectHandler):
@@ -1055,17 +612,6 @@ class _SSRFGuardRedirectHandler(HTTPRedirectHandler):
 
 _ssrf_safe_opener = build_opener(_SSRFGuardRedirectHandler())
 
-
-def _looks_like_html_payload(prefix: bytes) -> bool:
-    snippet = bytes(prefix or b"").lstrip().lower()[:180]
-    if not snippet:
-        return False
-    return (
-        snippet.startswith(b"<!doctype html")
-        or snippet.startswith(b"<html")
-        or b"<html" in snippet
-        or snippet.startswith(b"<?xml")
-    )
 
 
 def _download_video_with_http(
@@ -1515,15 +1061,15 @@ def _resolve_batch_analyze_workers(
     *,
     total_files: int,
 ) -> int:
-    workers = _safe_int(
-        _env_text(("BATCH_ANALYZE_MAX_WORKERS", "batch_analyze_max_workers"), str(BATCH_ANALYZE_MAX_WORKERS)),
-        BATCH_ANALYZE_MAX_WORKERS,
-        1,
-        16,
+    return _resolve_batch_analyze_workers_impl(
+        total_files=total_files,
+        raw_workers=_env_text(
+            ("BATCH_ANALYZE_MAX_WORKERS", "batch_analyze_max_workers"),
+            str(BATCH_ANALYZE_MAX_WORKERS),
+        ),
+        default_workers=BATCH_ANALYZE_MAX_WORKERS,
+        cpu_count=os.cpu_count(),
     )
-    cpu_cap = max(1, int(os.cpu_count() or 1))
-    file_cap = max(1, int(total_files or 1))
-    return max(1, min(workers, cpu_cap, file_cap))
 
 
 
@@ -1606,116 +1152,17 @@ def _set_cached_upload_risk_result(fingerprint: str, model_key: str, risk: Dict[
     risk_result_cache_service.set(fingerprint, model_key, risk)
 
 
-def _as_bool(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(value)
-
-
 def _json_payload() -> Dict[str, Any]:
     payload = request.get_json(silent=True)
     return payload if isinstance(payload, dict) else {}
 
 
-def _extract_request_id(message: str) -> str:
-    match = re.search(
-        r"request[_\s-]*id['\"]?\s*[:]\s*['\"]?([A-Za-z0-9._-]+)",
-        str(message or ""),
-        flags=re.IGNORECASE,
-    )
-    return str(match.group(1)).strip() if match else ""
-
-
-def _extract_http_status_code(message: str) -> int | None:
-    text = str(message or "")
-    patterns = (
-        r"(?:error\s*code|status\s*code|http(?:\s*status)?)\s*[:=]?\s*(\d{3})",
-        r"['\"]status['\"]\s*[:=]\s*(\d{3})",
-    )
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if not match:
-            continue
-        try:
-            status_code = int(match.group(1))
-        except (TypeError, ValueError):
-            continue
-        if 100 <= status_code <= 599:
-            return status_code
-    return None
-
-
 def _normalize_provider_error(error: Any, default_status: int = 500) -> Tuple[str, int, bool]:
-    if isinstance(error, ProviderFeatureUnsupportedError):
-        capability = getattr(error.capability, "value", str(error.capability))
-        hint = f" {error.hint}" if error.hint else ""
-        return (
-            f"当前模型平台 {error.provider} 不支持能力 {capability}，"
-            f"请切换模型或关闭相应选项后重试。{hint} | code=provider_feature_unsupported",
-            400,
-            True,
-        )
-
-    raw_message = str(error or "").strip() or "模型服务调用失败"
-    lower = raw_message.lower()
-    request_id = _extract_request_id(raw_message)
-    request_id_text = f"（请求 ID：{request_id}）" if request_id else ""
-
-    is_web_search_not_open = (
-        "toolnotopen" in lower or "web search" in lower or "联网搜索" in raw_message
+    return _normalize_provider_error_impl(
+        error,
+        default_status=default_status,
+        web_search_activation_url=WEB_SEARCH_ACTIVATION_URL,
     )
-    if is_web_search_not_open:
-        return (
-            f"联网搜索功能未开通。请先开通后重试：{WEB_SEARCH_ACTIVATION_URL}{request_id_text}",
-            400,
-            True,
-        )
-
-    is_auth_error = (
-        "authentication fails" in lower
-        or "authentication_error" in lower
-        or "invalid_api_key" in lower
-        or "incorrect api key provided" in lower
-        or "api key format is incorrect" in lower
-        or ("api key" in lower and ("invalid" in lower or "is invalid" in lower or "无效" in raw_message))
-    )
-    if is_auth_error:
-        return (
-            f"模型鉴权失败：API Key 无效、已过期，或与当前平台/Base URL 不匹配。{request_id_text}",
-            401,
-            True,
-        )
-
-    if "invalidendpointormodel.notfound" in lower or (
-        "model or endpoint" in lower and "not found" in lower
-    ):
-        return (
-            f"模型连接失败：模型或接口不存在，请检查 Base URL 和模型名称。{request_id_text}",
-            400,
-            True,
-        )
-
-    if "does not exist or you do not have access" in lower:
-        return (
-            f"模型连接失败：模型不存在或当前账号无访问权限。{request_id_text}",
-            403,
-            True,
-        )
-
-    if "rate limit" in lower or "too many requests" in lower:
-        return (f"请求过于频繁，请稍后重试。{request_id_text}", 429, True)
-
-    if "timeout" in lower or "timed out" in lower:
-        return (f"模型服务请求超时，请稍后重试。{request_id_text}", 504, True)
-
-    status_code = _extract_http_status_code(raw_message)
-    if status_code is not None and 400 <= status_code <= 599:
-        return (f"模型服务调用失败（HTTP {status_code}）。{request_id_text}", status_code, True)
-
-    return raw_message, default_status, False
-
 
 
 
@@ -1829,20 +1276,7 @@ def _maybe_correct_subtitles(agent, srt_path, report=None) -> int:
 
 
 def _build_unique_upload_path(filename: str) -> Path:
-    safe_name = secure_filename(filename)
-    if not safe_name:
-        safe_name = f"upload_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-
-    candidate = UPLOAD_ROOT / safe_name
-    stem = candidate.stem
-    suffix = candidate.suffix
-    counter = 1
-
-    while candidate.exists():
-        candidate = UPLOAD_ROOT / f"{stem}_{counter}{suffix}"
-        counter += 1
-
-    return candidate
+    return _build_unique_upload_path_impl(filename, upload_root=UPLOAD_ROOT)
 
 
 
@@ -1921,74 +1355,21 @@ def _mark_uploaded_video_loaded_now(video_path: Path) -> None:
 
 
 def _create_unique_output_dir(video_path: Path) -> Path:
-    base_name = secure_filename(video_path.stem) or "video"
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    candidate = OUTPUT_ROOT / f"{base_name}_{timestamp}"
-    counter = 1
-
-    while candidate.exists():
-        candidate = OUTPUT_ROOT / f"{base_name}_{timestamp}_{counter}"
-        counter += 1
-
-    candidate.mkdir(parents=True, exist_ok=False)
-    return candidate
+    return _create_unique_output_dir_impl(video_path, output_root=OUTPUT_ROOT)
 
 
-
-def _risk_decision_rank(decision: str) -> int:
-    order = {"allow": 0, "restrict": 1, "block": 2}
-    return order.get(str(decision or "").strip().lower(), 0)
-
-
-def _risk_decision_from_rank(rank: int) -> str:
-    if rank >= 2:
-        return "block"
-    if rank <= 0:
-        return "allow"
-    return "restrict"
-
-
-def _risk_level_from_decision(decision: str) -> str:
-    normalized = str(decision or "").strip().lower()
-    if normalized == "block":
-        return "high"
-    if normalized == "restrict":
-        return "medium"
-    return "low"
 
 
 def _resolve_risk_frame_count(max_frames: int, video_duration_seconds: float | None) -> int:
-    base_count = _safe_int(max_frames, RISK_MAX_FRAMES, RISK_MIN_FRAMES, RISK_DYNAMIC_MAX_FRAMES)
-    if video_duration_seconds is None or video_duration_seconds <= 0:
-        return base_count
-
-    growth_source = max(0.0, float(video_duration_seconds) - RISK_FRAME_GROWTH_START_SECONDS)
-    bonus_frames = int(growth_source // RISK_FRAME_GROWTH_EVERY_SECONDS)
-    return _safe_int(
-        base_count + bonus_frames,
-        base_count,
-        RISK_MIN_FRAMES,
-        RISK_DYNAMIC_MAX_FRAMES,
+    return _resolve_risk_frame_count_impl(
+        max_frames,
+        video_duration_seconds,
+        default_max_frames=RISK_MAX_FRAMES,
+        min_frames=RISK_MIN_FRAMES,
+        dynamic_max_frames=RISK_DYNAMIC_MAX_FRAMES,
+        growth_start_seconds=RISK_FRAME_GROWTH_START_SECONDS,
+        growth_every_seconds=RISK_FRAME_GROWTH_EVERY_SECONDS,
     )
-
-
-def _stable_risk_sampling_seed(
-    video_path: Path | None, video_duration_seconds: float | None, frame_count: int
-) -> int:
-    path_text = str(video_path or "")
-    size = 0
-    mtime_ns = 0
-    if video_path is not None:
-        try:
-            stat_info = video_path.stat()
-            size = int(getattr(stat_info, "st_size", 0))
-            mtime_ns = int(getattr(stat_info, "st_mtime_ns", int(stat_info.st_mtime * 1e9)))
-        except OSError:
-            pass
-    duration_text = "none" if video_duration_seconds is None else f"{float(video_duration_seconds):.3f}"
-    seed_text = f"{path_text}|{size}|{mtime_ns}|{duration_text}|{frame_count}"
-    digest = hashlib.sha256(seed_text.encode("utf-8", errors="ignore")).hexdigest()
-    return int(digest[:16], 16)
 
 
 def _build_risk_timestamps(
@@ -1997,56 +1378,17 @@ def _build_risk_timestamps(
     video_duration_seconds: float | None = None,
     video_path: Path | None = None,
 ) -> List[int]:
-    frame_count = _resolve_risk_frame_count(max_frames, video_duration_seconds)
-    if video_duration_seconds is None or video_duration_seconds <= 0:
-        base = [0, 2, 5, 10, 15, 25, 35, 50, 70, 95, 125, 160, 200, 245, 295]
-        return base[:frame_count]
-
-    max_second = max(1, int(video_duration_seconds) - 1)
-    seed = _stable_risk_sampling_seed(video_path, video_duration_seconds, frame_count)
-    rng = random.Random(seed)
-
-    timestamps: List[int] = []
-    for idx in range(frame_count):
-        segment_start = int((idx * max_second) / frame_count)
-        segment_end = int(((idx + 1) * max_second) / frame_count)
-        if idx == frame_count - 1:
-            segment_end = max_second
-        if segment_end < segment_start:
-            segment_end = segment_start
-        if segment_end == segment_start:
-            sample = segment_start
-        else:
-            sample = rng.randint(segment_start, segment_end)
-        timestamps.append(sample)
-
-    unique_sorted = sorted(set(max(0, min(max_second, int(ts))) for ts in timestamps))
-    while len(unique_sorted) < frame_count:
-        candidate = rng.randint(0, max_second)
-        if candidate in unique_sorted:
-            continue
-        unique_sorted.append(candidate)
-        unique_sorted.sort()
-
-    return unique_sorted[:frame_count]
-
-
-def _is_image_input_not_supported_error(error: Any) -> bool:
-    text = str(error or "").lower()
-    if not text:
-        return False
-    image_tokens = ("image_url", "image input", "vision", "multimodal", "multi-modal")
-    unsupported_tokens = (
-        "not support",
-        "unsupported",
-        "only supported",
-        "does not support",
-        "invalid content type",
-        "not allowed",
+    return _build_risk_timestamps_impl(
+        max_frames,
+        video_duration_seconds=video_duration_seconds,
+        video_path=video_path,
+        default_max_frames=RISK_MAX_FRAMES,
+        min_frames=RISK_MIN_FRAMES,
+        dynamic_max_frames=RISK_DYNAMIC_MAX_FRAMES,
+        growth_start_seconds=RISK_FRAME_GROWTH_START_SECONDS,
+        growth_every_seconds=RISK_FRAME_GROWTH_EVERY_SECONDS,
     )
-    has_image_hint = any(token in text for token in image_tokens)
-    has_unsupported_hint = any(token in text for token in unsupported_tokens)
-    return has_image_hint and has_unsupported_hint
+
 
 
 def _sample_risk_frames(
@@ -2523,8 +1865,7 @@ def _run_video_risk_gate(
 
 
 def _reason_code_slug(reason_code: str) -> str:
-    slug = secure_filename(str(reason_code or "").strip().lower()).replace("-", "_")
-    return slug or "content_policy"
+    return _reason_code_slug_impl(reason_code)
 
 
 def _quarantine_upload_file(video_path: Path, reason_code: str) -> Path | None:
@@ -2537,15 +1878,11 @@ def _quarantine_upload_file(video_path: Path, reason_code: str) -> Path | None:
     if not resolved.exists() or not resolved.is_file():
         return None
 
-    reason_dir = QUARANTINE_ROOT / _reason_code_slug(reason_code)
-    reason_dir.mkdir(parents=True, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    target = reason_dir / f"{resolved.stem}_{timestamp}{resolved.suffix}"
-    counter = 1
-    while target.exists():
-        target = reason_dir / f"{resolved.stem}_{timestamp}_{counter}{resolved.suffix}"
-        counter += 1
+    target = _build_unique_quarantine_path_impl(
+        resolved,
+        quarantine_root=QUARANTINE_ROOT,
+        reason_code=reason_code,
+    )
 
     try:
         shutil.move(str(resolved), str(target))
@@ -2556,27 +1893,26 @@ def _quarantine_upload_file(video_path: Path, reason_code: str) -> Path | None:
 
 
 def _should_block_by_risk(decision: str) -> bool:
-    return decision == "block" or (decision == "restrict" and RISK_BLOCK_ON_RESTRICT)
+    return _should_block_by_risk_impl(
+        decision, block_on_restrict=RISK_BLOCK_ON_RESTRICT
+    )
 
 
 def _build_upload_staging_path(filename: str) -> Path:
-    safe_name = secure_filename(filename)
-    if not safe_name:
-        safe_name = f"staging_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-
-    suffix = Path(safe_name).suffix or ".mp4"
-    stem = Path(safe_name).stem or "staging"
-    candidate = UPLOAD_STAGING_ROOT / f"{stem}_{uuid4().hex[:10]}{suffix}"
+    candidate = _build_upload_staging_path_impl(
+        filename,
+        staging_root=UPLOAD_STAGING_ROOT,
+        token=uuid4().hex[:10],
+    )
     _assert_within(candidate.resolve(strict=False), UPLOAD_STAGING_ROOT, "staging_path")
     return candidate
 
 
 def _safe_remove_file(path: Path) -> None:
-    try:
-        if path.exists() and path.is_file():
-            path.unlink()
-    except OSError:
-        logger.warning("删除文件失败: %s", path)
+    _safe_remove_file_impl(
+        path, on_error=lambda failed_path, _exc: logger.warning("??????: %s", failed_path)
+    )
+
 
 
 class UploadRiskService:
@@ -2948,96 +2284,23 @@ def _normalize_upload_model_options(
 
 
 def _compact_text(value: Any, limit: int = 120) -> str:
-    text = re.sub(r"\s+", " ", str(value or "")).strip()
-    if len(text) <= max(1, int(limit)):
-        return text
-    return text[: max(1, int(limit) - 1)].rstrip() + "…"
+    return _compact_text_impl(value, limit)
+
 
 
 def _extract_action_phrase_from_subtitle(text: Any) -> Tuple[str, str]:
-    normalized = re.sub(r"\s+", " ", str(text or "")).strip()
-    if not normalized:
-        return "", ""
-
-    verbs = [
-        "打开",
-        "点击",
-        "选择",
-        "输入",
-        "搜索",
-        "切换",
-        "进入",
-        "创建",
-        "新增",
-        "删除",
-        "修改",
-        "编辑",
-        "保存",
-        "提交",
-        "上传",
-        "下载",
-        "导出",
-        "复制",
-        "粘贴",
-        "拖动",
-        "调整",
-        "设置",
-        "勾选",
-        "取消",
-        "确认",
-        "启动",
-        "运行",
-    ]
-    for verb in verbs:
-        idx = normalized.find(verb)
-        if idx < 0:
-            continue
-        tail = normalized[idx + len(verb) :].strip()
-        tail = re.split(r"[，。！？；,.!?;：:\n]", tail, maxsplit=1)[0].strip()
-        tail = re.sub(r"^(了|一下|一下子|并|然后|再|再去|将|把|对|给|到|为|向|于|在|通过|进行|完成)\s*", "", tail)
-        return verb, _compact_text(tail, 16)
-    return "", ""
+    return _extract_action_phrase_from_subtitle_impl(text)
 
 
 def _pick_timeline_points_from_subtitles(
     subtitles: List[Dict[str, Any]],
     minimum: int = 3,
 ) -> List[Dict[str, Any]]:
-    valid_items = [
-        item
-        for item in subtitles
-        if isinstance(item, dict) and str(item.get("text", "")).strip()
-    ]
-    total = len(valid_items)
-    if total <= 0:
-        return []
-
-    target = max(minimum, min(FALLBACK_CANDIDATE_MAX_STEPS, 5))
-    target = min(target, total) if total >= minimum else total
-    if target <= 0:
-        return []
-
-    segment = float(total) / float(max(1, target))
-    selected_indices: List[int] = []
-    for idx in range(target):
-        center = int(idx * segment + segment / 2.0)
-        selected_indices.append(max(0, min(total - 1, center)))
-    selected_indices = sorted(set(selected_indices))
-
-    timeline: List[Dict[str, Any]] = []
-    for sub_idx in selected_indices:
-        item = valid_items[sub_idx]
-        start_seconds = _safe_float(item.get("start_seconds"), 0.0, 0.0)
-        timeline.append(
-            {
-                "time": _format_seconds_to_mmss(start_seconds),
-                "text": _compact_text(item.get("text", ""), 72),
-                "start_seconds": start_seconds,
-                "raw": item,
-            }
-        )
-    return timeline
-
+    return _pick_timeline_points_from_subtitles_impl(
+        subtitles,
+        minimum=minimum,
+        max_steps=FALLBACK_CANDIDATE_MAX_STEPS,
+    )
 
 def _ensure_minimum_step_count(
     steps: List[Dict[str, Any]],
@@ -3045,33 +2308,11 @@ def _ensure_minimum_step_count(
     min_steps: int = FALLBACK_MIN_STEPS,
     reason: str = "",
 ) -> List[Dict[str, Any]]:
-    normalized_steps = list(steps)
-    if len(normalized_steps) >= min_steps:
-        return normalized_steps
-
-    defaults = [
-        ("00:00", "内容概览", "已自动补齐基础概览，帮助快速理解视频整体主题。"),
-        ("00:20", "关键信息提炼", "已自动补齐关键要点，建议结合原视频进行确认。"),
-        ("00:40", "下一步建议", "可切换更强模型或补充字幕后再次分析，以提升步骤准确率。"),
-    ]
-    reason_hint = _compact_text(reason, 54)
-    while len(normalized_steps) < min_steps:
-        idx = len(normalized_steps)
-        default_time, default_title, default_desc = defaults[min(idx, len(defaults) - 1)]
-        normalized_steps.append(
-            {
-                "step": idx + 1,
-                "time": default_time,
-                "title": default_title,
-                "description": (
-                    f"{default_desc}（{reason_hint}）" if reason_hint and idx == 1 else default_desc
-                ),
-                "confidence": round(max(0.2, 0.3 - idx * 0.03), 2),
-                "source": "fallback_padding",
-            }
-        )
-    return normalized_steps
-
+    return _ensure_minimum_step_count_impl(
+        steps,
+        min_steps=min_steps,
+        reason=reason,
+    )
 
 def _build_subtitle_candidate_steps(
     subtitles: List[Dict[str, Any]],
@@ -3267,41 +2508,15 @@ def _build_fallback_steps_when_empty(
 
 
 def _extract_timeline_from_steps(steps: List[Dict[str, Any]], limit: int = 5) -> List[Dict[str, Any]]:
-    timeline: List[Dict[str, Any]] = []
-    for item in steps:
-        if not isinstance(item, dict):
-            continue
-        time_text = str(item.get("time", "")).strip()
-        title_text = _compact_text(item.get("title", ""), 40)
-        if not time_text and not title_text:
-            continue
-        timeline.append({"time": time_text or "00:00", "text": title_text})
-        if len(timeline) >= limit:
-            break
-    while len(timeline) < FALLBACK_MIN_STEPS:
-        defaults = ["00:00", "00:20", "00:40"]
-        timeline.append({"time": defaults[len(timeline)], "text": "待确认片段"})
-    return timeline
+    return _extract_timeline_from_steps_impl(
+        steps,
+        limit=limit,
+        min_steps=FALLBACK_MIN_STEPS,
+    )
 
 
 def _build_key_points_from_steps(steps: List[Dict[str, Any]], limit: int = 5) -> List[str]:
-    key_points: List[str] = []
-    for item in steps:
-        if not isinstance(item, dict):
-            continue
-        title_text = _compact_text(item.get("title", ""), 24)
-        desc_text = _compact_text(item.get("description", ""), 48)
-        time_text = str(item.get("time", "")).strip() or "00:00"
-        if title_text:
-            key_points.append(f"{time_text}：{title_text}")
-        elif desc_text:
-            key_points.append(f"{time_text}：{desc_text}")
-        if len(key_points) >= limit:
-            break
-    while len(key_points) < 3:
-        key_points.append("00:00：待确认要点")
-    return key_points[:limit]
-
+    return _build_key_points_from_steps_impl(steps, limit=limit, min_points=3)
 
 def _build_result_meta_from_steps(
     *,
@@ -3348,21 +2563,10 @@ def _build_result_meta_from_steps(
 
 
 def _build_blocked_notice_payload(risk: Dict[str, Any]) -> Dict[str, Any]:
-    risk_level = str(risk.get("risk_level", "high")).strip().lower() or "high"
-    reason_code = str(risk.get("reason_code", "CONTENT_POLICY_VIOLATION")).strip().upper()
-    reason = str(risk.get("reason", "")).strip() or CONTENT_POLICY_BLOCK_MESSAGE
-    return {
-        "title": "安全检测未通过（已拦截）",
-        "risk_level": risk_level,
-        "reason_code": reason_code,
-        "reason": reason,
-        "suggestions": [
-            "删除或替换涉及色情/裸露/血腥/暴力的敏感画面。",
-            "对高风险片段进行裁剪、打码或弱化处理后再导出视频。",
-            "完成整改后重新上传并发起安全检测。",
-        ],
-        "retry_guidance": "请先完成内容整改，再重新上传触发检测。",
-    }
+    return _build_blocked_notice_payload_impl(
+        risk,
+        default_reason=CONTENT_POLICY_BLOCK_MESSAGE,
+    )
 
 
 class VideoProcessingService:
@@ -5210,17 +4414,8 @@ def cleanup(filename):
         if upload_file_path.exists():
             upload_file_path.unlink()
 
-        # 兼容旧目录命名: outputs/<stem>
-        legacy_output_dir = OUTPUT_ROOT / Path(safe_name).stem
-        if legacy_output_dir.exists() and legacy_output_dir.is_dir():
-            shutil.rmtree(legacy_output_dir)
-
-        # 新目录命名: outputs/<stem>_<timestamp>
-        stem_prefix = secure_filename(Path(safe_name).stem)
-        if stem_prefix:
-            for output_dir in OUTPUT_ROOT.glob(f"{stem_prefix}_*"):
-                if output_dir.is_dir():
-                    shutil.rmtree(output_dir)
+        for output_dir in _find_cleanup_output_dirs(safe_name, output_root=OUTPUT_ROOT):
+            shutil.rmtree(output_dir)
 
         return jsonify({"success": True})
     except Exception as exc:

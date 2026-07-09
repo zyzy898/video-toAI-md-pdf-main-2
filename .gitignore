@@ -37,6 +37,13 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
+
+# -----------------------------
+# Local test fixtures
+# -----------------------------
+steps.json
+test_1.mp4
+
 # -----------------------------
 # Local environment files
 # -----------------------------

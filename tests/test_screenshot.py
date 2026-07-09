@@ -1,28 +1,38 @@
 import json
-from video_analyzer_agent import VideoAnalyzerAgent
+from pathlib import Path
+
+import pytest
 
 
-def test_screenshot():
-    # 读取步骤分析结果
-    with open("steps.json", "r", encoding="utf-8") as f:
-        steps = json.load(f)
+REPO_ROOT = Path(__file__).resolve().parents[1]
+STEPS_PATH = REPO_ROOT / "steps.json"
+VIDEO_PATH = REPO_ROOT / "test_1.mp4"
 
-    # 创建Agent实例
-    agent = VideoAnalyzerAgent()
 
-    # 测试截图功能
-    video_path = "test_1.mp4"
+def test_screenshot_generation_with_local_fixtures():
+    """Run screenshot generation only when the large local fixtures are present."""
+    missing_fixtures = [
+        fixture.name
+        for fixture in (STEPS_PATH, VIDEO_PATH)
+        if not fixture.exists()
+    ]
+    if missing_fixtures:
+        pytest.skip(
+            "requires local screenshot fixtures: "
+            + ", ".join(missing_fixtures)
+        )
 
-    # 只测试前3个步骤
+    from video_analyzer_agent import VideoAnalyzerAgent
+
+    steps = json.loads(STEPS_PATH.read_text(encoding="utf-8"))
+    assert isinstance(steps, list)
+
     test_steps = steps[:3]
+    assert test_steps, "steps.json must contain at least one step"
 
-    print(f"正在测试截图功能，将为前{len(test_steps)}个步骤生成截图...")
-    screenshot_paths = agent.generate_screenshots_from_steps(video_path, test_steps)
+    agent = VideoAnalyzerAgent()
+    screenshot_paths = agent.generate_screenshots_from_steps(str(VIDEO_PATH), test_steps)
 
-    print(f"测试完成，生成了{len(screenshot_paths)}张截图")
-    for path in screenshot_paths:
-        print(f"  - {path}")
-
-
-if __name__ == "__main__":
-    test_screenshot()
+    assert len(screenshot_paths) == len(test_steps)
+    for screenshot_path in screenshot_paths:
+        assert Path(screenshot_path).exists()

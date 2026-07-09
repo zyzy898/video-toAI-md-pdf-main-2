@@ -7,8 +7,10 @@ from typing import Any, Callable, Dict, Tuple
 from urllib.parse import parse_qs, urlparse
 
 try:
-    from Scrapling_download.shared_llm_config import get_shared_llm_config
-except Exception:
+    from .shared_llm_config import get_shared_llm_config
+except ImportError:
+    if __package__:
+        raise
     from shared_llm_config import get_shared_llm_config
 
 
