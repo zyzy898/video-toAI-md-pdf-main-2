@@ -264,8 +264,7 @@ export default function App() {
     }
     return "dark";
   });
-  const [maxVision] = useState(10);
-  const [webSearch, setWebSearch] = useState(false);
+  const [, setWebSearch] = useState(false);
   const [summaryOnly] = useState(false);
   const [sourceUrl, setSourceUrl] = useState("");
   const [importingUrl, setImportingUrl] = useState(false);
@@ -834,7 +833,7 @@ export default function App() {
             const apiError = error instanceof ApiRequestError ? error : null;
             let message = String((error as Error).message || error || "上传失败");
             if (apiError?.payload?.code === "content_policy_violation") {
-              message = formatContentPolicyViolationMessage("");
+              message = formatContentPolicyViolationMessage();
             } else if (apiError?.payload?.error) {
               message = String(apiError.payload.error);
             }
@@ -994,16 +993,14 @@ export default function App() {
     fetchJson,
     hideProgress,
     loadHistory,
-    maxVision,
     showError,
     showSuccess,
     startSinglePolling,
     stopBatchPolling,
     stopSinglePolling,
-    summaryOnly,
     uiScrollBehavior,
+    summaryOnly,
     updateProgressBoard,
-    webSearch,
   ]);
 
   const analyzeSingle = useCallback(async () => {
@@ -1098,7 +1095,7 @@ export default function App() {
       filename: guessUrlVideoName(urls[0]),
       filepath: "",
       status: "processing",
-      error: "正在导入链接视频...",
+      error: "正在下载并分析链接视频...",
       clientId,
     };
     setBatchFiles((prev) => [placeholder, ...prev]);
@@ -1106,36 +1103,155 @@ export default function App() {
     stopBatchPolling();
     stopSinglePolling();
     setIsAnalyzing(true);
+    hideProgress();
+    updateProgressBoard({
+      mode: "single",
+      stage: "download",
+      total: 1,
+      current: 0,
+      success: 0,
+      failed: 0,
+      currentFile: placeholder.filename,
+      percent: 5,
+    });
+    startSinglePolling();
+    let reveal = false;
 
     try {
-      const uploadedItem = await uploadBySourceUrl(urls[0]);
-      replaceBatchFileByClientId(clientId, { ...uploadedItem, clientId });
+      const data = await fetchJson<SingleResultData & { filename?: string; filepath?: string; download_title?: string }>(
+        "/analyze_url",
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            url: urls[0],
+          }),
+        },
+      );
+      const uploadedPath = String(data.filepath || "").trim();
+      if (!uploadedPath) throw new Error("链接分析失败：未返回可分析文件");
+      const uploadedName =
+        String(data.download_title || data.filename || "").trim() ||
+        basename(uploadedPath) ||
+        "链接视频";
+
+      replaceBatchFileByClientId(clientId, {
+        filename: uploadedName,
+        filepath: uploadedPath,
+        status: "success",
+        error: "",
+        clientId,
+      });
       setSourceUrl("");
-      await analyzeByUploadedFile(uploadedItem);
+      setResultData(data);
+      setBatchResultData(null);
+      setIsEditMode(false);
+      setEditedSteps([]);
+      setActiveResultTab("steps");
+      setView("result");
+      if (data?.fallback_used) {
+        showSuccess(String(data.analysis_note || "未识别到标准步骤，已自动生成候选内容。"));
+      }
+      updateProgressBoard({
+        mode: "single",
+        stage: "done",
+        total: 1,
+        current: 1,
+        success: 1,
+        failed: 0,
+        currentFile: uploadedName,
+        percent: 100,
+      });
+      reveal = true;
+      await loadHistory();
     } catch (error) {
+      const apiError = error instanceof ApiRequestError ? error : null;
+      if (apiError?.payload?.code === "content_policy_violation") {
+        const blockedNotice = apiError.payload.blocked_notice || {
+          title: "安全检测未通过（已拦截）",
+          risk_level: String(apiError.payload.risk?.risk_level || "high"),
+          reason_code: String(apiError.payload.risk?.reason_code || "CONTENT_POLICY_VIOLATION"),
+          reason: String(apiError.payload.risk?.reason || CONTENT_POLICY_BLOCK_MESSAGE),
+          suggestions: ["删除敏感片段后重新上传检测。"],
+          retry_guidance: "请整改后重试。",
+        };
+        setResultData({
+          steps: [],
+          markdown: "",
+          output_dir: "",
+          pdf_path: "",
+          result_mode: "blocked_notice",
+          fallback_used: false,
+          analysis_note: String(apiError.payload.analysis_note || "已生成安全检测结果说明卡。"),
+          quality_score: Number(apiError.payload.quality_score || 0),
+          degrade_reason: String(apiError.payload.degrade_reason || "content_policy_blocked"),
+          blocked_notice: blockedNotice,
+          risk: apiError.payload.risk,
+        });
+        setBatchResultData(null);
+        setIsEditMode(false);
+        setEditedSteps([]);
+        setActiveResultTab("steps");
+        setView("result");
+        replaceBatchFileByClientId(clientId, {
+          ...placeholder,
+          status: "failed",
+          error: "安全检测未通过",
+        });
+        updateProgressBoard({
+          mode: "single",
+          stage: "done",
+          total: 1,
+          current: 1,
+          success: 0,
+          failed: 1,
+          currentFile: placeholder.filename,
+          percent: 100,
+        });
+        showSuccess("安全检测未通过，已生成检测结果说明卡。");
+        reveal = true;
+        return;
+      }
       const message = `链接分析失败: ${String((error as Error).message || error)}`;
+      if (WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint))) setWebSearch(false);
       replaceBatchFileByClientId(clientId, {
         ...placeholder,
         status: "failed",
         error: formatInlineErrorMessage(message),
       });
+      updateProgressBoard({
+        mode: "single",
+        stage: "failed",
+        total: 1,
+        current: 1,
+        success: 0,
+        failed: 1,
+        currentFile: placeholder.filename,
+        percent: 100,
+      });
       showError(message);
-      hideProgress();
-      setIsAnalyzing(false);
     } finally {
+      stopSinglePolling();
+      setIsAnalyzing(false);
+      hideProgress();
       setImportingUrl(false);
+      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
     }
   }, [
-    analyzeByUploadedFile,
+    fetchJson,
     guessUrlVideoName,
     hideProgress,
+    loadHistory,
     nextPendingFileId,
     replaceBatchFileByClientId,
     showError,
+    showSuccess,
     sourceUrl,
+    startSinglePolling,
     stopBatchPolling,
     stopSinglePolling,
-    uploadBySourceUrl,
+    uiScrollBehavior,
+    updateProgressBoard,
     verifyModelConnectionForUpload,
   ]);
 
@@ -1217,7 +1333,6 @@ export default function App() {
     fetchJson,
     hideProgress,
     loadHistory,
-    maxVision,
     countBatchStatus,
     showError,
     startBatchPolling,
@@ -1225,9 +1340,7 @@ export default function App() {
     stopSinglePolling,
     updateProgressBoard,
     uiScrollBehavior,
-    webSearch,
     getAnalyzableBatchFiles,
-    summaryOnly,
   ]);
 
   const startAnalyze = useCallback(async () => {

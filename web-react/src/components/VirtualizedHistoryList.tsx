@@ -75,8 +75,11 @@ export const VirtualizedHistoryList = memo(function VirtualizedHistoryList({
   useEffect(() => {
     const maxScroll = Math.max(0, totalHeight - viewportHeight);
     if (scrollTop <= maxScroll) return;
-    setScrollTop(maxScroll);
-    if (containerRef.current) containerRef.current.scrollTop = maxScroll;
+    const frame = window.requestAnimationFrame(() => {
+      setScrollTop(maxScroll);
+      if (containerRef.current) containerRef.current.scrollTop = maxScroll;
+    });
+    return () => window.cancelAnimationFrame(frame);
   }, [scrollTop, totalHeight, viewportHeight]);
 
   const handleScroll = useCallback((event: UIEvent<HTMLDivElement>) => {

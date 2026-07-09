@@ -21,7 +21,7 @@ export const extractErrorCode = (message: string) => {
   return String(match?.[1] || "").trim().toLowerCase();
 };
 
-export const formatContentPolicyViolationMessage = (_message: string) => {
+export const formatContentPolicyViolationMessage = () => {
   return CONTENT_POLICY_BLOCK_MESSAGE;
 };
 
@@ -157,7 +157,7 @@ export const formatErrorMessage = (rawMessage: string) => {
   const segmentPolicyGuide = formatSegmentPolicyGuideByCode(errorCode, message, requestIdText);
   if (segmentPolicyGuide) return segmentPolicyGuide;
   if (errorCode === "content_policy_violation" || message.includes("上传被拒绝")) {
-    return formatContentPolicyViolationMessage(message);
+    return formatContentPolicyViolationMessage();
   }
 
   const lower = message.toLowerCase();
@@ -190,7 +190,7 @@ export const formatInlineErrorMessage = (rawMessage: string) => {
   const segmentPolicyGuide = formatSegmentPolicyGuideByCode(errorCode, message, requestIdText);
   if (segmentPolicyGuide) return segmentPolicyGuide;
   if (errorCode === "content_policy_violation" || message.includes("上传被拒绝")) {
-    return formatContentPolicyViolationMessage(message);
+    return formatContentPolicyViolationMessage();
   }
   const lower = message.toLowerCase();
 

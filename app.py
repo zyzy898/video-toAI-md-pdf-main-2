@@ -3222,6 +3222,7 @@ def _build_fallback_steps_when_empty(
             )
             normalized_srt_path = generated_srt if generated_srt else normalized_srt_path
             if normalized_srt_path and Path(normalized_srt_path).exists():
+                _maybe_correct_subtitles(agent, normalized_srt_path)
                 subtitles = agent.parse_srt(normalized_srt_path)
         except Exception as exc:
             logger.warning("降级步骤生成时重新转写字幕失败: %s", exc)
@@ -4028,6 +4029,247 @@ def upload_from_url():
     except Exception as exc:
         _safe_remove_file(staged_path)
         return jsonify({"error": f"链接上传失败: {str(exc)}"}), 500
+
+
+
+@app.route("/analyze_url", methods=["POST"])
+def analyze_from_url():
+    data = _json_payload()
+    history_owner_id = _ensure_history_owner()
+    task_id = _resolve_progress_task_id(data.get("task_id", data.get("progress_task_id", "")))
+    try:
+        source_url = _normalize_source_url(data.get("url", ""))
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "task_id": task_id}), 400
+    try:
+        api_key, model_name, model_base_url = _read_shared_backend_model_options(
+            require_api_key=True
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "task_id": task_id}), 503
+
+    whisper_model, use_video, web_search, max_vision, fps = _normalize_processing_options(
+        data
+    )
+    summary_only = _as_bool(data.get("summary_only", False))
+    requested_name = _safe_video_filename(
+        str(data.get("filename", "")).strip()
+        or _guess_video_filename_from_url(source_url, fallback="url_video.mp4"),
+        fallback_stem="url_video",
+    )
+
+    def _unpack_route_result(result: Any) -> Tuple[Dict[str, Any], int]:
+        status_code = 200
+        response_obj = result
+        if isinstance(result, tuple):
+            response_obj = result[0]
+            if len(result) > 1:
+                try:
+                    status_code = int(result[1])
+                except (TypeError, ValueError):
+                    status_code = 500
+        payload: Dict[str, Any] = {}
+        try:
+            if hasattr(response_obj, "get_json"):
+                payload = response_obj.get_json(silent=True) or {}
+        except Exception:
+            payload = {}
+        return payload, status_code
+
+    try:
+        _update_single_progress(
+            owner_id=history_owner_id,
+            task_id=task_id,
+            status="processing",
+            current_file=requested_name,
+            stage="download",
+            message="正在下载链接视频...",
+        )
+        upload_payload, upload_status = _unpack_route_result(upload_from_url())
+        if upload_status >= 400:
+            upload_payload["task_id"] = task_id
+            _update_single_progress(
+                owner_id=history_owner_id,
+                task_id=task_id,
+                status="failed",
+                stage="failed",
+                message=str(upload_payload.get("error", "链接视频下载失败")),
+            )
+            return jsonify(upload_payload), upload_status
+
+        video_path_text = str(upload_payload.get("filepath", "")).strip()
+        if not video_path_text:
+            raise RuntimeError("链接导入失败：未返回可分析文件")
+        video_path = Path(video_path_text).resolve(strict=False)
+        if not video_path.exists() or not video_path.is_file():
+            raise FileNotFoundError("链接导入成功但视频文件不存在")
+
+        segment_policy = _build_video_segment_policy(video_path)
+        if bool(segment_policy.get("requires_trim")):
+            reject_payload = _build_segment_policy_reject_payload(
+                segment_policy,
+                code="video_segment_trim_required",
+                error_message=(
+                    "当前视频属于裁剪优先区（超长或超大文件），"
+                    "请先裁剪后再分析。"
+                ),
+            )
+            reject_payload["task_id"] = task_id
+            return jsonify(reject_payload), 400
+
+        (
+            effective_use_video,
+            effective_web_search,
+            effective_max_vision,
+            effective_summary_only,
+            segment_guardrails,
+        ) = _apply_video_segment_processing_guardrails(
+            segment_policy,
+            use_video=use_video,
+            web_search=web_search,
+            max_vision=max_vision,
+            summary_only=summary_only,
+        )
+
+        def _single_progress_callback(stage: str, message: str) -> None:
+            _update_single_progress(
+                owner_id=history_owner_id,
+                task_id=task_id,
+                status="processing",
+                current_file=video_path.name,
+                stage=stage,
+                message=message,
+            )
+
+        steps, md_content, output_dir, output_pdf, has_steps, result_meta = process_video(
+            video_path,
+            api_key,
+            whisper_model,
+            model_name,
+            model_base_url,
+            effective_use_video,
+            effective_web_search,
+            effective_max_vision,
+            fps,
+            summary_only=effective_summary_only,
+            history_owner_id=history_owner_id,
+            progress_callback=_single_progress_callback,
+        )
+        result_meta["segment_policy"] = segment_policy
+        if segment_guardrails:
+            result_meta["segment_guardrails"] = segment_guardrails
+        _update_single_progress(
+            owner_id=history_owner_id,
+            task_id=task_id,
+            status="completed",
+            stage="done",
+            message=(
+                "视频分析已完成（已自动生成候选内容）"
+                if result_meta.get("fallback_used")
+                else "视频分析已完成"
+            ),
+        )
+        output_media = (
+            result_meta.get("output_media", {})
+            if isinstance(result_meta.get("output_media", {}), dict)
+            else {}
+        )
+        return jsonify(
+            {
+                "success": True,
+                "steps": steps,
+                "markdown": md_content,
+                "output_dir": output_dir,
+                "output_dir_name": str(output_media.get("output_dir_name", "")).strip()
+                or Path(output_dir).name,
+                "pdf_path": output_pdf,
+                "has_steps": has_steps,
+                "result_mode": result_meta.get("result_mode", "steps"),
+                "fallback_used": bool(result_meta.get("fallback_used", False)),
+                "analysis_note": str(result_meta.get("analysis_note", "")).strip(),
+                "quality_score": _safe_float(result_meta.get("quality_score", 0.0), 0.0, 0.0, 1.0),
+                "degrade_reason": str(result_meta.get("degrade_reason", "")).strip(),
+                "content_title": str(result_meta.get("content_title", "")).strip(),
+                "key_points": result_meta.get("key_points", []),
+                "timeline_points": result_meta.get("timeline_points", []),
+                "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                "task_id": task_id,
+                "filename": str(upload_payload.get("filename", "")).strip() or video_path.name,
+                "filepath": str(video_path),
+                "source_url": str(upload_payload.get("source_url", source_url)).strip() or source_url,
+                "resolved_source_url": str(upload_payload.get("resolved_source_url", "")).strip(),
+                "download_source": str(upload_payload.get("download_source", "")).strip(),
+                "download_title": str(upload_payload.get("download_title", "")).strip(),
+                "scraped_page_title": str(upload_payload.get("scraped_page_title", "")).strip(),
+                "scraped_final_url": str(upload_payload.get("scraped_final_url", "")).strip(),
+                "scraped_canonical_url": str(upload_payload.get("scraped_canonical_url", "")).strip(),
+                "expected_media_ids": upload_payload.get("expected_media_ids", []),
+                "resolved_video_id": str(upload_payload.get("resolved_video_id", "")).strip(),
+                "candidate_batch": str(upload_payload.get("candidate_batch", "")).strip(),
+                "scrape_fetch_method": str(upload_payload.get("scrape_fetch_method", "")).strip(),
+                "scrape_challenge_detected": bool(
+                    upload_payload.get("scrape_challenge_detected", False)
+                ),
+                "scrape_challenge_signals": upload_payload.get("scrape_challenge_signals", []),
+                "segment_policy": segment_policy,
+                "segment_guardrails": segment_guardrails,
+                "video_preview_url": str(output_media.get("video_preview_url", "")).strip(),
+                "subtitle_available": bool(output_media.get("subtitle_available", False)),
+                "subtitle_file_name": str(output_media.get("subtitle_file_name", "")).strip(),
+                "subtitle_line_count": _safe_int(
+                    output_media.get("subtitle_line_count"), 0, 0
+                ),
+                "subtitle_exports": output_media.get("subtitle_exports", {}),
+                "subtitle_workbench_url": str(
+                    output_media.get("subtitle_workbench_url", "")
+                ).strip(),
+                "effective_options": {
+                    "use_video": effective_use_video,
+                    "web_search": effective_web_search,
+                    "max_vision": effective_max_vision,
+                    "summary_only": effective_summary_only,
+                },
+            }
+        )
+    except ContentPolicyBlockedError as exc:
+        _update_single_progress(
+            owner_id=history_owner_id,
+            task_id=task_id,
+            status="failed",
+            stage="moderation",
+            message=str(exc),
+        )
+        blocked_notice = _build_blocked_notice_payload(exc.risk)
+        return (
+            jsonify(
+                {
+                    "error": str(exc),
+                    "code": "content_policy_violation",
+                    "risk": exc.risk,
+                    "result_mode": "blocked_notice",
+                    "quality_score": 0.0,
+                    "degrade_reason": "content_policy_blocked",
+                    "blocked_notice": blocked_notice,
+                    "task_id": task_id,
+                }
+            ),
+            403,
+        )
+    except Exception as exc:
+        error_message, status_code, normalized = _normalize_provider_error(
+            exc, default_status=500
+        )
+        _update_single_progress(
+            owner_id=history_owner_id,
+            task_id=task_id,
+            status="failed",
+            stage="failed",
+            message=error_message,
+        )
+        payload: Dict[str, Any] = {"error": error_message, "task_id": task_id}
+        if status_code >= 500 and not normalized:
+            logger.exception("URL 直达分析失败: %s", exc)
+        return jsonify(payload), status_code
 
 
 @app.route("/upload_chunk_init", methods=["POST"])
@@ -4849,6 +5091,7 @@ def refresh_subtitle(output_dir):
             str(output_path),
             cache_identity=fresh_cache_identity,
         )
+        _maybe_correct_subtitles(agent, srt_path)
         subtitle_file = Path(srt_path)
         entries = _parse_srt_file_entries(subtitle_file)
         output_media = _build_output_media_bundle(output_path, preferred_srt_path=str(subtitle_file))

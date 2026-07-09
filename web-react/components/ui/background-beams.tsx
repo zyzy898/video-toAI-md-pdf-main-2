@@ -8,9 +8,7 @@ type BackgroundBeamsProps = {
   animated?: boolean;
 };
 
-export const BackgroundBeams = React.memo(
-  ({ className, animated = true }: BackgroundBeamsProps) => {
-    const paths = [
+const BACKGROUND_BEAM_PATHS = [
       "M-380 -189C-380 -189 -312 216 152 343C616 470 684 875 684 875",
       "M-373 -197C-373 -197 -305 208 159 335C623 462 691 867 691 867",
       "M-366 -205C-366 -205 -298 200 166 327C630 454 698 859 698 859",
@@ -61,16 +59,21 @@ export const BackgroundBeams = React.memo(
       "M-51 -565C-51 -565 17 -160 481 -33C945 94 1013 499 1013 499",
       "M-44 -573C-44 -573 24 -168 488 -41C952 86 1020 491 1020 491",
       "M-37 -581C-37 -581 31 -176 495 -49C959 78 1027 483 1027 483",
-    ];
-    const gradientMeta = React.useMemo(
-      () =>
-        paths.map(() => ({
-          y2: `${93 + Math.random() * 8}%`,
-          duration: Math.random() * 10 + 10,
-          delay: Math.random() * 10,
-        })),
-      [],
-    );
+];
+
+const seededUnit = (index: number, salt: number) => {
+  const value = Math.sin((index + 1) * 12.9898 + salt * 78.233) * 43758.5453;
+  return value - Math.floor(value);
+};
+
+const BACKGROUND_BEAM_GRADIENT_META = BACKGROUND_BEAM_PATHS.map((_, index) => ({
+  y2: `${93 + seededUnit(index, 1) * 8}%`,
+  duration: seededUnit(index, 2) * 10 + 10,
+  delay: seededUnit(index, 3) * 10,
+}));
+
+export const BackgroundBeams = React.memo(
+  ({ className, animated = true }: BackgroundBeamsProps) => {
     return (
       <div
         className={cn(
@@ -93,7 +96,7 @@ export const BackgroundBeams = React.memo(
             strokeWidth="0.5"
           ></path>
 
-          {paths.map((path, index) =>
+          {BACKGROUND_BEAM_PATHS.map((path, index) =>
             animated ? (
               <motion.path
                 key={`path-` + index}
@@ -113,8 +116,8 @@ export const BackgroundBeams = React.memo(
             ),
           )}
           <defs>
-            {paths.map((_, index) => {
-              const meta = gradientMeta[index];
+            {BACKGROUND_BEAM_PATHS.map((_, index) => {
+              const meta = BACKGROUND_BEAM_GRADIENT_META[index];
               if (!animated) {
                 return (
                   <linearGradient

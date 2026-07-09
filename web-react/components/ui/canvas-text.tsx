@@ -127,17 +127,21 @@ export function CanvasText({
   }, [colors]);
 
   useEffect(() => {
-    const desktop = isDesktopPlatform();
-    setIsDesktop((prev) => (prev === desktop ? prev : desktop));
-    const supports = supportsTextBackgroundClip();
-    setSupportsTextClip(supports);
-    if (!desktop && !supports) {
-      fallbackToStatic();
-    }
+    const frame = window.requestAnimationFrame(() => {
+      const desktop = isDesktopPlatform();
+      setIsDesktop((prev) => (prev === desktop ? prev : desktop));
+      const supports = supportsTextBackgroundClip();
+      setSupportsTextClip((prev) => (prev === supports ? prev : supports));
+      if (!desktop && !supports) {
+        fallbackToStatic();
+      }
+    });
+
+    return () => window.cancelAnimationFrame(frame);
   }, [fallbackToStatic]);
 
   useEffect(() => {
-    updateColors();
+    const frame = window.requestAnimationFrame(updateColors);
 
     const observer = new MutationObserver(updateColors);
     observer.observe(document.documentElement, {
@@ -145,27 +149,41 @@ export function CanvasText({
       attributeFilter: ["class"],
     });
 
-    return () => observer.disconnect();
+    return () => {
+      window.cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
   }, [updateColors]);
 
   useEffect(() => {
     if (renderMode !== "canvas") return;
 
+    let fallbackFrame = 0;
+    const scheduleFallback = () => {
+      if (!shouldEnableFallback || fallbackFrame) return;
+      fallbackFrame = window.requestAnimationFrame(() => {
+        fallbackFrame = 0;
+        fallbackToStatic();
+      });
+    };
+    const cancelFallback = () => {
+      if (fallbackFrame) {
+        window.cancelAnimationFrame(fallbackFrame);
+        fallbackFrame = 0;
+      }
+    };
+
     const canvas = canvasRef.current;
     const textEl = textRef.current;
     if (!canvas || !textEl || resolvedColors.length === 0) {
-      if (shouldEnableFallback) {
-        fallbackToStatic();
-      }
-      return;
+      scheduleFallback();
+      return cancelFallback;
     }
 
     const ctx = canvas.getContext("2d", { alpha: false });
     if (!ctx) {
-      if (shouldEnableFallback) {
-        fallbackToStatic();
-      }
-      return;
+      scheduleFallback();
+      return cancelFallback;
     }
 
     hasReportedRenderErrorRef.current = false;
@@ -178,9 +196,7 @@ export function CanvasText({
         hasReportedRenderErrorRef.current = true;
         console.warn(`[CanvasText] fallback to static mode at ${stage}`, error);
       }
-      if (shouldEnableFallback) {
-        fallbackToStatic();
-      }
+      scheduleFallback();
     };
 
     const isMobileViewport = window.matchMedia(MOBILE_MEDIA_QUERY).matches;
@@ -302,7 +318,7 @@ export function CanvasText({
       if (!resizeObserver) {
         window.removeEventListener("resize", handleResize);
       }
-      return;
+      return cancelFallback;
     }
 
     const cleanup = () => {
@@ -315,6 +331,7 @@ export function CanvasText({
       if (!resizeObserver) {
         window.removeEventListener("resize", handleResize);
       }
+      cancelFallback();
     };
 
     if (!shouldAnimate) {
