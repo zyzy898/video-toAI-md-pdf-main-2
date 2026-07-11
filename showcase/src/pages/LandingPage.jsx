@@ -7,9 +7,9 @@ import useIsMobile from '../hooks/useIsMobile.js';
 import useTheme from '../hooks/useTheme.js';
 
 /**
- * 「开始使用」按钮跳转的线上工作台地址。
+ * 「开始使用」按钮优先跳转部署地址，未配置时回到本地工作台。
  */
-const APP_URL = '';
+const APP_URL = String(import.meta.env.VITE_APP_URL || '').trim() || 'http://localhost';
 
 const heroChips = [
   'AI 视频理解',
@@ -21,8 +21,8 @@ const heroChips = [
 
 const heroStats = [
   { num: '8+', label: '支持视频格式' },
-  { num: '4', label: 'LLM Provider' },
-  { num: '500MB', label: '单文件上限' },
+  { num: '3', label: 'LLM 路由类别' },
+  { num: '<500MB', label: '单文件体积' },
   { num: '72h', label: '历史自动清理' }
 ];
 

@@ -12,6 +12,20 @@ def _timestamp(now: datetime | None = None) -> str:
     return (now or datetime.now()).strftime("%Y%m%d_%H%M%S")
 
 
+def sanitize_upload_filename(filename: str, *, fallback_name: str) -> str:
+    raw_name = str(filename or "").strip()
+    safe_name = secure_filename(raw_name)
+    safe_fallback = secure_filename(fallback_name) or "upload.mp4"
+    raw_suffix = Path(raw_name).suffix
+    safe_suffix = (
+        Path(secure_filename(f"upload{raw_suffix}")).suffix if raw_suffix else ""
+    )
+    if safe_suffix and not Path(safe_name).suffix:
+        safe_stem = secure_filename(Path(raw_name).stem) or Path(safe_fallback).stem
+        return f"{safe_stem or 'upload'}{safe_suffix}"
+    return safe_name or safe_fallback
+
+
 def build_unique_upload_path(
     filename: str,
     *,
@@ -19,9 +33,10 @@ def build_unique_upload_path(
     now: datetime | None = None,
 ) -> Path:
     """Return a non-existing upload path under ``upload_root`` for ``filename``."""
-    safe_name = secure_filename(filename)
-    if not safe_name:
-        safe_name = f"upload_{_timestamp(now)}.mp4"
+    safe_name = sanitize_upload_filename(
+        filename,
+        fallback_name=f"upload_{_timestamp(now)}.mp4",
+    )
 
     candidate = upload_root / safe_name
     stem = candidate.stem

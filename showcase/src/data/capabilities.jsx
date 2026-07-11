@@ -19,22 +19,22 @@ export const capabilities = [
     tag: '输入',
     Icon: UploadIcon,
     title: '多通道上传',
-    desc: '本地文件、批量、分片续传与远程链接四路并行；大文件 8MB 一片，断网刷新都能从断点继续传。',
+    desc: '本地文件、批量、分片续传与远程链接四路接入；磁盘分片可跨后端重启保留，浏览器刷新后需重新选择同一文件，再续传服务端缺少的分片。',
     tags: [
       { label: '断点续传', accent: true },
-      { label: '批量' },
-      { label: 'URL 直达' }
+      { label: '同文件重选' },
+      { label: '<500MB' }
     ]
   },
   {
     tag: '安全',
     Icon: ShieldIcon,
-    title: '四层内容风控',
-    desc: '指纹黑名单 → 视觉抽帧 → 备用视觉模型 → 关键词词库，逐层校验。上传前与分析前各跑一次，命中即隔离。',
+    title: '分阶段内容风控',
+    desc: '上传阶段只做指纹 / 黑名单与缓存预检，阻断时删除暂存文件；任务进入 analyzing 后先执行主视觉检测，不可用时才尝试备用视觉模型或字幕关键词，分析阶段命中可隔离。',
     tags: [
-      { label: '四层校验', accent: true },
-      { label: '结果缓存' },
-      { label: '自动隔离' }
+      { label: '上传预检', accent: true },
+      { label: '分析前视觉检测' },
+      { label: '结果缓存' }
     ]
   },
   {
@@ -64,7 +64,7 @@ export const capabilities = [
     tag: '导出',
     Icon: FileIcon,
     title: 'Markdown · PDF 双导出',
-    desc: 'AI 输出经过安全清洗再渲染；PDF 自动适配 Windows / Linux 中文字体；结果包内含截图、字幕、原视频与步骤数据。',
+    desc: 'AI 输出经过安全清洗再渲染；结果 ZIP 包含 Markdown、生成成功时的 PDF、steps.json、步骤截图与 SRT / VTT / TXT 字幕，不包含原视频。',
     tags: [
       { label: 'Markdown', accent: true },
       { label: 'PDF', accent: true },
@@ -74,20 +74,19 @@ export const capabilities = [
   {
     tag: '模型',
     Icon: GlobeIcon,
-    title: '多模型平台路由',
-    desc: '同一套调用代码自动适配 Ark / OpenAI / DeepSeek / Qwen 等平台；不支持的能力会自动降级到字幕分析路线。',
+    title: '三类模型路由',
+    desc: '路由实现分为 Ark、OpenAI、OpenAI 兼容三类；DeepSeek、Qwen 可作为兼容端点示例。不支持视频能力时转入字幕分析路线。',
     tags: [
       { label: 'Ark', accent: true },
       { label: 'OpenAI' },
-      { label: 'DeepSeek' },
-      { label: 'Qwen' }
+      { label: 'OpenAI 兼容' }
     ]
   },
   {
     tag: '链接',
     Icon: LinkIcon,
     title: '智能 URL 导入',
-    desc: 'B 站、抖音、小红书有专属解析；通用页面靠浏览器抓取 + 模型识别 + yt-dlp 兜底，多层回退保下载成功率。',
+    desc: 'B 站、抖音、小红书有专属解析；通用页面依次尝试浏览器抓取、模型识别与 yt-dlp，多条可选路径提升站点适配鲁棒性。',
     tags: [
       { label: 'B站 / 抖音 / 小红书', accent: true },
       { label: '反爬兜底' },
@@ -98,18 +97,18 @@ export const capabilities = [
     tag: '历史',
     Icon: ClockIcon,
     title: '历史与自动清理',
-    desc: '无登录系统也能多人共存：每个浏览器独立隔离历史。后台定时回收：上传 24 小时清，输出与历史 72 小时清。',
+    desc: '无登录系统也能按浏览器隔离历史。后台定时回收上传、输出与历史文件，用于降低长期磁盘增长；部署时仍需监控容量。',
     tags: [
       { label: '无登录隔离', accent: true },
       { label: '定时清理' },
-      { label: '磁盘可控' }
+      { label: '降低磁盘增长' }
     ]
   },
   {
     tag: '编辑',
     Icon: EditIcon,
     title: '步骤可编辑重生成',
-    desc: '结果支持拖拽排序、改写、增删步骤。保存后会按你编辑后的版本重新生成 Markdown 与 PDF，文档永远跟编辑一致。',
+    desc: '结果支持拖拽排序、改写、增删步骤。保存后会按编辑版本重新生成 Markdown，并在 PDF 生成成功时更新 PDF。',
     tags: [
       { label: '拖拽排序', accent: true },
       { label: '一键重生成' },

@@ -308,12 +308,15 @@ def _append_output_bundle_to_zip(
 ) -> None:
     md_file = output_path / "operation_guide.md"
     pdf_file = output_path / "operation_guide.pdf"
+    steps_file = output_path / "steps.json"
     images_dir = output_path / "images"
 
     if md_file.exists():
         zf.write(md_file, f"{prefix}operation_guide.md")
     if pdf_file.exists():
         zf.write(pdf_file, f"{prefix}operation_guide.pdf")
+    if steps_file.exists():
+        zf.write(steps_file, f"{prefix}steps.json")
     if images_dir.exists():
         for pattern in ("*.jpg", "*.jpeg", "*.png", "*.webp"):
             for img_file in images_dir.glob(pattern):

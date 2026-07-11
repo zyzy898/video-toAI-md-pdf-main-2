@@ -1,10 +1,11 @@
 import { memo } from "react";
 import { CopyIcon, DocumentIcon, DownloadZipIcon } from "./icons";
 import { MarkdownPreview } from "./MarkdownPreview";
+import type { OutputTemplate } from "../types/api";
 
 type DocumentPanelProps = {
   html: string;
-  summaryOnly: boolean;
+  outputTemplate: OutputTemplate;
   onDownloadZip: () => void;
   onCopyMarkdown?: () => void;
   onCopyText?: () => void;
@@ -12,17 +13,20 @@ type DocumentPanelProps = {
 
 export const DocumentPanel = memo(function DocumentPanel({
   html,
-  summaryOnly,
+  outputTemplate,
   onDownloadZip,
   onCopyMarkdown,
   onCopyText,
 }: DocumentPanelProps) {
+  const isContentSummary = outputTemplate === "content_summary";
   return (
     <section className="panel-card motion-enter result-heavy-surface rounded-xl border border-neutral-800 bg-neutral-900/70 p-4">
       <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2">
           <DocumentIcon className="h-4 w-4 text-neutral-300" />
-          <h2 className="text-base font-semibold">生成的总结文档</h2>
+          <h2 className="text-base font-semibold">
+            {isContentSummary ? "生成的内容摘要" : "生成的操作教程"}
+          </h2>
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           {onCopyMarkdown ? (
@@ -56,8 +60,8 @@ export const DocumentPanel = memo(function DocumentPanel({
       </div>
       <MarkdownPreview
         html={html}
-        className={summaryOnly ? "summary-only-scroll-rail" : undefined}
-        contentClassName={summaryOnly ? "summary-only-markdown-content" : "standard-markdown-content"}
+        className={isContentSummary ? "summary-only-scroll-rail" : undefined}
+        contentClassName={isContentSummary ? "summary-only-markdown-content" : "standard-markdown-content"}
       />
     </section>
   );

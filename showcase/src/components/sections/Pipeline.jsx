@@ -12,7 +12,7 @@ export default function Pipeline() {
           <span className="section-tag">END-TO-END PIPELINE</span>
           <h2 className="section-title">从上传到导出 · 七步法处理链路</h2>
           <p className="section-sub">
-            每一步都做了失败兜底与降级方案；长视频自动压缩切片，违规内容上传前就被拦下，最终交付清晰的文档与历史回看。
+            上传阶段先做指纹 / 黑名单预检，任务进入 analyzing 后先执行主视觉风控；任务状态持久化，失败路径提供明确状态与重试入口。
           </p>
         </div>
 

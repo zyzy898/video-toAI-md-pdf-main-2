@@ -2,15 +2,15 @@
 
 这是一个用于"项目效果展示"的 React 单页应用，沿用与 React Bits 的 `<DarkVeil />`
 组件相同的技术栈（**React 19 + Vite + 原生 CSS + ogl + react-router-dom**），
-首页是一个全屏 DarkVeil 的着陆页，提供「开始使用」（跳转线上工作台）、「观看演示」（进入完整演示内容）与「查看源码」三个入口。
+首页是一个全屏 DarkVeil 的着陆页，提供「开始使用」（跳转工作台）与「观看演示」（进入完整演示内容）两个入口。
 
-> 「开始使用」的线上地址在 [`src/pages/LandingPage.jsx`](src/pages/LandingPage.jsx) 顶部的 `APP_URL` 常量里配置，部署完成后替换即可。
+> 「开始使用」优先读取 Vite 构建变量 `VITE_APP_URL`；未配置时跳转可用的本地工作台 `http://localhost`。可在 `showcase/.env.local` 或部署环境中设置该变量。
 
 ## 路由
 
 | 路径 | 页面 | 说明 |
 |------|------|------|
-| `/` | LandingPage | 首页着陆页：DarkVeil 全屏 + 品牌 + 主标语 + CTA（开始使用 / 观看演示 / 查看源码） |
+| `/` | LandingPage | 首页着陆页：DarkVeil 全屏 + 品牌 + 主标语 + CTA（开始使用 / 观看演示） |
 | `/showcase` | ShowcasePage | 详细演示：导览 / 能力 / 工作台 / Pipeline / Result / Tech |
 | 其它 | → `/` | 兜底重定向 |
 
@@ -86,8 +86,9 @@ npm run preview
 
 ## 关于 DarkVeil
 
-`<DarkVeil />` 在 `App.jsx` 中作为全屏 `position: fixed` 背景层渲染，z-index 为
-`-2`，并由 `.darkveil-bg::after` 叠加一层柔和暗罩，保证前景文字可读。
+`<DarkVeil />` 分别由 `LandingPage.jsx` 与 `ShowcasePage.jsx` 页面组件渲染为全屏
+`position: fixed` 背景层，层级为 `z-index: 0`。演示页仅在移动端通过
+`.darkveil-bg::after` 叠加一层弱暗罩，提高前景文字可读性。
 
 可调参数（详见 React Bits 官方说明）：
 

@@ -2,7 +2,81 @@
 // Kept as pure TS (no runtime), safe to import from anywhere.
 
 export type Mode = "" | "upload" | "single" | "batch";
-export type FileStatus = "pending" | "processing" | "success" | "failed";
+export type OutputTemplate = "operation_guide" | "content_summary";
+export type FileStatus = "pending" | "uploading" | "processing" | "success" | "failed" | "cancelled";
+
+export type AnalysisTaskKind = "single" | "batch" | "url";
+export type AnalysisTaskStatus = "uploading" | "queued" | "analyzing" | "completed" | "failed" | "cancelled";
+export type AnalysisTaskFileStatus = "waiting" | "analyzing" | "success" | "failed";
+
+export type AnalysisTaskFileProgress = {
+  index: number;
+  filename: string;
+  status: AnalysisTaskFileStatus;
+  stage: string;
+  message: string;
+};
+
+export type AnalysisTaskPayload = {
+  filepath?: string;
+  filepaths?: string[];
+  url?: string;
+  filename?: string;
+  summary_only?: boolean;
+  web_search?: boolean;
+  max_vision?: number;
+  output_template?: OutputTemplate;
+};
+
+export type AnalysisTaskStatusResponse = {
+  task_id: string;
+  kind: AnalysisTaskKind;
+  status: AnalysisTaskStatus;
+  stage?: string;
+  message?: string;
+  percent?: number;
+  total?: number;
+  current?: number;
+  current_file?: string;
+  file_progress?: AnalysisTaskFileProgress[];
+  retryable?: boolean;
+  cancel_requested?: boolean;
+  attempt_count?: number;
+  recovery_count?: number;
+  created_at?: number | null;
+  updated_at?: number | null;
+  started_at?: number | null;
+  finished_at?: number | null;
+};
+
+export type AnalysisTaskListItem = AnalysisTaskStatusResponse & {
+  payload: AnalysisTaskPayload;
+};
+
+export type AnalysisTaskListResponse = {
+  tasks: AnalysisTaskListItem[];
+};
+
+export type AnalysisTaskQueueItem = {
+  taskId: string;
+  kind: AnalysisTaskKind;
+  status: AnalysisTaskStatus;
+  stage: string;
+  message: string;
+  percent: number;
+  total: number;
+  current: number;
+  currentFile: string;
+  fileProgress: AnalysisTaskFileProgress[];
+  retryable: boolean;
+  cancelRequested: boolean;
+  attemptCount: number;
+  recoveryCount: number;
+  payload: AnalysisTaskPayload;
+  label: string;
+  clientId?: string;
+  createdAt: string;
+};
 
 export type ModelPreset = "ark" | "openai" | "deepseek" | "qwen" | "custom";
 
@@ -18,15 +92,49 @@ export type PersistedUserSettings = {
   webSearch?: boolean;
   fps?: number;
   summaryOnly?: boolean;
+  outputTemplate?: OutputTemplate;
   updatedAt?: string;
 };
 
+export type SubtitleEvidence = {
+  index?: number | string;
+  start_time?: string;
+  end_time?: string;
+  start_seconds?: number;
+  end_seconds?: number;
+  raw_text?: string;
+  analyzed_text?: string;
+};
+
+export type ScreenshotEvidence = {
+  path?: string;
+  captured_at_seconds?: number;
+};
+
+export type StepEvidence = {
+  anchor_time_seconds?: number;
+  subtitles?: SubtitleEvidence[];
+  screenshot?: ScreenshotEvidence;
+  external_reference_ids?: string[];
+  [key: string]: unknown;
+};
+
+export type ExternalReference = {
+  id?: string;
+  title?: string;
+  url?: string;
+  source?: "ark_web_search" | "model_reference" | string;
+};
+
 export type StepItem = {
+  step_id?: string;
   step?: number;
   time?: string;
+  time_seconds?: number;
   title?: string;
   description?: string;
   confidence?: number;
+  evidence?: StepEvidence;
 };
 
 export type BatchFileItem = {
@@ -36,6 +144,10 @@ export type BatchFileItem = {
   error: string;
   clientId?: string;
   sourceKey?: string;
+  resumeKey?: string;
+  size?: number;
+  lastModified?: number;
+  needsReselect?: boolean;
 };
 
 export type RiskResult = {
@@ -87,6 +199,7 @@ export type EffectiveOptions = {
   web_search?: boolean;
   max_vision?: number;
   summary_only?: boolean;
+  output_template?: OutputTemplate;
 };
 
 export type ApiErrorPayload = {
@@ -120,6 +233,8 @@ export type SingleResultData = {
   key_points?: string[];
   timeline_points?: Array<{ time?: string; text?: string }>;
   confidence_note?: string;
+  output_template?: OutputTemplate;
+  external_references?: ExternalReference[];
   blocked_notice?: BlockedNotice;
   risk?: RiskResult;
   segment_policy?: SegmentPolicy;
@@ -152,6 +267,8 @@ export type BatchResultItem = {
   key_points?: string[];
   timeline_points?: Array<{ time?: string; text?: string }>;
   confidence_note?: string;
+  output_template?: OutputTemplate;
+  external_references?: ExternalReference[];
   blocked_notice?: BlockedNotice;
   segment_policy?: SegmentPolicy;
   segment_guardrails?: string[];

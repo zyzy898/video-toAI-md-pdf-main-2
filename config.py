@@ -31,6 +31,16 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_float(name: str, default: float) -> float:
+    raw_value = str(os.getenv(name, "")).strip()
+    if not raw_value:
+        return float(default)
+    try:
+        return float(raw_value)
+    except (TypeError, ValueError):
+        return float(default)
+
+
 def _env_text(names: Tuple[str, ...], default: str = "") -> str:
     for name in names:
         raw_value = os.getenv(name)
@@ -47,6 +57,23 @@ def _env_bool(names: Tuple[str, ...], default: bool = False) -> bool:
     if not raw_value:
         return bool(default)
     return raw_value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+_analysis_task_db_value = _env_text(
+    ("ANALYSIS_TASK_DB_PATH",),
+    str(UPLOAD_ROOT / ".analysis_tasks.sqlite3"),
+)
+_analysis_task_db_candidate = Path(_analysis_task_db_value).expanduser()
+if not _analysis_task_db_candidate.is_absolute():
+    _analysis_task_db_candidate = UPLOAD_ROOT / _analysis_task_db_candidate
+ANALYSIS_TASK_DB_PATH = _analysis_task_db_candidate.resolve()
+ANALYSIS_TASK_MAX_WORKERS = max(1, min(32, _env_int("ANALYSIS_TASK_MAX_WORKERS", 2)))
+ANALYSIS_TASK_POLL_INTERVAL_SECONDS = max(
+    0.01, _env_float("ANALYSIS_TASK_POLL_INTERVAL_SECONDS", 0.25)
+)
+ANALYSIS_TASK_STALE_AFTER_SECONDS = max(
+    0.0, _env_float("ANALYSIS_TASK_STALE_AFTER_SECONDS", 300.0)
+)
 
 
 ALLOWED_EXTENSIONS = {
@@ -280,8 +307,13 @@ __all__ = [
     "HISTORY_PATH",
     "UPLOAD_SESSION_ROOT",
     "_env_int",
+    "_env_float",
     "_env_text",
     "_env_bool",
+    "ANALYSIS_TASK_DB_PATH",
+    "ANALYSIS_TASK_MAX_WORKERS",
+    "ANALYSIS_TASK_POLL_INTERVAL_SECONDS",
+    "ANALYSIS_TASK_STALE_AFTER_SECONDS",
     "ALLOWED_EXTENSIONS",
     "ALLOWED_WHISPER_MODELS",
     "allowed_file",

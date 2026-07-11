@@ -13,7 +13,6 @@ import {
   ALIYUN_APIKEY_DOC_URL,
   ANALYZE_BUTTON_GRADIENT_COLORS,
   ANALYZE_BUTTON_LIGHT_GRADIENT_COLORS,
-  CONTENT_POLICY_BLOCK_MESSAGE,
   DEFAULT_PROGRESS_BOARD,
   DEFAULT_UPLOAD_CHUNK_SIZE,
   EMPTY_STEPS,
@@ -41,7 +40,6 @@ import {
   SEGMENT_POLICY_CODE_GUIDES,
   SEGMENT_ZONE_LABELS,
   STAGE_LABELS,
-  STAGE_PERCENT,
   UPLOAD_RESUME_KEY_PREFIX,
   USER_SETTINGS_STORAGE_KEY_PREFIX,
   THEME_STORAGE_KEY,
@@ -51,6 +49,11 @@ import {
   WHISPER_MODEL_VALUES,
 } from "./constants/app";
 import type {
+  AnalysisTaskKind,
+  AnalysisTaskListResponse,
+  AnalysisTaskPayload,
+  AnalysisTaskQueueItem,
+  AnalysisTaskStatusResponse,
   ApiErrorPayload,
   BatchFileItem,
   BatchResultData,
@@ -63,6 +66,7 @@ import type {
   Mode,
   ModelPreset,
   NavigatorWithConnection,
+  OutputTemplate,
   PersistedUserSettings,
   ProgressBoard,
   RiskResult,
@@ -75,13 +79,41 @@ import type {
 import { ApiRequestError } from "./lib/api-error";
 import { buildUploadSourceKey, dedupeBatchUploadFiles } from "./lib/upload-dedupe";
 import {
+  TASK_LIFECYCLE_STORAGE_KEY,
+  TASK_STATUS_LABELS,
+  batchRetryFilepathForItem,
+  batchRetryFilepathsForTask,
+  cachedTaskResultForPresentation,
+  classifyResultLoadFailure,
+  completionNotificationKey,
+  createTaskQueueItem,
+  findReselectableUpload,
+  markTaskUnavailable,
+  mergeServerTaskQueue,
+  mergeTaskStatus,
+  newlyCompletedTasks,
+  parseLifecycleState,
+  pendingCompletedTasks,
+  reconcileTaskFiles,
+  resultLoadRetryDelayMs,
+  runExclusiveTaskSubmission,
+  runUploadCancellation,
+  safeStorageGet,
+  safeStorageRemove,
+  safeStorageSet,
+  serializeLifecycleState,
+  shouldSendBrowserCompletionNotification,
+  shouldPollTask,
+  upsertTaskQueueItem,
+} from "./lib/task-lifecycle";
+import type { CachedTaskResult, ResultPresentationToken } from "./lib/task-lifecycle";
+import {
   basename,
   buildModelConfigSignature,
   clampNumber,
   clone,
   createHistoryClientId,
   getOrCreateHistoryClientId,
-  isSameProgressBoard,
   isValidVideo,
   normalizeModelBaseUrlForSignature,
   parseSourceUrls,
@@ -137,6 +169,7 @@ import { StepsPanel } from "./components/StepsPanel";
 import { DocumentPanel } from "./components/DocumentPanel";
 import { SubtitlePanel } from "./components/SubtitlePanel";
 import { BatchResultPanel } from "./components/BatchResultPanel";
+import { BatchTaskCenter } from "./components/BatchTaskCenter";
 import { VirtualizedHistoryList } from "./components/VirtualizedHistoryList";
 
 void BrandStudioIcon;
@@ -163,7 +196,6 @@ void TrashIcon;
 void UploadIcon;
 void ALIYUN_APIKEY_DOC_URL;
 void ANALYZE_BUTTON_GRADIENT_COLORS;
-void CONTENT_POLICY_BLOCK_MESSAGE;
 void DEFAULT_PROGRESS_BOARD;
 void DEFAULT_UPLOAD_CHUNK_SIZE;
 void EMPTY_STEPS;
@@ -191,7 +223,6 @@ void REDUCED_MOTION_MEDIA_QUERY;
 void SEGMENT_POLICY_CODE_GUIDES;
 void SEGMENT_ZONE_LABELS;
 void STAGE_LABELS;
-void STAGE_PERCENT;
 void UPLOAD_RESUME_KEY_PREFIX;
 void USER_SETTINGS_STORAGE_KEY_PREFIX;
 void VALID_VIDEO_EXTENSIONS;
@@ -204,7 +235,6 @@ void clampNumber;
 void clone;
 void createHistoryClientId;
 void getOrCreateHistoryClientId;
-void isSameProgressBoard;
 void isValidVideo;
 void normalizeModelBaseUrlForSignature;
 void parseSourceUrls;
@@ -231,6 +261,10 @@ void VirtualizedHistoryList;
 void MarkdownPreview;
 
 export type {
+  AnalysisTaskKind,
+  AnalysisTaskPayload,
+  AnalysisTaskQueueItem,
+  AnalysisTaskStatusResponse,
   ApiErrorPayload,
   BatchFileItem,
   BatchResultData,
@@ -243,6 +277,7 @@ export type {
   Mode,
   ModelPreset,
   NavigatorWithConnection,
+  OutputTemplate,
   PersistedUserSettings,
   ProgressBoard,
   RiskResult,
@@ -252,6 +287,15 @@ export type {
   SubtitleLine,
   SubtitleWorkbenchData,
 };
+
+type AnalysisTaskSingleResult = SingleResultData & {
+  filename?: string;
+  filepath?: string;
+  download_title?: string;
+};
+type AnalysisTaskCachedResult = CachedTaskResult<AnalysisTaskSingleResult, BatchResultData>;
+
+const BROWSER_COMPLETION_NOTIFICATION_KEY = "video-analysis-browser-completion-notifications-v1";
 
 export default function App() {
   const [theme, setTheme] = useState<"dark" | "light">(() => {
@@ -266,10 +310,10 @@ export default function App() {
   });
   const [, setWebSearch] = useState(false);
   const [summaryOnly] = useState(false);
+  const [outputTemplate, setOutputTemplate] = useState<OutputTemplate>("operation_guide");
   const [sourceUrl, setSourceUrl] = useState("");
   const [importingUrl, setImportingUrl] = useState(false);
 
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [savingSteps, setSavingSteps] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [clearingHistory, setClearingHistory] = useState(false);
@@ -278,10 +322,41 @@ export default function App() {
   const [showClearHistoryConfirm, setShowClearHistoryConfirm] = useState(false);
   const [historyDrawerOpen, setHistoryDrawerOpen] = useState(false);
 
-  const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>([]);
+  const [batchFiles, setBatchFiles] = useState<BatchFileItem[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      return parseLifecycleState(window.localStorage.getItem(TASK_LIFECYCLE_STORAGE_KEY)).uploads;
+    } catch {
+      return [];
+    }
+  });
+  const [taskQueue, setTaskQueue] = useState<AnalysisTaskQueueItem[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      return parseLifecycleState(window.localStorage.getItem(TASK_LIFECYCLE_STORAGE_KEY)).tasks;
+    } catch {
+      return [];
+    }
+  });
+  const [taskActionId, setTaskActionId] = useState("");
+  const [submittingTask, setSubmittingTask] = useState(false);
+  const [browserNotificationsEnabled, setBrowserNotificationsEnabled] = useState(() => {
+    if (typeof window === "undefined" || typeof Notification === "undefined") return false;
+    return (
+      Notification.permission === "granted" &&
+      safeStorageGet(() => window.localStorage, BROWSER_COMPLETION_NOTIFICATION_KEY) === "enabled"
+    );
+  });
+  const [browserNotificationPermission, setBrowserNotificationPermission] = useState<
+    NotificationPermission | "unsupported"
+  >(() => (typeof Notification === "undefined" ? "unsupported" : Notification.permission));
+  const isAnalyzing = submittingTask || Boolean(taskActionId) || taskQueue.some(shouldPollTask);
   const [resultData, setResultData] = useState<SingleResultData | null>(null);
   const [batchResultData, setBatchResultData] = useState<BatchResultData | null>(null);
+  const [batchResultTaskId, setBatchResultTaskId] = useState("");
   const [savedBatchResult, setSavedBatchResult] = useState<BatchResultData | null>(null);
+  const [savedBatchResultTaskId, setSavedBatchResultTaskId] = useState("");
+  const [resultRetryTick, setResultRetryTick] = useState(0);
   const [view, setView] = useState<"upload" | "result">("upload");
   const [activeResultTab, setActiveResultTab] = useState<"steps" | "document" | "subtitle">("steps");
   const [activeResultSection, setActiveResultSection] = useState<string>("");
@@ -315,10 +390,25 @@ export default function App() {
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const successTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const batchTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const singleTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const progressVisibleRef = useRef(false);
   const batchFilesRef = useRef<BatchFileItem[]>([]);
+  const taskQueueRef = useRef<AnalysisTaskQueueItem[]>([]);
+  const uploadRuntimeRef = useRef(
+    new Map<string, { controller: AbortController; resumeKey: string; uploadId: string }>(),
+  );
+  const loadingTaskResultsRef = useRef(new Set<string>());
+  const loadedTaskResultsRef = useRef(new Set<string>());
+  const taskResultCacheRef = useRef(new Map<string, AnalysisTaskCachedResult>());
+  const resultPresentationRef = useRef<{
+    taskId: string;
+    revision: number;
+    mode: "auto" | "user";
+  }>({ taskId: "", revision: 0, mode: "auto" });
+  const resultRetryAttemptsRef = useRef(new Map<string, number>());
+  const resultRetryTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const resultRetryNotifiedRef = useRef(new Set<string>());
+  const taskSubmissionGateRef = useRef({ current: false });
+  const completionNotificationTasksRef = useRef(taskQueue);
+  const completionNotificationKeysRef = useRef(new Set<string>());
   const pendingFileSeqRef = useRef(0);
   const subtitleVideoRef = useRef<HTMLVideoElement | null>(null);
   const progressPollIntervalMs = mobilePerfMode
@@ -327,12 +417,48 @@ export default function App() {
   const uiScrollBehavior: ScrollBehavior = mobilePerfMode ? "auto" : "smooth";
 
   useEffect(() => {
-    progressVisibleRef.current = progressVisible;
-  }, [progressVisible]);
-
-  useEffect(() => {
     batchFilesRef.current = batchFiles;
   }, [batchFiles]);
+
+  useEffect(() => {
+    taskQueueRef.current = taskQueue;
+  }, [taskQueue]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    safeStorageSet(
+      () => window.localStorage,
+      TASK_LIFECYCLE_STORAGE_KEY,
+      serializeLifecycleState({
+        tasks: taskQueue.filter(shouldPollTask),
+        uploads: batchFiles,
+      }),
+    );
+  }, [batchFiles, taskQueue]);
+
+  const requestTaskPresentation = useCallback((taskId: string) => {
+    const next = {
+      taskId,
+      revision: resultPresentationRef.current.revision + 1,
+      mode: "auto" as const,
+    };
+    resultPresentationRef.current = next;
+    return { taskId: next.taskId, revision: next.revision };
+  }, []);
+
+  const invalidateTaskPresentation = useCallback(() => {
+    resultPresentationRef.current = {
+      taskId: "",
+      revision: resultPresentationRef.current.revision + 1,
+      mode: "user",
+    };
+  }, []);
+
+  const presentationTokenForTask = useCallback((taskId: string) => {
+    const current = resultPresentationRef.current;
+    if (current.mode !== "auto" || current.taskId !== taskId) return undefined;
+    return { taskId, revision: current.revision };
+  }, []);
 
   const nextPendingFileId = useCallback((prefix: string) => {
     pendingFileSeqRef.current += 1;
@@ -405,11 +531,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const uploadRuntimes = uploadRuntimeRef.current;
+    const resultRetryTimers = resultRetryTimersRef.current;
     return () => {
       if (errorTimerRef.current) clearTimeout(errorTimerRef.current);
       if (successTimerRef.current) clearTimeout(successTimerRef.current);
-      if (batchTimerRef.current) clearInterval(batchTimerRef.current);
-      if (singleTimerRef.current) clearInterval(singleTimerRef.current);
+      uploadRuntimes.forEach(({ controller }) => controller.abort());
+      uploadRuntimes.clear();
+      resultRetryTimers.forEach((timer) => clearTimeout(timer));
+      resultRetryTimers.clear();
     };
   }, []);
 
@@ -504,6 +634,23 @@ export default function App() {
     return data;
   }, [withHistoryClientHeader]);
 
+  useEffect(() => {
+    let stopped = false;
+    const hydrateTaskHistory = async () => {
+      try {
+        const data = await fetchJson<AnalysisTaskListResponse>("/analysis_tasks");
+        if (stopped) return;
+        setTaskQueue((current) => mergeServerTaskQueue(current, data.tasks || []));
+      } catch {
+        // The local lifecycle snapshot remains available while the server is offline.
+      }
+    };
+    void hydrateTaskHistory();
+    return () => {
+      stopped = true;
+    };
+  }, [fetchJson]);
+
   const fetchBlob = useCallback(async (url: string, options: RequestInit = {}) => {
     const response = await fetch(url, withHistoryClientHeader(options));
     if (!response.ok) {
@@ -532,6 +679,78 @@ export default function App() {
     successTimerRef.current = setTimeout(() => setShowSuccessToast(false), 3600);
   }, []);
 
+  const toggleBrowserCompletionNotifications = useCallback(async () => {
+    if (browserNotificationsEnabled) {
+      setBrowserNotificationsEnabled(false);
+      if (typeof window !== "undefined") {
+        safeStorageRemove(() => window.localStorage, BROWSER_COMPLETION_NOTIFICATION_KEY);
+      }
+      showSuccess("浏览器完成通知已关闭，站内通知仍会保留。");
+      return;
+    }
+    if (typeof Notification === "undefined") {
+      setBrowserNotificationPermission("unsupported");
+      showError("当前浏览器不支持系统通知。");
+      return;
+    }
+    const permission =
+      Notification.permission === "default"
+        ? await Notification.requestPermission()
+        : Notification.permission;
+    setBrowserNotificationPermission(permission);
+    if (permission !== "granted") {
+      setBrowserNotificationsEnabled(false);
+      if (typeof window !== "undefined") {
+        safeStorageRemove(() => window.localStorage, BROWSER_COMPLETION_NOTIFICATION_KEY);
+      }
+      showError("浏览器通知未获授权，站内完成通知不受影响。");
+      return;
+    }
+    setBrowserNotificationsEnabled(true);
+    if (typeof window !== "undefined") {
+      safeStorageSet(
+        () => window.localStorage,
+        BROWSER_COMPLETION_NOTIFICATION_KEY,
+        "enabled",
+      );
+    }
+    showSuccess("浏览器完成通知已开启。");
+  }, [browserNotificationsEnabled, showError, showSuccess]);
+
+  useEffect(() => {
+    const completed = newlyCompletedTasks(
+      completionNotificationTasksRef.current,
+      taskQueue,
+      completionNotificationKeysRef.current,
+    );
+    completionNotificationTasksRef.current = taskQueue;
+    if (completed.length === 0) return;
+
+    completed.forEach((task) => {
+      completionNotificationKeysRef.current.add(completionNotificationKey(task));
+    });
+    showSuccess(
+      completed.length === 1
+        ? `${completed[0].label} 已完成`
+        : `${completed.length} 个分析任务已完成`,
+    );
+
+    if (
+      typeof document === "undefined" ||
+      typeof Notification === "undefined" ||
+      !shouldSendBrowserCompletionNotification({
+        enabled: browserNotificationsEnabled,
+        visibilityState: document.visibilityState,
+        permission: Notification.permission,
+      })
+    ) {
+      return;
+    }
+    completed.forEach((task) => {
+      new Notification("视频分析完成", { body: task.label, tag: completionNotificationKey(task) });
+    });
+  }, [browserNotificationsEnabled, showSuccess, taskQueue]);
+
   const verifyModelConnectionForUpload = useCallback(async () => {
     // 模型连通校验已取消：模型配置（API Key / 名称 / Base URL）统一由后端 .env 托管。
     return true;
@@ -554,30 +773,6 @@ export default function App() {
     setProgressBoard(DEFAULT_PROGRESS_BOARD);
   }, []);
 
-  const updateProgressBoard = useCallback((patch: Partial<ProgressBoard>) => {
-    setProgressBoard((prev) => {
-      const next = { ...prev, ...patch };
-      next.percent = Math.max(0, Math.min(100, Number(next.percent) || 0));
-      next.total = Math.max(0, Number(next.total) || 0);
-      next.current = Math.max(0, Number(next.current) || 0);
-      next.success = Math.max(0, Number(next.success) || 0);
-      next.failed = Math.max(0, Number(next.failed) || 0);
-      return isSameProgressBoard(prev, next) ? prev : next;
-    });
-  }, []);
-
-  const getStageProgress = useCallback((stage: string) => STAGE_PERCENT[String(stage || "").toLowerCase()] || 0, []);
-
-  const countBatchStatus = useCallback(() => {
-    let success = 0;
-    let failed = 0;
-    batchFilesRef.current.forEach((item) => {
-      if (!item.filepath) return;
-      if (item.status === "success") success += 1;
-      if (item.status === "failed") failed += 1;
-    });
-    return { success, failed };
-  }, []);
   const getAnalyzableBatchFiles = useCallback(
     () => batchFilesRef.current.filter((item) => Boolean(String(item.filepath || "").trim())),
     [],
@@ -598,130 +793,19 @@ export default function App() {
     void loadHistory();
   }, [loadHistory]);
 
-  const stopBatchPolling = useCallback(() => {
-    if (!batchTimerRef.current) return;
-    clearInterval(batchTimerRef.current);
-    batchTimerRef.current = null;
-  }, []);
-
-  const stopSinglePolling = useCallback(() => {
-    if (!singleTimerRef.current) return;
-    clearInterval(singleTimerRef.current);
-    singleTimerRef.current = null;
-  }, []);
-
-  const pullSingleProgress = useCallback(async () => {
-    try {
-      const progress = await fetchJson<{ current_file?: string; status?: string; stage?: string; message?: string }>(
-        "/single_progress",
-      );
-      const stage = String(progress.stage || "").toLowerCase();
-      const status = String(progress.status || "").toLowerCase();
-      const done = status === "completed" || stage === "done";
-      const failed = status === "failed" || stage === "failed";
-      if (progressVisibleRef.current) {
-        setProgressTextIfChanged(String(progress.message || "正在分析视频..."));
-      }
-      updateProgressBoard({
-        mode: "single",
-        stage,
-        percent: done || failed ? 100 : getStageProgress(stage),
-        total: 1,
-        current: done || failed ? 1 : 0,
-        success: done ? 1 : 0,
-        failed: failed ? 1 : 0,
-        currentFile: String(progress.current_file || ""),
-      });
-    } catch {
-      // ignore polling errors
-    }
-  }, [fetchJson, getStageProgress, setProgressTextIfChanged, updateProgressBoard]);
-
-  const pullBatchProgress = useCallback(async () => {
-    try {
-      const progress = await fetchJson<{
-        current_file?: string;
-        status?: string;
-        stage?: string;
-        total?: number;
-        current?: number;
-        message?: string;
-      }>("/batch_progress");
-      const stage = String(progress.stage || "").toLowerCase();
-      const status = String(progress.status || "").toLowerCase();
-      const currentFile = String(progress.current_file || "");
-      const total = Number(progress.total) || getAnalyzableBatchFiles().length;
-      const current = Number(progress.current) || 0;
-      const { success, failed } = countBatchStatus();
-      let percent = 0;
-      if (total > 0) {
-        const doneFiles = Math.max(0, current - 1);
-        percent = ((doneFiles + getStageProgress(stage) / 100) / total) * 100;
-      }
-      if (status === "completed" || stage === "done") {
-        percent = 100;
-      } else {
-        percent = Math.min(99, percent);
-      }
-      if (progressVisibleRef.current) setProgressTextIfChanged(String(progress.message || "正在批量分析..."));
-      updateProgressBoard({
-        mode: "batch",
-        stage,
-        percent,
-        total,
-        current,
-        success,
-        failed,
-        currentFile,
-      });
-
-      if (currentFile) {
-        setBatchFiles((prev) => {
-          let changed = false;
-          const next: BatchFileItem[] = prev.map((item): BatchFileItem => {
-            if (item.status === "success" || item.status === "failed") {
-              return item;
-            }
-            if (item.filename === currentFile && item.status !== "processing") {
-              changed = true;
-              return { ...item, status: "processing" as FileStatus };
-            }
-            return item;
-          });
-          return changed ? next : prev;
-        });
-      }
-    } catch {
-      // ignore polling errors
-    }
-  }, [countBatchStatus, fetchJson, getAnalyzableBatchFiles, getStageProgress, setProgressTextIfChanged, updateProgressBoard]);
-
-  const startSinglePolling = useCallback(() => {
-    stopSinglePolling();
-    void pullSingleProgress();
-    singleTimerRef.current = setInterval(() => void pullSingleProgress(), progressPollIntervalMs);
-  }, [progressPollIntervalMs, pullSingleProgress, stopSinglePolling]);
-
-  const startBatchPolling = useCallback(() => {
-    stopBatchPolling();
-    void pullBatchProgress();
-    batchTimerRef.current = setInterval(() => void pullBatchProgress(), progressPollIntervalMs);
-  }, [progressPollIntervalMs, pullBatchProgress, stopBatchPolling]);
-
-  useEffect(() => {
-    if (singleTimerRef.current) startSinglePolling();
-    if (batchTimerRef.current) startBatchPolling();
-  }, [progressPollIntervalMs, startBatchPolling, startSinglePolling]);
-
   const uploadSingleFileWithResume = useCallback(
     async (
       file: File,
       fileIndex: number,
       totalFiles: number,
-      onSafetyCheckStart?: (currentFile: File, currentIndex: number, total: number) => void,
+      options: {
+        signal: AbortSignal;
+        onUploadReady: (uploadId: string, resumeKey: string) => void;
+        onSafetyCheckStart?: (currentFile: File, currentIndex: number, total: number) => void;
+      },
     ) => {
       const resumeKey = `${UPLOAD_RESUME_KEY_PREFIX}:${file.name}:${file.size}:${file.lastModified}`;
-      const storedUploadId = window.localStorage.getItem(resumeKey) || "";
+      const storedUploadId = safeStorageGet(() => window.localStorage, resumeKey, "");
       const initData = await fetchJson<{
         upload_id: string;
         chunk_size?: number;
@@ -737,10 +821,12 @@ export default function App() {
           upload_id: storedUploadId,
           file_key: resumeKey,
         }),
+        signal: options.signal,
       });
       const uploadId = String(initData.upload_id || "");
       if (!uploadId) throw new Error("初始化上传失败");
-      window.localStorage.setItem(resumeKey, uploadId);
+      safeStorageSet(() => window.localStorage, resumeKey, uploadId);
+      options.onUploadReady(uploadId, resumeKey);
 
       const chunkSize = Number(initData.chunk_size) || DEFAULT_UPLOAD_CHUNK_SIZE;
       const totalChunks = Number(initData.total_chunks) || 1;
@@ -754,16 +840,17 @@ export default function App() {
         formData.append("upload_id", uploadId);
         formData.append("chunk_index", String(chunkIndex));
         formData.append("chunk", file.slice(start, end));
-        await fetchJson("/upload_chunk", { method: "POST", body: formData });
+        await fetchJson("/upload_chunk", { method: "POST", body: formData, signal: options.signal });
       }
 
-      onSafetyCheckStart?.(file, fileIndex, totalFiles);
+      options.onSafetyCheckStart?.(file, fileIndex, totalFiles);
       const finalized = await fetchJson<{ filename: string; filepath: string }>("/upload_chunk_finalize", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ upload_id: uploadId }),
+        signal: options.signal,
       });
-      window.localStorage.removeItem(resumeKey);
+      safeStorageRemove(() => window.localStorage, resumeKey);
       return finalized;
     },
     [fetchJson],
@@ -772,17 +859,36 @@ export default function App() {
   const uploadBatchFiles = useCallback(
     async (fileList: FileList | File[]) => {
       const selectedFiles = Array.from(fileList || []).filter((file) => isValidVideo(file.name));
-      const existingSourceKeys = batchFilesRef.current
+      const existingFiles = batchFilesRef.current;
+      const claimedResumableIds = new Set<string>();
+      const resumableEntries: Array<{ file: File; placeholder: BatchFileItem }> = [];
+      const freshCandidates: File[] = [];
+
+      for (const file of selectedFiles) {
+        const sourceKey = buildUploadSourceKey(file);
+        const resumable = findReselectableUpload(
+          existingFiles.filter((item) => !item.clientId || !claimedResumableIds.has(item.clientId)),
+          sourceKey,
+        );
+        if (resumable?.clientId) {
+          claimedResumableIds.add(resumable.clientId);
+          resumableEntries.push({ file, placeholder: resumable });
+        } else {
+          freshCandidates.push(file);
+        }
+      }
+
+      const existingSourceKeys = existingFiles
         .map((item) => item.sourceKey || "")
         .filter(Boolean);
-      const { files, duplicateCount } = dedupeBatchUploadFiles(selectedFiles, existingSourceKeys);
+      const { files: freshFiles, duplicateCount } = dedupeBatchUploadFiles(freshCandidates, existingSourceKeys);
       if (duplicateCount > 0) {
         showError(`检测到 ${duplicateCount} 个重复视频源，已自动跳过去重，请勿重复上传。`);
       }
-      if (files.length === 0 && duplicateCount > 0) {
+      if (freshFiles.length === 0 && resumableEntries.length === 0 && duplicateCount > 0) {
         return;
       }
-      if (files.length === 0) {
+      if (freshFiles.length === 0 && resumableEntries.length === 0) {
         showError("没有可用的视频文件");
         return;
       }
@@ -790,46 +896,110 @@ export default function App() {
       const readyForUpload = await verifyModelConnectionForUpload();
       if (!readyForUpload) return;
 
-      const placeholders = files.map((file) => ({
+      const freshPlaceholders = freshFiles.map((file) => ({
         filename: file.name,
         sourceKey: buildUploadSourceKey(file),
+        resumeKey: `${UPLOAD_RESUME_KEY_PREFIX}:${file.name}:${file.size}:${file.lastModified}`,
+        size: file.size,
+        lastModified: file.lastModified,
         filepath: "",
-        status: "processing" as FileStatus,
+        status: "uploading" as FileStatus,
         error: "等待上传...",
         clientId: nextPendingFileId("upload"),
+        needsReselect: false,
       }));
-      setBatchFiles((prev) => [...prev, ...placeholders]);
+      const resumedPlaceholders = resumableEntries.map(({ file, placeholder }) => ({
+        ...placeholder,
+        filename: file.name,
+        sourceKey: buildUploadSourceKey(file),
+        resumeKey: `${UPLOAD_RESUME_KEY_PREFIX}:${file.name}:${file.size}:${file.lastModified}`,
+        size: file.size,
+        lastModified: file.lastModified,
+        filepath: "",
+        status: "uploading" as FileStatus,
+        error: "等待续传...",
+        needsReselect: false,
+      }));
+      const entries = [
+        ...resumableEntries.map(({ file }, index) => ({ file, placeholder: resumedPlaceholders[index] })),
+        ...freshFiles.map((file, index) => ({ file, placeholder: freshPlaceholders[index] })),
+      ];
+      const entryRuntimes = new Map<string, { controller: AbortController; resumeKey: string }>();
+      for (const { file, placeholder } of entries) {
+        const clientId = placeholder.clientId || "";
+        const resumeKey =
+          placeholder.resumeKey ||
+          `${UPLOAD_RESUME_KEY_PREFIX}:${file.name}:${file.size}:${file.lastModified}`;
+        const controller = new AbortController();
+        entryRuntimes.set(clientId, { controller, resumeKey });
+        uploadRuntimeRef.current.set(clientId, {
+          controller,
+          resumeKey,
+          uploadId: safeStorageGet(() => window.localStorage, resumeKey, ""),
+        });
+      }
+      const resumedById = new Map(
+        resumedPlaceholders.map((placeholder) => [placeholder.clientId || "", placeholder]),
+      );
+      setBatchFiles((prev) => [
+        ...prev.map((item) => resumedById.get(item.clientId || "") || item),
+        ...freshPlaceholders,
+      ]);
       try {
         let uploadedFailed = 0;
-        for (let i = 0; i < files.length; i += 1) {
-          const currentFile = files[i];
-          const placeholder = placeholders[i];
+        for (let i = 0; i < entries.length; i += 1) {
+          const { file: currentFile, placeholder } = entries[i];
+          const clientId = placeholder.clientId || "";
+          const resumeKey =
+            placeholder.resumeKey ||
+            `${UPLOAD_RESUME_KEY_PREFIX}:${currentFile.name}:${currentFile.size}:${currentFile.lastModified}`;
+          const controller = entryRuntimes.get(clientId)?.controller || new AbortController();
+          if (controller.signal.aborted) continue;
           try {
-            replaceBatchFileByClientId(placeholder.clientId || "", {
+            replaceBatchFileByClientId(clientId, {
               ...placeholder,
-              error: `正在上传（${i + 1}/${files.length}）...`,
+              status: "uploading",
+              error: `正在上传（${i + 1}/${entries.length}）...`,
+              needsReselect: false,
             });
             const item = await uploadSingleFileWithResume(
               currentFile,
               i + 1,
-              files.length,
-              (processingFile, currentIndex, total) => {
-                replaceBatchFileByClientId(placeholder.clientId || "", {
-                  ...placeholder,
-                  filename: processingFile.name,
-                  error: `正在保存视频（${currentIndex}/${total}）...`,
-                });
+              entries.length,
+              {
+                signal: controller.signal,
+                onUploadReady: (uploadId, nextResumeKey) => {
+                  const runtime = uploadRuntimeRef.current.get(clientId);
+                  if (runtime) {
+                    runtime.uploadId = uploadId;
+                    runtime.resumeKey = nextResumeKey;
+                  }
+                },
+                onSafetyCheckStart: (processingFile, currentIndex, total) => {
+                  replaceBatchFileByClientId(clientId, {
+                    ...placeholder,
+                    filename: processingFile.name,
+                    status: "uploading",
+                    error: `正在保存视频（${currentIndex}/${total}）...`,
+                    needsReselect: false,
+                  });
+                },
               },
             );
-            replaceBatchFileByClientId(placeholder.clientId || "", {
+            replaceBatchFileByClientId(clientId, {
               filename: item.filename,
               filepath: item.filepath,
               status: "pending",
               error: "",
-              clientId: placeholder.clientId,
+              clientId,
               sourceKey: placeholder.sourceKey,
+              resumeKey,
+              size: currentFile.size,
+              lastModified: currentFile.lastModified,
+              needsReselect: false,
             });
           } catch (error) {
+            if (controller.signal.aborted) continue;
             const apiError = error instanceof ApiRequestError ? error : null;
             let message = String((error as Error).message || error || "上传失败");
             if (apiError?.payload?.code === "content_policy_violation") {
@@ -839,15 +1009,22 @@ export default function App() {
             }
             const segmentHint = formatSegmentPolicyHint(apiError?.payload?.segment_policy);
             if (segmentHint) message = [message, segmentHint].filter(Boolean).join(" | ");
-            replaceBatchFileByClientId(placeholder.clientId || "", {
+            replaceBatchFileByClientId(clientId, {
               filename: currentFile.name,
               filepath: "",
               status: "failed",
-              error: formatInlineErrorMessage(message),
-              clientId: placeholder.clientId,
+              error: `${formatInlineErrorMessage(message)} 重新选择同一文件可继续上传。`,
+              clientId,
               sourceKey: placeholder.sourceKey,
+              resumeKey,
+              size: currentFile.size,
+              lastModified: currentFile.lastModified,
+              needsReselect: true,
             });
             uploadedFailed += 1;
+          } finally {
+            const runtime = uploadRuntimeRef.current.get(clientId);
+            if (runtime?.controller === controller) uploadRuntimeRef.current.delete(clientId);
           }
         }
         if (uploadedFailed > 0) {
@@ -865,143 +1042,323 @@ export default function App() {
       verifyModelConnectionForUpload,
     ],
   );
-  const analyzeByUploadedFile = useCallback(async (file: BatchFileItem) => {
-    setBatchFiles((prev) =>
-      prev.map((item) =>
-        item.filepath
-          ? {
-              ...item,
-              status: item.filepath === file.filepath ? ("processing" as FileStatus) : item.status,
-              error: item.filepath === file.filepath ? (summaryOnly ? "正在生成摘要版..." : "正在分析视频...") : "",
-            }
-          : item,
-      ),
-    );
-    stopBatchPolling();
-    setIsAnalyzing(true);
-    hideProgress();
-    updateProgressBoard({ mode: "single", stage: "prepare", total: 1, percent: 5, currentFile: file.filename });
-    startSinglePolling();
-    let reveal = false;
-    try {
-      const data = await fetchJson<SingleResultData>("/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          filepath: file.filepath,
-        }),
+
+  const cancelFileUpload = useCallback(
+    async (item: BatchFileItem) => {
+      const clientId = item.clientId || "";
+      if (!clientId) return;
+      const runtime = uploadRuntimeRef.current.get(clientId);
+      const resumeKey =
+        runtime?.resumeKey ||
+        item.resumeKey ||
+        `${UPLOAD_RESUME_KEY_PREFIX}:${item.filename}:${item.size || 0}:${item.lastModified || 0}`;
+      const uploadId = runtime?.uploadId || safeStorageGet(() => window.localStorage, resumeKey, "");
+      const outcome = await runUploadCancellation({
+        uploadId,
+        abort: () => runtime?.controller.abort(),
+        cancel: async (targetUploadId) => {
+          await fetchJson("/upload_chunk_cancel", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ upload_id: targetUploadId }),
+          });
+        },
+        clearResume: () => {
+          safeStorageRemove(() => window.localStorage, resumeKey);
+        },
       });
-      setResultData(data);
-      setBatchResultData(null);
+      uploadRuntimeRef.current.delete(clientId);
+      if (!outcome.confirmed) {
+        const reason = String((outcome.error as Error)?.message || outcome.error || "服务端未确认取消");
+        showError(`取消上传未确认: ${reason}`);
+        replaceBatchFileByClientId(clientId, {
+          ...item,
+          filepath: "",
+          status: "failed",
+          error: "服务端未确认取消；断点已保留，请稍后重新选择同一文件恢复状态。",
+          resumeKey,
+          needsReselect: true,
+        });
+        return;
+      }
+      replaceBatchFileByClientId(clientId, {
+        ...item,
+        filepath: "",
+        status: "cancelled",
+        error: "上传已取消；如需重新上传，请重新选择同一文件。",
+        resumeKey,
+        needsReselect: true,
+      });
+    },
+    [fetchJson, replaceBatchFileByClientId, showError],
+  );
+  const updateFilesForTask = useCallback((task: AnalysisTaskQueueItem) => {
+    setBatchFiles((prev) => reconcileTaskFiles(prev, task));
+  }, []);
+
+  const submitAnalysisTask = useCallback(
+    async (
+      kind: AnalysisTaskKind,
+      payload: AnalysisTaskPayload,
+      label: string,
+      clientId?: string,
+    ) =>
+      runExclusiveTaskSubmission(taskSubmissionGateRef.current, async () => {
+        setSubmittingTask(true);
+        const presentationIntent = requestTaskPresentation("");
+        try {
+          const status = await fetchJson<AnalysisTaskStatusResponse>("/analysis_tasks", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ kind, payload }),
+          });
+          const task = createTaskQueueItem(status, { payload, label, clientId });
+          if (
+            resultPresentationRef.current.mode === "auto" &&
+            resultPresentationRef.current.revision === presentationIntent.revision
+          ) {
+            requestTaskPresentation(task.taskId);
+          }
+          setSavedBatchResult(null);
+          setSavedBatchResultTaskId("");
+          setTaskQueue((prev) => upsertTaskQueueItem(prev, task));
+          setView("upload");
+          updateFilesForTask(task);
+          return task;
+        } finally {
+          setSubmittingTask(false);
+        }
+      }),
+    [
+      fetchJson,
+      requestTaskPresentation,
+      updateFilesForTask,
+    ],
+  );
+
+  const presentAnalysisTaskResult = useCallback(
+    (presentationToken: ResultPresentationToken | undefined) => {
+      const cached = cachedTaskResultForPresentation(
+        taskResultCacheRef.current,
+        presentationToken,
+        resultPresentationRef.current,
+      );
+      if (!cached) return false;
+
+      if (cached.kind === "batch") {
+        setBatchResultData(cached.data);
+        setBatchResultTaskId(cached.taskId);
+        setResultData(null);
+      } else {
+        setResultData(cached.data);
+        setBatchResultData(null);
+        setBatchResultTaskId("");
+        if (cached.data.fallback_used) {
+          showSuccess(
+            String(cached.data.analysis_note || "未识别到标准步骤，已自动生成候选内容。"),
+          );
+        }
+      }
+      setSavedBatchResult(null);
+      setSavedBatchResultTaskId("");
       setIsEditMode(false);
       setEditedSteps([]);
       setActiveResultTab("steps");
       setView("result");
-      if (data?.fallback_used) {
-        showSuccess(String(data.analysis_note || "未识别到标准步骤，已自动生成候选内容。"));
+      if (typeof window !== "undefined") {
+        window.requestAnimationFrame(() => {
+          resultsRef.current?.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
+        });
       }
-      setBatchFiles((prev) =>
-        prev.map((item) =>
-          item.filepath === file.filepath ? { ...item, status: "success", error: "" } : item,
-        ),
-      );
-      updateProgressBoard({
-        mode: "single",
-        stage: "done",
-        total: 1,
-        current: 1,
-        success: 1,
-        failed: 0,
-        currentFile: file.filename,
-        percent: 100,
-      });
-      reveal = true;
-      await loadHistory();
-    } catch (error) {
-      const apiError = error instanceof ApiRequestError ? error : null;
-      if (apiError?.payload?.code === "content_policy_violation") {
-        const blockedNotice = apiError.payload.blocked_notice || {
-          title: "安全检测未通过（已拦截）",
-          risk_level: String(apiError.payload.risk?.risk_level || "high"),
-          reason_code: String(apiError.payload.risk?.reason_code || "CONTENT_POLICY_VIOLATION"),
-          reason: String(apiError.payload.risk?.reason || CONTENT_POLICY_BLOCK_MESSAGE),
-          suggestions: ["删除敏感片段后重新上传检测。"],
-          retry_guidance: "请整改后重试。",
-        };
-        setResultData({
-          steps: [],
-          markdown: "",
-          output_dir: "",
-          pdf_path: "",
-          result_mode: "blocked_notice",
-          fallback_used: false,
-          analysis_note: String(apiError.payload.analysis_note || "已生成安全检测说明卡。"),
-          quality_score: Number(apiError.payload.quality_score || 0),
-          degrade_reason: String(apiError.payload.degrade_reason || "content_policy_blocked"),
-          blocked_notice: blockedNotice,
-          risk: apiError.payload.risk,
-        });
-        setBatchResultData(null);
-        setIsEditMode(false);
-        setEditedSteps([]);
-        setActiveResultTab("steps");
-        setView("result");
-        setBatchFiles((prev) =>
-          prev.map((item) =>
-            item.filepath === file.filepath ? { ...item, status: "failed", error: "安全检测未通过" } : item,
-          ),
-        );
-        updateProgressBoard({
-          mode: "single",
-          stage: "done",
-          total: 1,
-          current: 1,
-          success: 0,
-          failed: 1,
-          currentFile: file.filename,
-          percent: 100,
-        });
-        showSuccess("安全检测未通过，已生成检测结果说明卡。");
-        reveal = true;
+      return true;
+    },
+    [showSuccess, uiScrollBehavior],
+  );
+
+  const loadAnalysisTaskResult = useCallback(
+    async (
+      task: AnalysisTaskQueueItem,
+      presentationToken?: ResultPresentationToken,
+    ) => {
+      const latestPresentationToken = () =>
+        presentationTokenForTask(task.taskId) || presentationToken;
+      if (taskResultCacheRef.current.has(task.taskId)) {
+        presentAnalysisTaskResult(latestPresentationToken());
         return;
       }
-      const message = String((error as Error).message || error);
-      if (WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint))) setWebSearch(false);
+      if (
+        loadedTaskResultsRef.current.has(task.taskId) ||
+        loadingTaskResultsRef.current.has(task.taskId)
+      ) {
+        return;
+      }
+      loadingTaskResultsRef.current.add(task.taskId);
+      try {
+        let cachedResult: AnalysisTaskCachedResult;
+        if (task.kind === "batch") {
+          const data = await fetchJson<BatchResultData>(`/analysis_tasks/${encodeURIComponent(task.taskId)}/result`);
+          const filepaths = task.payload.filepaths || [];
+          const resultsByIndex = new Map(
+            (data.results || [])
+              .filter((result) => Number.isInteger(Number(result.index)) && Number(result.index) >= 1)
+              .map((result) => [Number(result.index), result]),
+          );
+          setBatchFiles((prev) =>
+            prev.map((item) => {
+              const resultIndex = filepaths.indexOf(item.filepath);
+              if (resultIndex < 0) return item;
+              const indexedResult = resultsByIndex.get(resultIndex + 1);
+              const filenameMatches = indexedResult
+                ? []
+                : (data.results || []).filter(
+                    (result) => String(result.filename || "") === basename(item.filepath),
+                  );
+              const result = indexedResult || (filenameMatches.length === 1 ? filenameMatches[0] : undefined);
+              if (!result) {
+                return {
+                  ...item,
+                  status: "failed" as FileStatus,
+                  error: "任务已完成，但未返回该文件的分析结果。",
+                };
+              }
+              const base = String(result?.error || "");
+              const riskHint = formatRiskHint(result?.risk);
+              const codeText = result?.code ? `code=${result.code}` : "";
+              return {
+                ...item,
+                status: result?.success ? ("success" as FileStatus) : ("failed" as FileStatus),
+                error: [base, codeText, riskHint].filter(Boolean).join(" | "),
+                };
+              }),
+            );
+          cachedResult = { taskId: task.taskId, kind: "batch", data };
+        } else {
+          const data = await fetchJson<AnalysisTaskSingleResult>(
+            `/analysis_tasks/${encodeURIComponent(task.taskId)}/result`,
+          );
+          if (task.kind === "single") {
+            const filepath = String(task.payload.filepath || "");
+            setBatchFiles((prev) =>
+              prev.map((item) =>
+                item.filepath === filepath ? { ...item, status: "success", error: "" } : item,
+              ),
+            );
+          } else {
+            const filepath = String(data.filepath || "").trim();
+            const filename =
+              String(data.download_title || data.filename || "").trim() ||
+              basename(filepath) ||
+              task.label;
+            setBatchFiles((prev) => {
+              let matched = false;
+              const next = prev.map((item) => {
+                if (!task.clientId || item.clientId !== task.clientId) return item;
+                matched = true;
+                return { ...item, filename, filepath, status: "success" as FileStatus, error: "" };
+              });
+              if (!matched && filepath) {
+                next.unshift({
+                  filename,
+                  filepath,
+                  status: "success",
+                  error: "",
+                  clientId: task.clientId,
+                });
+              }
+              return next;
+            });
+          }
+          cachedResult = {
+            taskId: task.taskId,
+            kind: task.kind === "url" ? "url" : "single",
+            data,
+          };
+        }
+        taskResultCacheRef.current.set(task.taskId, cachedResult);
+        loadedTaskResultsRef.current.add(task.taskId);
+        resultRetryAttemptsRef.current.delete(task.taskId);
+        resultRetryNotifiedRef.current.delete(task.taskId);
+        const retryTimer = resultRetryTimersRef.current.get(task.taskId);
+        if (retryTimer) clearTimeout(retryTimer);
+        resultRetryTimersRef.current.delete(task.taskId);
+        presentAnalysisTaskResult(latestPresentationToken());
+        await loadHistory();
+      } catch (error) {
+        const apiError = error instanceof ApiRequestError ? error : null;
+        if (classifyResultLoadFailure(apiError?.status) === "unavailable") {
+          const unavailable = markTaskUnavailable(task);
+          setTaskQueue((prev) =>
+            prev.map((item) => (item.taskId === task.taskId ? unavailable : item)),
+          );
+          if (task.kind === "url" && task.payload.url) setSourceUrl(task.payload.url);
+          updateFilesForTask(unavailable);
+          resultRetryAttemptsRef.current.delete(task.taskId);
+          resultRetryNotifiedRef.current.delete(task.taskId);
+          const retryTimer = resultRetryTimersRef.current.get(task.taskId);
+          if (retryTimer) clearTimeout(retryTimer);
+          resultRetryTimersRef.current.delete(task.taskId);
+          showError(unavailable.message);
+        } else {
+          const attempt = resultRetryAttemptsRef.current.get(task.taskId) || 0;
+          resultRetryAttemptsRef.current.set(task.taskId, attempt + 1);
+          if (!resultRetryTimersRef.current.has(task.taskId)) {
+            const retryTimer = setTimeout(() => {
+              resultRetryTimersRef.current.delete(task.taskId);
+              setResultRetryTick((value) => value + 1);
+            }, resultLoadRetryDelayMs(attempt));
+            resultRetryTimersRef.current.set(task.taskId, retryTimer);
+          }
+          if (!resultRetryNotifiedRef.current.has(task.taskId)) {
+            resultRetryNotifiedRef.current.add(task.taskId);
+            showError("读取分析结果暂时失败，将自动重试。");
+          }
+        }
+      } finally {
+        loadingTaskResultsRef.current.delete(task.taskId);
+      }
+    },
+    [
+      fetchJson,
+      loadHistory,
+      presentAnalysisTaskResult,
+      presentationTokenForTask,
+      showError,
+      updateFilesForTask,
+    ],
+  );
+
+  const analyzeByUploadedFile = useCallback(
+    async (file: BatchFileItem) => {
       setBatchFiles((prev) =>
         prev.map((item) =>
-          item.filepath === file.filepath ? { ...item, status: "failed", error: message } : item,
+          item.filepath === file.filepath
+            ? { ...item, status: "processing", error: "正在提交分析任务..." }
+            : item,
         ),
       );
-      updateProgressBoard({
-        mode: "single",
-        stage: "failed",
-        total: 1,
-        current: 1,
-        success: 0,
-        failed: 1,
-        currentFile: file.filename,
-        percent: 100,
-      });
-      showError(`单文件分析失败: ${message}`);
-    } finally {
-      stopSinglePolling();
-      setIsAnalyzing(false);
-      hideProgress();
-      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
-    }
-  }, [
-    fetchJson,
-    hideProgress,
-    loadHistory,
-    showError,
-    showSuccess,
-    startSinglePolling,
-    stopBatchPolling,
-    stopSinglePolling,
-    uiScrollBehavior,
-    summaryOnly,
-    updateProgressBoard,
-  ]);
+      try {
+        await submitAnalysisTask(
+          "single",
+          {
+            filepath: file.filepath,
+            summary_only: summaryOnly,
+            output_template: outputTemplate,
+          },
+          file.filename,
+          file.clientId,
+        );
+      } catch (error) {
+        const message = String((error as Error).message || error);
+        setBatchFiles((prev) =>
+          prev.map((item) =>
+            item.filepath === file.filepath ? { ...item, status: "failed", error: message } : item,
+          ),
+        );
+        showError(`提交单文件分析失败: ${message}`);
+      }
+    },
+    [outputTemplate, showError, submitAnalysisTask, summaryOnly],
+  );
 
   const analyzeSingle = useCallback(async () => {
     const analyzableFiles = getAnalyzableBatchFiles();
@@ -1095,256 +1452,88 @@ export default function App() {
       filename: guessUrlVideoName(urls[0]),
       filepath: "",
       status: "processing",
-      error: "正在下载并分析链接视频...",
+      error: "正在提交链接分析任务...",
       clientId,
     };
     setBatchFiles((prev) => [placeholder, ...prev]);
     setImportingUrl(true);
-    stopBatchPolling();
-    stopSinglePolling();
-    setIsAnalyzing(true);
-    hideProgress();
-    updateProgressBoard({
-      mode: "single",
-      stage: "download",
-      total: 1,
-      current: 0,
-      success: 0,
-      failed: 0,
-      currentFile: placeholder.filename,
-      percent: 5,
-    });
-    startSinglePolling();
-    let reveal = false;
 
     try {
-      const data = await fetchJson<SingleResultData & { filename?: string; filepath?: string; download_title?: string }>(
-        "/analyze_url",
+      await submitAnalysisTask(
+        "url",
         {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            url: urls[0],
-          }),
+          url: urls[0],
+          filename: placeholder.filename,
+          summary_only: summaryOnly,
+          output_template: outputTemplate,
         },
-      );
-      const uploadedPath = String(data.filepath || "").trim();
-      if (!uploadedPath) throw new Error("链接分析失败：未返回可分析文件");
-      const uploadedName =
-        String(data.download_title || data.filename || "").trim() ||
-        basename(uploadedPath) ||
-        "链接视频";
-
-      replaceBatchFileByClientId(clientId, {
-        filename: uploadedName,
-        filepath: uploadedPath,
-        status: "success",
-        error: "",
+        placeholder.filename,
         clientId,
-      });
+      );
       setSourceUrl("");
-      setResultData(data);
-      setBatchResultData(null);
-      setIsEditMode(false);
-      setEditedSteps([]);
-      setActiveResultTab("steps");
-      setView("result");
-      if (data?.fallback_used) {
-        showSuccess(String(data.analysis_note || "未识别到标准步骤，已自动生成候选内容。"));
-      }
-      updateProgressBoard({
-        mode: "single",
-        stage: "done",
-        total: 1,
-        current: 1,
-        success: 1,
-        failed: 0,
-        currentFile: uploadedName,
-        percent: 100,
-      });
-      reveal = true;
-      await loadHistory();
     } catch (error) {
-      const apiError = error instanceof ApiRequestError ? error : null;
-      if (apiError?.payload?.code === "content_policy_violation") {
-        const blockedNotice = apiError.payload.blocked_notice || {
-          title: "安全检测未通过（已拦截）",
-          risk_level: String(apiError.payload.risk?.risk_level || "high"),
-          reason_code: String(apiError.payload.risk?.reason_code || "CONTENT_POLICY_VIOLATION"),
-          reason: String(apiError.payload.risk?.reason || CONTENT_POLICY_BLOCK_MESSAGE),
-          suggestions: ["删除敏感片段后重新上传检测。"],
-          retry_guidance: "请整改后重试。",
-        };
-        setResultData({
-          steps: [],
-          markdown: "",
-          output_dir: "",
-          pdf_path: "",
-          result_mode: "blocked_notice",
-          fallback_used: false,
-          analysis_note: String(apiError.payload.analysis_note || "已生成安全检测结果说明卡。"),
-          quality_score: Number(apiError.payload.quality_score || 0),
-          degrade_reason: String(apiError.payload.degrade_reason || "content_policy_blocked"),
-          blocked_notice: blockedNotice,
-          risk: apiError.payload.risk,
-        });
-        setBatchResultData(null);
-        setIsEditMode(false);
-        setEditedSteps([]);
-        setActiveResultTab("steps");
-        setView("result");
-        replaceBatchFileByClientId(clientId, {
-          ...placeholder,
-          status: "failed",
-          error: "安全检测未通过",
-        });
-        updateProgressBoard({
-          mode: "single",
-          stage: "done",
-          total: 1,
-          current: 1,
-          success: 0,
-          failed: 1,
-          currentFile: placeholder.filename,
-          percent: 100,
-        });
-        showSuccess("安全检测未通过，已生成检测结果说明卡。");
-        reveal = true;
-        return;
-      }
-      const message = `链接分析失败: ${String((error as Error).message || error)}`;
+      const message = `提交链接分析失败: ${String((error as Error).message || error)}`;
       if (WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint))) setWebSearch(false);
       replaceBatchFileByClientId(clientId, {
         ...placeholder,
         status: "failed",
         error: formatInlineErrorMessage(message),
       });
-      updateProgressBoard({
-        mode: "single",
-        stage: "failed",
-        total: 1,
-        current: 1,
-        success: 0,
-        failed: 1,
-        currentFile: placeholder.filename,
-        percent: 100,
-      });
       showError(message);
     } finally {
-      stopSinglePolling();
-      setIsAnalyzing(false);
-      hideProgress();
       setImportingUrl(false);
-      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
     }
   }, [
-    fetchJson,
     guessUrlVideoName,
-    hideProgress,
-    loadHistory,
     nextPendingFileId,
     replaceBatchFileByClientId,
+    outputTemplate,
     showError,
-    showSuccess,
     sourceUrl,
-    startSinglePolling,
-    stopBatchPolling,
-    stopSinglePolling,
-    uiScrollBehavior,
-    updateProgressBoard,
+    submitAnalysisTask,
+    summaryOnly,
     verifyModelConnectionForUpload,
   ]);
 
   const analyzeBatch = useCallback(async () => {
     const analyzableFiles = getAnalyzableBatchFiles();
     if (analyzableFiles.length <= 1) return;
+    const filepaths = analyzableFiles.map((item) => item.filepath);
+    const targetPaths = new Set(filepaths);
     setBatchFiles((prev) =>
-      prev.map((item) => (item.filepath ? { ...item, status: "processing", error: "正在等待批量分析..." } : item)),
+      prev.map((item) =>
+        targetPaths.has(item.filepath)
+          ? { ...item, status: "processing", error: "正在提交批量分析任务..." }
+          : item,
+      ),
     );
-    stopSinglePolling();
-    setIsAnalyzing(true);
-    hideProgress();
-    updateProgressBoard({ mode: "batch", stage: "prepare", total: analyzableFiles.length, percent: 0 });
-    startBatchPolling();
-    let reveal = false;
     try {
-      const data = await fetchJson<BatchResultData>("/analyze_batch", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          filepaths: analyzableFiles.map((item) => item.filepath),
-        }),
-      });
-      setBatchResultData(data);
-      setResultData(null);
-      setIsEditMode(false);
-      setEditedSteps([]);
-      setView("result");
-      let resultIndex = 0;
-      const nextFiles: BatchFileItem[] = batchFilesRef.current.map((item) => {
-        if (!item.filepath) return item;
-        const result = data.results?.[resultIndex];
-        resultIndex += 1;
-        const base = String(result?.error || "");
-        const riskHint = formatRiskHint(result?.risk);
-        const codeText = result?.code ? `code=${result.code}` : "";
-        return {
-          ...item,
-          status: result?.success ? "success" : "failed",
-          error: [base, codeText, riskHint].filter(Boolean).join(" | "),
-        };
-      });
-      setBatchFiles(nextFiles);
-      const success = nextFiles.filter((item) => item.filepath && item.status === "success").length;
-      const failed = nextFiles.filter((item) => item.filepath && item.status === "failed").length;
-      updateProgressBoard({
-        mode: "batch",
-        stage: "done",
-        total: Number(data?.summary?.total) || analyzableFiles.length,
-        current: Number(data?.summary?.total) || analyzableFiles.length,
-        success: Number(data?.summary?.success) || success,
-        failed: Number(data?.summary?.failed) || failed,
-        currentFile: "",
-        percent: 100,
-      });
-      reveal = true;
-      await loadHistory();
+      await submitAnalysisTask(
+        "batch",
+        { filepaths, summary_only: summaryOnly, output_template: outputTemplate },
+        `${filepaths.length} 个视频`,
+      );
     } catch (error) {
       const message = String((error as Error).message || error);
       if (WEB_SEARCH_ERROR_HINTS.some((hint) => message.toLowerCase().includes(hint))) setWebSearch(false);
-      const { success, failed } = countBatchStatus();
-      updateProgressBoard({
-        mode: "batch",
-        stage: "failed",
-        total: analyzableFiles.length,
-        current: success + failed,
-        success,
-        failed,
-        percent: 100,
-      });
-      showError(`批量分析失败: ${message}`);
-    } finally {
-      stopBatchPolling();
-      setIsAnalyzing(false);
-      hideProgress();
-      if (reveal && resultsRef.current) resultsRef.current.scrollIntoView({ behavior: uiScrollBehavior, block: "start" });
+      setBatchFiles((prev) =>
+        prev.map((item) =>
+          targetPaths.has(item.filepath) ? { ...item, status: "failed", error: message } : item,
+        ),
+      );
+      showError(`提交批量分析失败: ${message}`);
     }
   }, [
-    fetchJson,
-    hideProgress,
-    loadHistory,
-    countBatchStatus,
-    showError,
-    startBatchPolling,
-    stopBatchPolling,
-    stopSinglePolling,
-    updateProgressBoard,
-    uiScrollBehavior,
     getAnalyzableBatchFiles,
+    outputTemplate,
+    showError,
+    submitAnalysisTask,
+    summaryOnly,
   ]);
 
   const startAnalyze = useCallback(async () => {
     setSavedBatchResult(null);
+    setSavedBatchResultTaskId("");
     const analyzableFiles = getAnalyzableBatchFiles();
     if (analyzableFiles.length === 1) return analyzeSingle();
     if (analyzableFiles.length > 1) return analyzeBatch();
@@ -1359,8 +1548,255 @@ export default function App() {
     showError("请先上传视频文件");
   }, [analyzeBatch, analyzeBySourceUrl, analyzeSingle, getAnalyzableBatchFiles, showError, sourceUrl]);
 
+  const activeTaskIds = taskQueue
+    .filter(shouldPollTask)
+    .map((task) => task.taskId)
+    .sort()
+    .join("|");
+
+  useEffect(() => {
+    if (!activeTaskIds) return;
+    let stopped = false;
+    let polling = false;
+    const poll = async () => {
+      if (polling || stopped) return;
+      polling = true;
+      try {
+        const activeTasks = taskQueueRef.current.filter(shouldPollTask);
+        await Promise.all(
+          activeTasks.map(async (task) => {
+            try {
+              const status = await fetchJson<AnalysisTaskStatusResponse>(
+                `/analysis_tasks/${encodeURIComponent(task.taskId)}`,
+              );
+              if (stopped) return;
+              const nextTask = mergeTaskStatus(task, status);
+              setTaskQueue((prev) =>
+                prev.map((item) => (item.taskId === nextTask.taskId ? nextTask : item)),
+              );
+              updateFilesForTask(nextTask);
+            } catch (error) {
+              if (stopped) return;
+              const apiError = error instanceof ApiRequestError ? error : null;
+              if (apiError?.status !== 404) return;
+              const unavailable = markTaskUnavailable(task);
+              setTaskQueue((prev) =>
+                prev.map((item) => (item.taskId === task.taskId ? unavailable : item)),
+              );
+              if (task.kind === "url" && task.payload.url) setSourceUrl(task.payload.url);
+              updateFilesForTask(unavailable);
+              showError(unavailable.message);
+            }
+          }),
+        );
+      } finally {
+        polling = false;
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), progressPollIntervalMs);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [activeTaskIds, fetchJson, progressPollIntervalMs, showError, updateFilesForTask]);
+
+  useEffect(() => {
+    if (resultPresentationRef.current.mode !== "auto") return;
+    const target = [...taskQueue]
+      .reverse()
+      .find(
+        (task) =>
+          task.status === "uploading" ||
+          task.status === "queued" ||
+          task.status === "analyzing" ||
+          task.status === "completed",
+      );
+    if (target && resultPresentationRef.current.taskId !== target.taskId) {
+      const presentationToken = requestTaskPresentation(target.taskId);
+      if (target.status === "completed") {
+        void loadAnalysisTaskResult(target, presentationToken);
+      }
+    }
+  }, [loadAnalysisTaskResult, requestTaskPresentation, taskQueue]);
+
+  const completedTaskIds = taskQueue
+    .filter((task) => task.status === "completed")
+    .map((task) => task.taskId)
+    .join("|");
+
+  useEffect(() => {
+    if (!completedTaskIds) return;
+    const currentPresentation = resultPresentationRef.current;
+    const pendingTasks = pendingCompletedTasks(
+      taskQueueRef.current,
+      loadedTaskResultsRef.current,
+      loadingTaskResultsRef.current,
+      resultRetryTimersRef.current.keys(),
+      currentPresentation.mode === "auto" ? currentPresentation.taskId : "",
+    );
+    pendingTasks.forEach((task) => {
+      void loadAnalysisTaskResult(task, presentationTokenForTask(task.taskId));
+    });
+  }, [completedTaskIds, loadAnalysisTaskResult, presentationTokenForTask, resultRetryTick]);
+
+  const cancelAnalysisTask = useCallback(
+    async (task: AnalysisTaskQueueItem) => {
+      setTaskActionId(task.taskId);
+      try {
+        const status = await fetchJson<AnalysisTaskStatusResponse>(
+          `/analysis_tasks/${encodeURIComponent(task.taskId)}/cancel`,
+          { method: "POST" },
+        );
+        const nextTask = mergeTaskStatus(task, status);
+        setTaskQueue((prev) =>
+          prev.map((item) => (item.taskId === task.taskId ? nextTask : item)),
+        );
+        updateFilesForTask(nextTask);
+      } catch (error) {
+        showError(`取消任务失败: ${String((error as Error).message || error)}`);
+      } finally {
+        setTaskActionId("");
+      }
+    },
+    [fetchJson, showError, updateFilesForTask],
+  );
+
+  const retryAnalysisTask = useCallback(
+    async (task: AnalysisTaskQueueItem) => {
+      setTaskActionId(task.taskId);
+      requestTaskPresentation(task.taskId);
+      try {
+        const status = await fetchJson<AnalysisTaskStatusResponse>(
+          `/analysis_tasks/${encodeURIComponent(task.taskId)}/retry`,
+          { method: "POST" },
+        );
+        const nextTask = mergeTaskStatus(task, status);
+        loadingTaskResultsRef.current.delete(task.taskId);
+        loadedTaskResultsRef.current.delete(task.taskId);
+        taskResultCacheRef.current.delete(task.taskId);
+        resultRetryAttemptsRef.current.delete(task.taskId);
+        resultRetryNotifiedRef.current.delete(task.taskId);
+        const retryTimer = resultRetryTimersRef.current.get(task.taskId);
+        if (retryTimer) clearTimeout(retryTimer);
+        resultRetryTimersRef.current.delete(task.taskId);
+        setTaskQueue((prev) =>
+          prev.map((item) => (item.taskId === task.taskId ? nextTask : item)),
+        );
+        setView("upload");
+        updateFilesForTask(nextTask);
+      } catch (error) {
+        showError(`重试任务失败: ${String((error as Error).message || error)}`);
+      } finally {
+        setTaskActionId("");
+      }
+    },
+    [fetchJson, requestTaskPresentation, showError, updateFilesForTask],
+  );
+
+  const retryFailedBatchItems = useCallback(async () => {
+    if (!batchResultData) return;
+    const sourceTask = taskQueueRef.current.find(
+      (task) =>
+        task.taskId === batchResultTaskId &&
+        task.kind === "batch" &&
+        task.status === "completed",
+    );
+    if (!sourceTask) {
+      showError("缺少批量任务信息，无法重试失败项。");
+      return;
+    }
+    const filepaths = batchRetryFilepathsForTask(
+      taskQueueRef.current,
+      batchResultTaskId,
+      batchResultData.results || [],
+    );
+    if (filepaths.length === 0) return;
+    const targetPaths = new Set(filepaths);
+    setBatchFiles((prev) =>
+      prev.map((item) =>
+        targetPaths.has(item.filepath)
+          ? { ...item, status: "processing", error: "正在重新提交分析..." }
+          : item,
+      ),
+    );
+    setView("upload");
+    try {
+      await submitAnalysisTask(
+        "batch",
+        { ...sourceTask.payload, filepaths },
+        `${filepaths.length} 个失败视频`,
+      );
+    } catch (error) {
+      const message = String((error as Error).message || error);
+      setBatchFiles((prev) =>
+        prev.map((item) =>
+          targetPaths.has(item.filepath) ? { ...item, status: "failed", error: message } : item,
+        ),
+      );
+      showError(`提交失败项重试失败: ${message}`);
+    }
+  }, [batchResultData, batchResultTaskId, showError, submitAnalysisTask]);
+
+  const retryFailedBatchItem = useCallback(
+    async (item: BatchResultItem) => {
+      const sourceTask = taskQueueRef.current.find(
+        (task) =>
+          task.taskId === batchResultTaskId &&
+          task.kind === "batch" &&
+          task.status === "completed",
+      );
+      const filepath = batchRetryFilepathForItem(
+        taskQueueRef.current,
+        batchResultTaskId,
+        item,
+      );
+      if (!sourceTask || !filepath) {
+        showError("无法确定该失败项对应的原文件，未发起重试。");
+        return;
+      }
+      setBatchFiles((prev) =>
+        prev.map((file) =>
+          file.filepath === filepath
+            ? { ...file, status: "processing", error: "正在重新提交分析..." }
+            : file,
+        ),
+      );
+      try {
+        await submitAnalysisTask(
+          "batch",
+          { ...sourceTask.payload, filepaths: [filepath] },
+          `重试：${item.filename || basename(filepath)}`,
+        );
+      } catch (error) {
+        const message = String((error as Error).message || error);
+        setBatchFiles((prev) =>
+          prev.map((file) =>
+            file.filepath === filepath
+              ? { ...file, status: "failed", error: message }
+              : file,
+          ),
+        );
+        showError(`提交单项重试失败: ${message}`);
+      }
+    },
+    [batchResultTaskId, showError, submitAnalysisTask],
+  );
+
+  const openBatchTaskCenterResult = useCallback(
+    async (task: AnalysisTaskQueueItem) => {
+      if (task.status !== "completed") return;
+      const presentationToken = requestTaskPresentation(task.taskId);
+      if (!presentAnalysisTaskResult(presentationToken)) {
+        await loadAnalysisTaskResult(task, presentationToken);
+      }
+    },
+    [loadAnalysisTaskResult, presentAnalysisTaskResult, requestTaskPresentation],
+  );
+
   const openHistoryRecord = useCallback(
     async (recordId: string) => {
+      invalidateTaskPresentation();
       showProgress("加载中", "正在读取历史记录...");
       try {
         const data = await fetchJson<{ record?: Partial<SingleResultData> & { steps?: StepItem[] } }>(
@@ -1381,6 +1817,13 @@ export default function App() {
           degrade_reason: String(record.degrade_reason || ""),
           content_title: String(record.content_title || ""),
           confidence_note: String(record.confidence_note || ""),
+          output_template:
+            record.output_template === "content_summary"
+              ? "content_summary"
+              : "operation_guide",
+          external_references: Array.isArray(record.external_references)
+            ? record.external_references
+            : [],
           video_preview_url: String(record.video_preview_url || ""),
           subtitle_available: Boolean(record.subtitle_available),
           subtitle_file_name: String(record.subtitle_file_name || ""),
@@ -1392,7 +1835,9 @@ export default function App() {
           subtitle_workbench_url: String(record.subtitle_workbench_url || ""),
         });
         setSavedBatchResult(null);
+        setSavedBatchResultTaskId("");
         setBatchResultData(null);
+        setBatchResultTaskId("");
         setIsEditMode(false);
         setEditedSteps([]);
         setActiveResultTab("steps");
@@ -1406,11 +1851,12 @@ export default function App() {
         hideProgress();
       }
     },
-    [fetchJson, hideProgress, showError, showProgress, uiScrollBehavior],
+    [fetchJson, hideProgress, invalidateTaskPresentation, showError, showProgress, uiScrollBehavior],
   );
 
   const openBatchResultItem = useCallback(
     async (item: BatchResultItem) => {
+      invalidateTaskPresentation();
       const outputDirName = basename(item.output_dir_name || item.output_dir);
       if (!outputDirName) {
         showError("该结果缺少输出目录，无法打开详情");
@@ -1443,6 +1889,13 @@ export default function App() {
           key_points: Array.isArray(item.key_points) ? item.key_points : [],
           timeline_points: Array.isArray(item.timeline_points) ? item.timeline_points : [],
           confidence_note: String(item.confidence_note || ""),
+          output_template:
+            item.output_template === "content_summary"
+              ? "content_summary"
+              : "operation_guide",
+          external_references: Array.isArray(item.external_references)
+            ? item.external_references
+            : [],
           video_preview_url: String(item.video_preview_url || ""),
           subtitle_available: Boolean(item.subtitle_available),
           subtitle_file_name: String(item.subtitle_file_name || ""),
@@ -1454,7 +1907,9 @@ export default function App() {
           subtitle_workbench_url: String(item.subtitle_workbench_url || ""),
         });
         setSavedBatchResult(batchResultData);
+        setSavedBatchResultTaskId(batchResultTaskId);
         setBatchResultData(null);
+        setBatchResultTaskId("");
         setIsEditMode(false);
         setEditedSteps([]);
         setActiveResultTab("steps");
@@ -1470,13 +1925,25 @@ export default function App() {
         hideProgress();
       }
     },
-    [batchResultData, hideProgress, showError, showProgress, uiScrollBehavior, withHistoryClientHeader],
+    [
+      batchResultData,
+      batchResultTaskId,
+      hideProgress,
+      invalidateTaskPresentation,
+      showError,
+      showProgress,
+      uiScrollBehavior,
+      withHistoryClientHeader,
+    ],
   );
 
   const returnToBatchResult = useCallback(() => {
     if (!savedBatchResult) return;
+    invalidateTaskPresentation();
     setBatchResultData(savedBatchResult);
+    setBatchResultTaskId(savedBatchResultTaskId);
     setSavedBatchResult(null);
+    setSavedBatchResultTaskId("");
     setResultData(null);
     setIsEditMode(false);
     setEditedSteps([]);
@@ -1485,7 +1952,7 @@ export default function App() {
     } else if (typeof window !== "undefined") {
       window.scrollTo({ top: 0, behavior: uiScrollBehavior });
     }
-  }, [savedBatchResult, uiScrollBehavior]);
+  }, [invalidateTaskPresentation, savedBatchResult, savedBatchResultTaskId, uiScrollBehavior]);
 
   const openDeleteHistoryConfirm = useCallback(
     (record: HistoryItem) => {
@@ -1566,6 +2033,7 @@ export default function App() {
         body: JSON.stringify({
           steps: editedSteps,
           output_dir: resultData.output_dir,
+          output_template: resultData.output_template || "operation_guide",
         }),
       });
 
@@ -1581,7 +2049,7 @@ export default function App() {
       setSavingSteps(false);
       hideProgress();
     }
-  }, [editedSteps, fetchJson, hideProgress, resultData?.output_dir, showError, showProgress]);
+  }, [editedSteps, fetchJson, hideProgress, resultData, showError, showProgress]);
 
   const triggerDownload = useCallback((blob: Blob, filename: string) => {
     const url = URL.createObjectURL(blob);
@@ -1813,8 +2281,12 @@ export default function App() {
       ? "已完成"
       : status === "failed"
         ? "失败"
+        : status === "cancelled"
+          ? "已取消"
+          : status === "uploading"
+            ? "上传中"
         : status === "processing"
-          ? "正在准备文件"
+          ? "分析中"
           : "待处理";
   const handleOpenHistoryRecord = useCallback(
     (id: string) => {
@@ -1832,13 +2304,24 @@ export default function App() {
     () => batchFiles.filter((item) => Boolean(String(item.filepath || "").trim())).length,
     [batchFiles],
   );
+  const hasUploadingFiles = useMemo(
+    () => batchFiles.some((item) => item.status === "uploading"),
+    [batchFiles],
+  );
+  const visibleTaskQueue = useMemo(
+    () => taskQueue.filter((task) => task.kind !== "batch" && task.status !== "completed"),
+    [taskQueue],
+  );
   const hasSourceUrlInput = useMemo(() => parseSourceUrls(sourceUrl).length > 0, [sourceUrl]);
-  const canAnalyze = !isAnalyzing && (analyzableBatchCount > 0 || hasSourceUrlInput);
+  const canAnalyze =
+    !isAnalyzing && !importingUrl && !hasUploadingFiles && (analyzableBatchCount > 0 || hasSourceUrlInput);
   const analyzeButtonText = isAnalyzing
     ? analyzableBatchCount === 1
       ? "单文件处理中..."
       : "批量处理中..."
-    : analyzableBatchCount === 1
+    : hasUploadingFiles
+      ? "等待上传完成"
+      : analyzableBatchCount === 1
       ? "开始单文件分析"
       : analyzableBatchCount > 1
         ? "开始分析"
@@ -1941,12 +2424,14 @@ export default function App() {
     };
   }, [isResultView]);
   const goBackToUpload = useCallback(() => {
+    invalidateTaskPresentation();
     setView("upload");
     setSavedBatchResult(null);
+    setSavedBatchResultTaskId("");
     if (typeof window !== "undefined") {
       window.scrollTo({ top: 0, behavior: uiScrollBehavior });
     }
-  }, [uiScrollBehavior]);
+  }, [invalidateTaskPresentation, uiScrollBehavior]);
   const scrollToPanel = useCallback(
     (panelId: string) => {
       if (typeof document === "undefined") return;
@@ -2082,6 +2567,7 @@ export default function App() {
                   if (view === "result") {
                     goBackToUpload();
                   } else {
+                    invalidateTaskPresentation();
                     setView("result");
                     if (typeof window !== "undefined") window.scrollTo({ top: 0, behavior: uiScrollBehavior });
                   }
@@ -2192,12 +2678,43 @@ export default function App() {
                     <button
                       type="button"
                       className="vi-btn vi-btn--sm vi-btn--primary"
-                      disabled={isAnalyzing || importingUrl}
+                      disabled={isAnalyzing || importingUrl || hasUploadingFiles}
                       onClick={() => void analyzeBySourceUrl()}
                     >
                       {importingUrl ? "处理中..." : "链接直达分析"}
                     </button>
                   </div>
+                </div>
+              </div>
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-y border-neutral-800/80 py-2.5">
+                <span className="text-sm font-medium text-neutral-200">输出模板</span>
+                <div className="vi-template-selector inline-flex rounded border border-neutral-700 bg-neutral-950/45 p-0.5" role="group" aria-label="输出模板">
+                  <button
+                    type="button"
+                    aria-pressed={outputTemplate === "operation_guide"}
+                    className={cn(
+                      "rounded px-3 py-1.5 text-xs transition-colors",
+                      outputTemplate === "operation_guide"
+                        ? "bg-cyan-500/18 text-cyan-100"
+                        : "text-neutral-400 hover:text-neutral-200",
+                    )}
+                    onClick={() => setOutputTemplate("operation_guide")}
+                  >
+                    操作教程
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={outputTemplate === "content_summary"}
+                    className={cn(
+                      "rounded px-3 py-1.5 text-xs transition-colors",
+                      outputTemplate === "content_summary"
+                        ? "bg-cyan-500/18 text-cyan-100"
+                        : "text-neutral-400 hover:text-neutral-200",
+                    )}
+                    onClick={() => setOutputTemplate("content_summary")}
+                  >
+                    内容摘要
+                  </button>
                 </div>
               </div>
               <input
@@ -2239,6 +2756,7 @@ export default function App() {
                     className={cn(
                       "vi-batch-row",
                       item.status === "failed" && "vi-batch-row--fail",
+                      item.status === "cancelled" && "vi-batch-row--fail",
                       item.status === "success" && "vi-batch-row--ok",
                     )}
                   >
@@ -2248,6 +2766,7 @@ export default function App() {
                           "mt-0.5 h-4 w-4 shrink-0 text-neutral-400 transition-colors",
                           item.status === "success" && "text-emerald-300",
                           item.status === "failed" && "text-rose-300",
+                          item.status === "cancelled" && "text-neutral-400",
                         )}
                       />
                       <div className="min-w-0 flex-1">
@@ -2271,18 +2790,35 @@ export default function App() {
                         <span className="vi-status vi-status--fail">
                           <StatusFailedIcon /> 失败
                         </span>
+                      ) : item.status === "cancelled" ? (
+                        <span className="vi-status">
+                          <StatusFailedIcon /> 已取消
+                        </span>
+                      ) : item.status === "uploading" ? (
+                        <span className="vi-status vi-status--run">上传中</span>
                       ) : item.status === "processing" ? (
-                        <span className="vi-inline-spinner" aria-label="处理中" />
+                        <span className="vi-status vi-status--run">分析中</span>
                       ) : (
                         <span className="vi-status">待处理</span>
                       )}
+                      {item.status === "uploading" ? (
+                        <button
+                          type="button"
+                          title="取消上传"
+                          aria-label={`取消上传 ${item.filename}`}
+                          className="vi-icon-btn vi-icon-btn--danger"
+                          onClick={() => void cancelFileUpload(item)}
+                        >
+                          <CloseIcon />
+                        </button>
+                      ) : null}
                       {batchFiles.length > 1 ? (
                         <button
                           type="button"
                           title="删除文件"
                           aria-label="删除文件"
                           className="vi-icon-btn vi-icon-btn--danger"
-                          disabled={isAnalyzing}
+                          disabled={isAnalyzing || item.status === "uploading"}
                           onClick={() => setBatchFiles((prev) => prev.filter((_, i) => i !== index))}
                         >
                           <TrashIcon />
@@ -2292,11 +2828,85 @@ export default function App() {
                   </div>
                 ))}
               </div>
+              {visibleTaskQueue.length > 0 ? (
+                <div className="mt-3 space-y-2" aria-label="分析任务状态">
+                  {visibleTaskQueue.map((task) => {
+                    const busy = taskActionId === task.taskId;
+                    const canCancel = task.status === "uploading" || task.status === "queued" || task.status === "analyzing";
+                    const canRetry =
+                      task.retryable && (task.status === "failed" || task.status === "cancelled");
+                    const percent = Math.max(0, Math.min(100, Math.round(task.percent || 0)));
+                    return (
+                      <div
+                        key={task.taskId}
+                        className="vi-task-row rounded border border-neutral-800 bg-neutral-950/55 px-3 py-2.5"
+                      >
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <p className="truncate text-sm font-medium text-neutral-100" title={task.label}>
+                              {task.label}
+                            </p>
+                            <p className="mt-0.5 text-xs text-neutral-400">
+                              {TASK_STATUS_LABELS[task.status]}
+                              {task.stage ? ` · 阶段：${STAGE_LABELS[task.stage] || task.stage}` : ""}
+                              {task.total > 0 ? ` · ${task.current}/${task.total}` : ""}
+                            </p>
+                          </div>
+                          <div className="flex shrink-0 items-center gap-2">
+                            <span
+                              className={cn(
+                                "vi-status",
+                                task.status === "failed" && "vi-status--fail",
+                                (task.status === "queued" || task.status === "analyzing" || task.status === "uploading") && "vi-status--run",
+                              )}
+                            >
+                              {TASK_STATUS_LABELS[task.status]}
+                            </span>
+                            {canCancel ? (
+                              <button
+                                type="button"
+                                className="vi-btn vi-btn--sm"
+                                disabled={Boolean(taskActionId) || task.cancelRequested}
+                                onClick={() => void cancelAnalysisTask(task)}
+                              >
+                                {task.cancelRequested ? "取消中..." : "取消"}
+                              </button>
+                            ) : null}
+                            {canRetry ? (
+                              <button
+                                type="button"
+                                className="vi-btn vi-btn--sm vi-btn--primary"
+                                disabled={Boolean(taskActionId)}
+                                onClick={() => void retryAnalysisTask(task)}
+                              >
+                                {busy ? "重试中..." : "重试"}
+                              </button>
+                            ) : null}
+                          </div>
+                        </div>
+                        {task.message ? (
+                          <p className={cn(
+                            "mt-1.5 text-xs break-words",
+                            task.status === "failed" ? "text-rose-300" : "text-neutral-300",
+                          )}>
+                            {task.message}
+                          </p>
+                        ) : null}
+                        {task.status === "queued" || task.status === "analyzing" || task.status === "uploading" ? (
+                          <div className="vi-progress-track mt-2" aria-label={`任务进度 ${percent}%`}>
+                            <div className="vi-progress-bar" style={{ width: `${percent}%` }} />
+                          </div>
+                        ) : null}
+                      </div>
+                    );
+                  })}
+                </div>
+              ) : null}
               {batchFiles.length > 0 ? (
                 <button
                   type="button"
                   className="vi-btn vi-btn--block vi-btn--sm mt-2"
-                  disabled={isAnalyzing}
+                  disabled={isAnalyzing || hasUploadingFiles}
                   onClick={() => setBatchFiles([])}
                 >
                   <ClearIcon className="h-3.5 w-3.5" />
@@ -2322,6 +2932,19 @@ export default function App() {
                 )}
               </div>
             </section>
+            ) : null}
+
+            {!isResultView ? (
+              <BatchTaskCenter
+                tasks={taskQueue}
+                actionTaskId={taskActionId}
+                notificationEnabled={browserNotificationsEnabled}
+                notificationPermission={browserNotificationPermission}
+                onToggleNotifications={() => void toggleBrowserCompletionNotifications()}
+                onCancel={(task) => void cancelAnalysisTask(task)}
+                onRetry={(task) => void retryAnalysisTask(task)}
+                onOpen={(task) => void openBatchTaskCenterResult(task)}
+              />
             ) : null}
 
             {isResultView ? (
@@ -2414,11 +3037,14 @@ export default function App() {
                 {hasBatchResult && batchResultData ? (
                   <BatchResultPanel
                     data={batchResultData}
+                    retrying={submittingTask}
                     onDownloadAll={() => void downloadBatchZip()}
                     onDownloadItem={(outputDir, filename) =>
                       void downloadSingleFromBatch(outputDir, filename)
                     }
                     onOpenItem={(item) => void openBatchResultItem(item)}
+                    onRetryFailed={() => void retryFailedBatchItems()}
+                    onRetryItem={(item) => void retryFailedBatchItem(item)}
                   />
                 ) : null}
 
@@ -2472,7 +3098,7 @@ export default function App() {
                         <div id="result-panel-document" className="result-anchor">
                           <DocumentPanel
                             html={renderedMarkdown}
-                            summaryOnly={summaryOnly}
+                            outputTemplate={resultData.output_template || "operation_guide"}
                             onDownloadZip={() => void downloadSingleZip()}
                             onCopyMarkdown={copyMarkdownSource}
                             onCopyText={copyPlainText}

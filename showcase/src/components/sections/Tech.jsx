@@ -15,7 +15,7 @@ export default function Tech() {
           <span className="section-tag">TECH STACK · ENGINEERING</span>
           <h2 className="section-title">技术栈与工程化</h2>
           <p className="section-sub">
-            前端 React 19 + TypeScript + Tailwind 4；后端 Flask + faster-whisper + ffmpeg；多 LLM Provider 路由 + 多层降级。下面同时呈现真实落地的工程化优化点。
+            前端 React 19 + TypeScript + Tailwind 4；后端 Flask + faster-whisper + ffmpeg；Ark / OpenAI / OpenAI 兼容三类 LLM 路由与分层降级。下面同时呈现真实落地的工程化优化点。
           </p>
         </div>
 

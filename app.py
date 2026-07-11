@@ -1,4 +1,5 @@
 ﻿import asyncio
+import atexit
 import base64
 import hashlib
 import json
@@ -12,10 +13,11 @@ import time
 import traceback
 import zipfile
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
-from threading import Lock, RLock, Thread
+from threading import Lock, RLock, Thread, local
 from typing import Any, Callable, Dict, List, Tuple
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
@@ -61,6 +63,8 @@ from utils import (
 )
 from path_utils import _assert_within, _resolve_output_dir, _resolve_upload_filepath
 from services.progress import ProgressStateService
+from services.task_runner import TaskCancelledError, TaskRunner
+from services.task_store import TaskConflictError, TaskStateError, TaskStore
 from services.risk_fallback_env import RiskFallbackEnvService
 from services.risk_blocklist import RiskBlocklistService
 from services.risk_cache import RiskResultCacheService
@@ -152,6 +156,12 @@ from services.media_bundle import (
 )
 from services.text_risk import _run_text_fallback_risk_gate
 from services.media_validation import is_valid_video_content
+from services.output_templates import DEFAULT_OUTPUT_TEMPLATE, normalize_output_template
+from services.step_provenance import (
+    enrich_steps_with_evidence,
+    extract_external_references_from_markdown,
+    reconcile_edited_step_evidence,
+)
 
 app = Flask(__name__)
 # 优先从环境变量读取，缺失时生成随机密钥（避免硬编码可预测密钥被伪造）
@@ -176,6 +186,7 @@ single_progress_by_owner: Dict[str, Dict[str, Dict[str, Any]]] = {}
 upload_memory_buffers: Dict[str, Dict[int, bytes]] = {}
 upload_memory_reserved_bytes: Dict[str, int] = {}
 upload_memory_reserved_total_bytes = 0
+upload_finalizing_ids: set[str] = set()
 risk_blocklist_lock = RLock()
 risk_result_cache_lock = RLock()
 
@@ -215,16 +226,348 @@ class ContentPolicyBlockedError(RuntimeError):
         self.risk = risk
 
 
+class TaskExecutionError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        http_status: int,
+        retryable: bool,
+    ) -> None:
+        super().__init__(message)
+        self.code = str(code or "analysis_failed")
+        self.http_status = int(http_status)
+        self.retryable = bool(retryable)
+
+
+_ANALYSIS_STAGE_PERCENT = {
+    "queued": 0.0,
+    "download": 5.0,
+    "prepare": 10.0,
+    "moderation": 18.0,
+    "subtitle": 35.0,
+    "transcribing": 35.0,
+    "analysis": 58.0,
+    "analyzing": 58.0,
+    "screenshots": 72.0,
+    "vision": 82.0,
+    "document": 90.0,
+    "pdf": 96.0,
+    "done": 99.0,
+    "completed": 99.0,
+}
+_analysis_task_progress_local = local()
+
+
+class _AnalysisTaskProgressBridge:
+    def __init__(self, cancel_check: Callable[[], bool], progress: Callable[..., Any]) -> None:
+        self.cancel_check = cancel_check
+        self.progress = progress
+        self.lock = RLock()
+        self.percent = 0.0
+        self.total = 0
+        self.current = 0
+        self.file_progress: Dict[int, Dict[str, Any]] = {}
+
+    @staticmethod
+    def _normalize_file_progress_item(raw: Any) -> Tuple[int, Dict[str, Any]] | None:
+        if not isinstance(raw, dict):
+            return None
+        try:
+            index = int(raw.get("index", 0))
+        except (TypeError, ValueError):
+            return None
+        status = str(raw.get("status", "")).strip().lower()
+        if index < 1 or status not in {"waiting", "analyzing", "success", "failed"}:
+            return None
+        return index, {
+            "index": index,
+            "filename": str(raw.get("filename", "")).strip(),
+            "status": status,
+            "stage": str(raw.get("stage", "")).strip(),
+            "message": str(raw.get("message", "")).strip(),
+        }
+
+    def publish(self, progress_kind: str, changes: Dict[str, Any]) -> None:
+        # The cancellation check must precede both durable and legacy memory writes.
+        self.cancel_check()
+        durable = {
+            key: value
+            for key, value in changes.items()
+            if key
+            in {
+                "stage",
+                "message",
+                "total",
+                "current",
+                "current_file",
+                "file_progress",
+                "percent",
+            }
+        }
+        stage = str(durable.get("stage", "")).strip().lower()
+        with self.lock:
+            supplied_file_progress = changes.get("file_progress")
+            if progress_kind == "batch" and isinstance(supplied_file_progress, list):
+                self.file_progress = {}
+                for raw_item in supplied_file_progress:
+                    normalized = self._normalize_file_progress_item(raw_item)
+                    if normalized is not None:
+                        index, item = normalized
+                        self.file_progress[index] = item
+
+            if progress_kind == "batch" and "file_index" in changes:
+                try:
+                    file_index = int(changes.get("file_index", 0))
+                except (TypeError, ValueError):
+                    file_index = 0
+                file_status = str(changes.get("file_status", "")).strip().lower()
+                if file_index >= 1 and file_status in {
+                    "waiting",
+                    "analyzing",
+                    "success",
+                    "failed",
+                }:
+                    existing = self.file_progress.get(
+                        file_index,
+                        {
+                            "index": file_index,
+                            "filename": "",
+                            "status": "waiting",
+                            "stage": "",
+                            "message": "",
+                        },
+                    )
+                    existing_status = str(existing.get("status", ""))
+                    if existing_status not in {"success", "failed"} or file_status in {
+                        "success",
+                        "failed",
+                    }:
+                        self.file_progress[file_index] = {
+                            "index": file_index,
+                            "filename": str(
+                                changes.get("file_name")
+                                or changes.get("current_file")
+                                or existing.get("filename", "")
+                            ).strip(),
+                            "status": file_status,
+                            "stage": str(changes.get("stage", existing.get("stage", ""))).strip(),
+                            "message": str(
+                                changes.get("message", existing.get("message", ""))
+                            ).strip(),
+                        }
+
+            if progress_kind == "batch" and (
+                isinstance(supplied_file_progress, list) or self.file_progress
+            ):
+                durable["file_progress"] = [
+                    dict(self.file_progress[index]) for index in sorted(self.file_progress)
+                ]
+
+            previous_current = self.current
+            if "total" in durable:
+                self.total = max(0, int(durable["total"]))
+            if "current" in durable:
+                self.current = max(self.current, max(0, int(durable["current"])))
+                durable["current"] = self.current
+
+            mapped_percent = _ANALYSIS_STAGE_PERCENT.get(stage)
+            if progress_kind == "batch" and self.total > 0:
+                if self.current > previous_current:
+                    candidate = 100.0 * self.current / self.total
+                elif mapped_percent is not None:
+                    candidate = 100.0 * (
+                        self.current + (mapped_percent / 100.0)
+                    ) / self.total
+                else:
+                    candidate = 100.0 * self.current / self.total
+                mapped_percent = min(99.0, candidate)
+            if "percent" in durable:
+                mapped_percent = float(durable["percent"])
+            if mapped_percent is not None:
+                self.percent = max(self.percent, min(99.0, max(0.0, mapped_percent)))
+                durable["percent"] = self.percent
+
+            # Serialize concurrent file callbacks before writing the cumulative snapshot.
+            # TaskRunner.progress applies the active attempt fence and checks cancellation again.
+            self.progress(**durable)
+
+
+@contextmanager
+def _analysis_task_progress_context(
+    cancel_check: Callable[[], bool], progress: Callable[..., Any]
+):
+    bridge = _AnalysisTaskProgressBridge(cancel_check, progress)
+    with _bind_analysis_task_progress_bridge(bridge):
+        yield bridge
+
+
+@contextmanager
+def _bind_analysis_task_progress_bridge(bridge: _AnalysisTaskProgressBridge | None):
+    had_previous = hasattr(_analysis_task_progress_local, "bridge")
+    previous = getattr(_analysis_task_progress_local, "bridge", None)
+    _analysis_task_progress_local.bridge = bridge
+    try:
+        yield
+    finally:
+        if had_previous:
+            _analysis_task_progress_local.bridge = previous
+        else:
+            delattr(_analysis_task_progress_local, "bridge")
+
+
+def _current_analysis_task_progress_bridge() -> _AnalysisTaskProgressBridge | None:
+    bridge = getattr(_analysis_task_progress_local, "bridge", None)
+    return bridge if isinstance(bridge, _AnalysisTaskProgressBridge) else None
+
+
 def _resolve_progress_task_id(raw_task_id: Any) -> str:
     return progress_state_service.resolve_task_id(raw_task_id)
 
 
 def _update_batch_progress(owner_id: str, task_id: str, **kwargs: Any) -> None:
+    bridge = _current_analysis_task_progress_bridge()
+    if bridge is not None:
+        bridge.publish("batch", kwargs)
     progress_state_service.update_batch(owner_id, task_id, **kwargs)
 
 
 def _update_single_progress(owner_id: str, task_id: str, **kwargs: Any) -> None:
+    bridge = _current_analysis_task_progress_bridge()
+    if bridge is not None:
+        bridge.publish("single", kwargs)
     progress_state_service.update_single(owner_id, task_id, **kwargs)
+
+
+_ANALYSIS_TASK_VIEWS = {
+    "single": ("analyze", "/analyze"),
+    "batch": ("analyze_batch", "/analyze_batch"),
+    "url": ("analyze_from_url", "/analyze_url"),
+}
+
+
+def _execute_analysis_task(
+    snapshot: Dict[str, Any],
+    cancel_check: Callable[[], bool],
+    progress: Callable[..., Any],
+) -> Any:
+    target = _ANALYSIS_TASK_VIEWS.get(str(snapshot.get("kind", "")))
+    if target is None:
+        raise TaskExecutionError(
+            "Unsupported analysis task kind",
+            code="unsupported_task_kind",
+            http_status=400,
+            retryable=False,
+        )
+    view_name, route_path = target
+    view = globals().get(view_name)
+    if not callable(view):
+        raise TaskExecutionError(
+            "Analysis handler is unavailable",
+            code="analysis_handler_unavailable",
+            http_status=500,
+            retryable=True,
+        )
+
+    payload = dict(snapshot.get("request") or {})
+    payload["task_id"] = snapshot["task_id"]
+    headers = {HISTORY_OWNER_HEADER: snapshot["owner_id"]}
+    with app.test_request_context(route_path, method="POST", json=payload, headers=headers):
+        try:
+            with _analysis_task_progress_context(cancel_check, progress):
+                cancel_check()
+                response = app.make_response(view())
+                response_payload = response.get_json(silent=True)
+                if response.status_code >= 400:
+                    error_payload = response_payload if isinstance(response_payload, dict) else {}
+                    status_code = (
+                        int(response.status_code)
+                        if 400 <= int(response.status_code) <= 599
+                        else 500
+                    )
+                    raise TaskExecutionError(
+                        str(error_payload.get("error") or "Analysis task failed"),
+                        code=str(
+                            error_payload.get("code") or f"analysis_http_{status_code}"
+                        ),
+                        http_status=status_code,
+                        retryable=status_code == 429 or status_code >= 500,
+                    )
+                if response_payload is None:
+                    raise TaskExecutionError(
+                        "Analysis handler returned a non-JSON response",
+                        code="invalid_analysis_response",
+                        http_status=500,
+                        retryable=True,
+                    )
+                return response_payload
+        except (TaskCancelledError, TaskExecutionError):
+            raise
+        except Exception as exc:
+            error_message, status_code, _ = _normalize_provider_error(exc, default_status=500)
+            raise TaskExecutionError(
+                error_message,
+                code=str(getattr(exc, "code", type(exc).__name__)),
+                http_status=status_code,
+                retryable=status_code == 429 or status_code >= 500,
+            ) from exc
+
+
+analysis_task_store = TaskStore(ANALYSIS_TASK_DB_PATH)
+analysis_task_runner = TaskRunner(
+    analysis_task_store,
+    _execute_analysis_task,
+    max_workers=ANALYSIS_TASK_MAX_WORKERS,
+    poll_interval=ANALYSIS_TASK_POLL_INTERVAL_SECONDS,
+    stale_after_seconds=ANALYSIS_TASK_STALE_AFTER_SECONDS,
+)
+_analysis_task_shutdown_lock = Lock()
+_analysis_task_shutdown_complete = False
+
+
+def _shutdown_analysis_task_runtime() -> bool:
+    global _analysis_task_shutdown_complete
+    with _analysis_task_shutdown_lock:
+        if _analysis_task_shutdown_complete:
+            return False
+        try:
+            analysis_task_runner.stop(wait=True)
+        except Exception:
+            logger.exception("Unable to stop analysis task runner")
+            return False
+        try:
+            analysis_task_store.close()
+        except Exception:
+            logger.exception("Unable to close analysis task store")
+            return False
+        _analysis_task_shutdown_complete = True
+        return True
+
+
+atexit.register(_shutdown_analysis_task_runtime)
+
+
+def _ensure_analysis_task_runner_started() -> bool:
+    if app.testing:
+        return False
+    debug_mode = app.debug or os.getenv("FLASK_DEBUG", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    reloader_child = os.getenv("WERKZEUG_RUN_MAIN", "").strip().lower() in {
+        "1",
+        "true",
+    }
+    if debug_mode and not reloader_child:
+        return False
+    try:
+        return analysis_task_runner.start()
+    except Exception:
+        logger.exception("Unable to start analysis task runner")
+        return False
 
 
 
@@ -1245,6 +1588,7 @@ def _start_history_retention_cleanup() -> None:
 def ensure_upload_video_auto_cleanup():
     _start_upload_video_auto_cleanup()
     _start_history_retention_cleanup()
+    _ensure_analysis_task_runner_started()
 
 
 def _run_async(coro):
@@ -1269,6 +1613,8 @@ def _maybe_correct_subtitles(agent, srt_path, report=None) -> int:
         if report:
             report("subtitle", "正在用 AI 校对字幕同音字...")
         return _run_async(agent.correct_subtitles_with_llm(srt_path))
+    except TaskCancelledError:
+        raise
     except Exception as exc:  # noqa: BLE001 - correction is best-effort
         logger.warning("字幕 LLM 同音字纠错失败，保留原字幕: %s", exc)
         return 0
@@ -1313,10 +1659,11 @@ def _save_upload_session(upload_id: str, session: Dict[str, Any]) -> None:
     upload_session_service.save(upload_id, session)
 
 
-def _delete_upload_session(upload_id: str) -> None:
+def _delete_upload_session(upload_id: str) -> bool:
     global upload_memory_reserved_total_bytes
-    upload_session_service.delete(upload_id)
+    deleted = upload_session_service.delete(upload_id)
     upload_memory_reserved_total_bytes = upload_session_service.reserved_total_bytes
+    return deleted
 
 
 def _reserve_upload_memory(upload_id: str, total_size: int) -> bool:
@@ -1336,6 +1683,19 @@ def _get_chunk_storage_mode(session: Dict[str, Any]) -> str:
     return upload_session_service.get_chunk_storage_mode(session)
 
 
+def _cleanup_upload_sessions_once() -> int:
+    with upload_session_lock:
+        return upload_session_service.cleanup_stale_sessions(
+            upload_root=UPLOAD_ROOT,
+            ttl_seconds=UPLOAD_VIDEO_AUTO_DELETE_TTL_SECONDS,
+        )
+
+
+def _protected_upload_session_paths() -> set[Path]:
+    with upload_session_lock:
+        return upload_session_service.pending_destination_paths(upload_root=UPLOAD_ROOT)
+
+
 
 upload_video_auto_cleanup_service = UploadVideoAutoCleanupService(
     upload_root=UPLOAD_ROOT,
@@ -1343,6 +1703,9 @@ upload_video_auto_cleanup_service = UploadVideoAutoCleanupService(
     ttl_seconds=UPLOAD_VIDEO_AUTO_DELETE_TTL_SECONDS,
     scan_interval_seconds=UPLOAD_VIDEO_AUTO_DELETE_SCAN_INTERVAL_SECONDS,
     logger_obj=logger,
+    session_cleanup=_cleanup_upload_sessions_once,
+    protected_paths_provider=_protected_upload_session_paths,
+    operation_lock=upload_session_lock,
 )
 
 
@@ -2443,6 +2806,7 @@ def _build_fallback_steps_when_empty(
     *,
     subtitle_cache_identity: str = "",
     reason: str = "",
+    raw_subtitles_out: List[Dict[str, Any]] | None = None,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any], str | None]:
     normalized_srt_path = str(srt_path or "").strip() or None
     subtitles: List[Dict[str, Any]] = []
@@ -2450,6 +2814,8 @@ def _build_fallback_steps_when_empty(
     if normalized_srt_path and Path(normalized_srt_path).exists():
         try:
             subtitles = agent.parse_srt(normalized_srt_path)
+        except TaskCancelledError:
+            raise
         except Exception as exc:
             logger.warning("解析现有字幕失败，准备尝试重新生成字幕: %s", exc)
             subtitles = []
@@ -2463,8 +2829,21 @@ def _build_fallback_steps_when_empty(
             )
             normalized_srt_path = generated_srt if generated_srt else normalized_srt_path
             if normalized_srt_path and Path(normalized_srt_path).exists():
+                if raw_subtitles_out is not None:
+                    try:
+                        raw_subtitles_out.extend(
+                            item
+                            for item in agent.parse_srt(normalized_srt_path)
+                            if isinstance(item, dict)
+                        )
+                    except TaskCancelledError:
+                        raise
+                    except Exception as exc:
+                        logger.warning("降级步骤生成时捕获原始字幕失败: %s", exc)
                 _maybe_correct_subtitles(agent, normalized_srt_path)
                 subtitles = agent.parse_srt(normalized_srt_path)
+        except TaskCancelledError:
+            raise
         except Exception as exc:
             logger.warning("降级步骤生成时重新转写字幕失败: %s", exc)
             subtitles = []
@@ -2582,6 +2961,7 @@ class VideoProcessingService:
         max_vision: int,
         fps: float = 1.0,
         summary_only: bool = False,
+        output_template: str = DEFAULT_OUTPUT_TEMPLATE,
         history_owner_id: str = "",
         progress_callback: Callable[[str, str], None] | None = None,
     ) -> Tuple[List[Dict[str, Any]], str, str, str, bool, Dict[str, Any]]:
@@ -2589,6 +2969,7 @@ class VideoProcessingService:
             if progress_callback:
                 progress_callback(stage, message)
 
+        normalized_output_template = normalize_output_template(output_template)
         report("prepare", "\u6b63\u5728\u51c6\u5907\u5206\u6790\u4efb\u52a1...")
         output_dir = _create_unique_output_dir(video_path)
 
@@ -2707,6 +3088,8 @@ class VideoProcessingService:
                         "网页预览视频未生成，播放将回退原始视频: %s",
                         preview_meta.get("reason", "unknown"),
                     )
+        except TaskCancelledError:
+            raise
         except Exception as exc:
             logger.warning("网页预览视频生成异常，回退原始视频: %s", exc)
 
@@ -2730,6 +3113,8 @@ class VideoProcessingService:
             )
 
         srt_path: str | None = None
+        raw_subtitles: List[Dict[str, Any]] = []
+        analyzed_subtitles: List[Dict[str, Any]] = []
         steps: List[Dict[str, Any]] = []
         analysis_error = ""
         fallback_used = bool(summary_only)
@@ -2737,6 +3122,30 @@ class VideoProcessingService:
         analysis_note = "已按要求仅生成摘要版内容。" if summary_only else ""
         degrade_reason = "user_requested_summary_only" if summary_only else ""
         result_meta: Dict[str, Any] = {}
+
+        def capture_and_correct_subtitles(path: str) -> None:
+            nonlocal raw_subtitles, analyzed_subtitles
+            try:
+                parsed_raw = agent.parse_srt(path)
+                raw_subtitles = [item for item in parsed_raw if isinstance(item, dict)]
+            except TaskCancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("捕获原始字幕证据失败: %s", exc)
+                raw_subtitles = []
+
+            _maybe_correct_subtitles(agent, path, report)
+
+            try:
+                parsed_analyzed = agent.parse_srt(path)
+                analyzed_subtitles = [
+                    item for item in parsed_analyzed if isinstance(item, dict)
+                ]
+            except TaskCancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("捕获分析字幕证据失败: %s", exc)
+                analyzed_subtitles = []
 
         if not use_video:
             report("subtitle", "\u6b63\u5728\u751f\u6210\u5b57\u5e55...")
@@ -2746,18 +3155,22 @@ class VideoProcessingService:
                     str(output_dir),
                     cache_identity=analysis_subtitle_cache_identity,
                 )
+            except TaskCancelledError:
+                raise
             except Exception as exc:
                 analysis_error = f"字幕生成失败: {str(exc)}"
                 logger.warning("Whisper 字幕生成失败，切换候选内容生成: %s", exc)
                 srt_path = None
 
             if srt_path:
-                _maybe_correct_subtitles(agent, srt_path, report)
+                capture_and_correct_subtitles(srt_path)
 
             if srt_path and not summary_only:
                 report("analysis", "\u6b63\u5728\u5206\u6790\u5b57\u5e55\u5185\u5bb9...")
                 try:
                     steps = _run_async(agent.analyze_subtitles(srt_path))
+                except TaskCancelledError:
+                    raise
                 except Exception as exc:
                     analysis_error = f"字幕步骤识别失败: {str(exc)}"
                     logger.warning("字幕步骤识别失败，切换候选内容生成: %s", exc)
@@ -2770,17 +3183,21 @@ class VideoProcessingService:
                     str(output_dir),
                     cache_identity=analysis_subtitle_cache_identity,
                 )
+            except TaskCancelledError:
+                raise
             except Exception as exc:
                 logger.warning("Whisper 字幕生成失败，继续视频分析模式: %s", exc)
                 srt_path = None
 
             if srt_path:
-                _maybe_correct_subtitles(agent, srt_path, report)
+                capture_and_correct_subtitles(srt_path)
 
             if not summary_only:
                 report("analysis", "\u6b63\u5728\u5206\u6790\u89c6\u9891\u753b\u9762...")
                 try:
                     steps = _run_async(agent.analyze_video(str(analysis_video_path), fps))
+                except TaskCancelledError:
+                    raise
                 except Exception as exc:
                     analysis_error = f"视频步骤识别失败: {str(exc)}"
                     logger.warning("视频步骤识别失败，切换候选内容生成: %s", exc)
@@ -2792,6 +3209,8 @@ class VideoProcessingService:
             if srt_path and Path(srt_path).exists():
                 try:
                     summary_subtitles = agent.parse_srt(srt_path)
+                except TaskCancelledError:
+                    raise
                 except Exception as exc:
                     logger.warning("摘要模式解析字幕失败，改用无字幕摘要保底: %s", exc)
                     summary_subtitles = []
@@ -2823,9 +3242,21 @@ class VideoProcessingService:
                 srt_path=srt_path,
                 subtitle_cache_identity=analysis_subtitle_cache_identity or "",
                 reason=analysis_error,
+                raw_subtitles_out=raw_subtitles,
             )
             if fallback_srt_path and not srt_path:
                 srt_path = fallback_srt_path
+            if srt_path and not analyzed_subtitles:
+                try:
+                    analyzed_subtitles = [
+                        item
+                        for item in agent.parse_srt(srt_path)
+                        if isinstance(item, dict)
+                    ]
+                except TaskCancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("降级结果字幕证据解析失败: %s", exc)
             fallback_used = bool(steps)
             result_mode = str(fallback_meta.get("result_mode", "timeline_summary"))
             analysis_note = str(fallback_meta.get("analysis_note", "")).strip() or analysis_note
@@ -2842,6 +3273,8 @@ class VideoProcessingService:
             if srt_path and Path(srt_path).exists():
                 try:
                     emergency_subtitles = agent.parse_srt(srt_path)
+                except TaskCancelledError:
+                    raise
                 except Exception as exc:
                     logger.warning("紧急摘要解析字幕失败，改用无字幕摘要保底: %s", exc)
                     emergency_subtitles = []
@@ -2884,6 +3317,13 @@ class VideoProcessingService:
                 )
             )
 
+        steps = enrich_steps_with_evidence(
+            steps,
+            raw_subtitles=raw_subtitles,
+            analyzed_subtitles=analyzed_subtitles,
+            image_dir=image_dir,
+        )
+
         output_md = output_dir / "operation_guide.md"
         report("document", "\u6b63\u5728\u751f\u6210\u603b\u7ed3\u6587\u6863...")
         _run_async(
@@ -2893,7 +3333,18 @@ class VideoProcessingService:
                 srt_path=srt_path if srt_path else None,
                 image_dir="images",
                 web_search=web_search,
+                output_template=normalized_output_template,
             )
+        )
+
+        generated_markdown = output_md.read_text(encoding="utf-8")
+        external_references = (
+            extract_external_references_from_markdown(
+                generated_markdown,
+                source="ark_web_search",
+            )
+            if web_search and bool(getattr(agent, "last_document_web_search_used", False))
+            else []
         )
 
         output_pdf = output_dir / "operation_guide.pdf"
@@ -2919,6 +3370,8 @@ class VideoProcessingService:
         if isinstance(result_meta, dict):
             normalized_meta.update({k: v for k, v in result_meta.items() if v not in (None, "")})
         result_meta = normalized_meta
+        result_meta["output_template"] = normalized_output_template
+        result_meta["external_references"] = external_references
         if output_media:
             result_meta["output_media"] = output_media
         if isinstance(analysis_preprocess_meta, dict):
@@ -2941,6 +3394,8 @@ class VideoProcessingService:
                 "use_video": use_video,
                 "web_search": web_search,
                 "max_vision": max_vision,
+                "output_template": normalized_output_template,
+                "external_references": external_references,
                 "pdf_path": str(output_pdf),
                 "risk_decision": str(risk.get("decision", "allow")),
                 "risk_level": str(risk.get("risk_level", "low")),
@@ -2999,6 +3454,7 @@ def process_video(
     max_vision: int,
     fps: float = 1.0,
     summary_only: bool = False,
+    output_template: str = DEFAULT_OUTPUT_TEMPLATE,
     history_owner_id: str = "",
     progress_callback: Callable[[str, str], None] | None = None,
 ) -> Tuple[List[Dict[str, Any]], str, str, str, bool, Dict[str, Any]]:
@@ -3013,6 +3469,7 @@ def process_video(
         max_vision=max_vision,
         fps=fps,
         summary_only=summary_only,
+        output_template=output_template,
         history_owner_id=history_owner_id,
         progress_callback=progress_callback,
     )
@@ -3230,6 +3687,8 @@ def upload_from_url():
         _safe_remove_file(staged_path)
         logger.warning("上传风控不可用（url upload）: %s", exc)
         return jsonify(_upload_risk_unavailable_payload()), 503
+    except TaskCancelledError:
+        raise
     except Exception as exc:
         _safe_remove_file(staged_path)
         return jsonify({"error": f"链接上传失败: {str(exc)}"}), 500
@@ -3256,6 +3715,10 @@ def analyze_from_url():
         data
     )
     summary_only = _as_bool(data.get("summary_only", False))
+    try:
+        output_template = normalize_output_template(data.get("output_template"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "task_id": task_id}), 400
     requested_name = _safe_video_filename(
         str(data.get("filename", "")).strip()
         or _guess_video_filename_from_url(source_url, fallback="url_video.mp4"),
@@ -3356,6 +3819,7 @@ def analyze_from_url():
             effective_max_vision,
             fps,
             summary_only=effective_summary_only,
+            output_template=output_template,
             history_owner_id=history_owner_id,
             progress_callback=_single_progress_callback,
         )
@@ -3397,6 +3861,10 @@ def analyze_from_url():
                 "key_points": result_meta.get("key_points", []),
                 "timeline_points": result_meta.get("timeline_points", []),
                 "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                "output_template": str(
+                    result_meta.get("output_template", output_template)
+                ),
+                "external_references": result_meta.get("external_references", []),
                 "task_id": task_id,
                 "filename": str(upload_payload.get("filename", "")).strip() or video_path.name,
                 "filepath": str(video_path),
@@ -3432,9 +3900,12 @@ def analyze_from_url():
                     "web_search": effective_web_search,
                     "max_vision": effective_max_vision,
                     "summary_only": effective_summary_only,
+                    "output_template": output_template,
                 },
             }
         )
+    except TaskCancelledError:
+        raise
     except ContentPolicyBlockedError as exc:
         _update_single_progress(
             owner_id=history_owner_id,
@@ -3536,6 +4007,29 @@ def upload_chunk_init():
         if upload_id:
             session = _load_upload_session(upload_id)
             if session is not None:
+                session_status = str(session.get("status", "uploading") or "uploading")
+                if session_status == "completed":
+                    try:
+                        completed_result_owned = (
+                            upload_session_service.completed_result_is_owned(
+                                session,
+                                upload_root=UPLOAD_ROOT,
+                            )
+                        )
+                    except OSError:
+                        return (
+                            jsonify(
+                                {
+                                    "error": "暂时无法验证上传完成回执，请稍后重试",
+                                    "status": "verification_unavailable",
+                                }
+                            ),
+                            503,
+                        )
+                    if not completed_result_owned:
+                        _delete_upload_session(upload_id)
+                        session = None
+            if session is not None:
                 same_name = str(session.get("filename", "")) == filename
                 same_size = _safe_int(session.get("total_size"), -1) == total_size
                 same_key = not file_key or str(session.get("file_key", "")) == file_key
@@ -3569,10 +4063,6 @@ def upload_chunk_init():
             upload_id = uuid4().hex
             total_chunks = max(1, (total_size + requested_chunk_size - 1) // requested_chunk_size)
             storage_mode = "disk"
-            if total_size <= UPLOAD_IN_MEMORY_MAX_FILE_SIZE and _reserve_upload_memory(
-                upload_id, total_size
-            ):
-                storage_mode = "memory"
             session = {
                 "upload_id": upload_id,
                 "filename": filename,
@@ -3582,18 +4072,14 @@ def upload_chunk_init():
                 "total_chunks": total_chunks,
                 "received_chunks": [],
                 "storage_mode": storage_mode,
+                "status": "uploading",
                 "risk_api_key": upload_api_key,
                 "risk_model_name": upload_model_name,
                 "risk_model_base_url": upload_model_base_url,
                 "created_at": now_text,
                 "updated_at": now_text,
             }
-            try:
-                _save_upload_session(upload_id, session)
-            except Exception:
-                if storage_mode == "memory":
-                    _release_upload_memory(upload_id)
-                raise
+            _save_upload_session(upload_id, session)
         else:
             total_chunks = _safe_int(session.get("total_chunks"), 1, 1)
             session["received_chunks"] = _normalize_received_chunks(
@@ -3610,16 +4096,19 @@ def upload_chunk_init():
             session["updated_at"] = now_text
             _save_upload_session(upload_id, session)
 
-    return jsonify(
-        {
-            "success": True,
-            "upload_id": upload_id,
-            "chunk_size": _safe_int(session.get("chunk_size"), DEFAULT_UPLOAD_CHUNK_SIZE, 1),
-            "total_chunks": _safe_int(session.get("total_chunks"), 1, 1),
-            "received_chunks": session.get("received_chunks", []),
-            "storage_mode": _get_chunk_storage_mode(session),
-        }
-    )
+    response_payload = {
+        "success": True,
+        "upload_id": upload_id,
+        "chunk_size": _safe_int(session.get("chunk_size"), DEFAULT_UPLOAD_CHUNK_SIZE, 1),
+        "total_chunks": _safe_int(session.get("total_chunks"), 1, 1),
+        "received_chunks": session.get("received_chunks", []),
+        "storage_mode": _get_chunk_storage_mode(session),
+        "status": str(session.get("status", "uploading") or "uploading"),
+    }
+    completed_result = session.get("result")
+    if response_payload["status"] == "completed" and isinstance(completed_result, dict):
+        response_payload["result"] = completed_result
+    return jsonify(response_payload)
 
 
 @app.route("/upload_chunk", methods=["POST"])
@@ -3645,6 +4134,17 @@ def upload_chunk():
         session = _load_upload_session(upload_id)
         if session is None:
             return jsonify({"error": "上传会话不存在，请重新开始上传"}), 404
+        session_status = str(session.get("status", "uploading") or "uploading")
+        if session_status != "uploading":
+            return (
+                jsonify(
+                    {
+                        "error": f"上传会话当前状态为 {session_status}，不能继续写入分片",
+                        "status": session_status,
+                    }
+                ),
+                409,
+            )
 
         total_chunks = _safe_int(session.get("total_chunks"), 0, 1)
         chunk_size = _safe_int(
@@ -3705,8 +4205,234 @@ def upload_chunk():
             "upload_id": upload_id,
             "uploaded_chunks": len(session["received_chunks"]),
             "total_chunks": total_chunks,
+            "status": "uploading",
         }
     )
+
+
+@app.route("/upload_chunk_cancel", methods=["POST"])
+def upload_chunk_cancel():
+    data = _json_payload()
+    try:
+        upload_id = _normalize_upload_id(data.get("upload_id", ""))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    if not upload_id:
+        return jsonify({"error": "upload_id 不能为空"}), 400
+
+    with upload_session_lock:
+        session = _load_upload_session(upload_id)
+        if session is None:
+            if not _delete_upload_session(upload_id):
+                return (
+                    jsonify(
+                        {
+                            "success": False,
+                            "upload_id": upload_id,
+                            "status": "cancel_unconfirmed",
+                            "error": "上传取消未确认，请稍后重试",
+                        }
+                    ),
+                    500,
+                )
+            return jsonify({"success": True, "upload_id": upload_id, "status": "cancelled"})
+        session_status = str(session.get("status", "uploading") or "uploading")
+        if session_status == "completed":
+            return jsonify({"error": "上传已经完成，不能取消", "status": "completed"}), 409
+        if upload_id in upload_finalizing_ids:
+            return jsonify({"error": "上传正在完成，请稍后重试", "status": "finalizing"}), 409
+        if session_status == "finalizing" and not _delete_pending_upload_destination(
+            upload_id, session
+        ):
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "upload_id": upload_id,
+                        "status": "cancel_unconfirmed",
+                        "error": "上传取消未确认，请稍后重试",
+                    }
+                ),
+                500,
+            )
+        if not _delete_upload_session(upload_id):
+            return (
+                jsonify(
+                    {
+                        "success": False,
+                        "upload_id": upload_id,
+                        "status": "cancel_unconfirmed",
+                        "error": "上传取消未确认，请稍后重试",
+                    }
+                ),
+                500,
+            )
+
+    return jsonify({"success": True, "upload_id": upload_id, "status": "cancelled"})
+
+
+def _discard_chunk_finalize(
+    upload_id: str, staging_path: Path | None, save_path: Path | None = None
+) -> None:
+    if save_path is not None:
+        _safe_remove_file(save_path)
+    if staging_path is not None:
+        _safe_remove_file(staging_path)
+    with upload_session_lock:
+        _delete_upload_session(upload_id)
+
+
+def _resolve_pending_upload_path(result_payload: Dict[str, Any]) -> Path:
+    return upload_session_service.resolve_destination_path(
+        result_payload,
+        upload_root=UPLOAD_ROOT,
+    )
+
+
+def _upload_path_identity(path: Path) -> Dict[str, int]:
+    stat_result = path.stat()
+    return {
+        "device": int(stat_result.st_dev),
+        "inode": int(stat_result.st_ino),
+        "ctime_ns": int(stat_result.st_ctime_ns),
+    }
+
+
+def _pending_upload_destination_owned(session: Dict[str, Any], path: Path) -> bool:
+    if bool(session.get("pending_destination_deleted")):
+        return False
+    try:
+        stat_result = path.stat()
+    except (FileNotFoundError, OSError):
+        return False
+    pinned_identity = session.get("pending_destination_identity")
+    if isinstance(pinned_identity, dict) and not all(
+        _safe_int(pinned_identity.get(key), -1) == actual
+        for key, actual in (
+            ("device", int(stat_result.st_dev)),
+            ("inode", int(stat_result.st_ino)),
+            ("ctime_ns", int(stat_result.st_ctime_ns)),
+        )
+    ):
+        return False
+    if stat_result.st_size == 0:
+        expected_identity = session.get("pending_placeholder_identity")
+        if not isinstance(expected_identity, dict):
+            return False
+        return all(
+            _safe_int(expected_identity.get(key), -1) == actual
+            for key, actual in (
+                ("device", int(stat_result.st_dev)),
+                ("inode", int(stat_result.st_ino)),
+                ("ctime_ns", int(stat_result.st_ctime_ns)),
+            )
+        )
+    expected_size = _safe_int(session.get("total_size"), 0, 1)
+    expected_fingerprint = _normalize_sha256_fingerprint(
+        session.get("pending_file_sha256", "")
+    )
+    if stat_result.st_size != expected_size or not expected_fingerprint:
+        return False
+    try:
+        return _compute_file_sha256(path) == expected_fingerprint
+    except (OSError, ValueError):
+        return False
+
+
+def _persist_pending_destination_identity(
+    upload_id: str,
+    session: Dict[str, Any],
+    path: Path,
+) -> Dict[str, Any]:
+    updated_session = _load_upload_session(upload_id) or dict(session)
+    updated_session["pending_destination_identity"] = _upload_path_identity(path)
+    updated_session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _save_upload_session(upload_id, updated_session)
+    return updated_session
+
+
+def _persist_pending_destination_deleted(
+    upload_id: str,
+    session: Dict[str, Any],
+) -> Dict[str, Any]:
+    updated_session = _load_upload_session(upload_id) or dict(session)
+    updated_session["pending_destination_deleted"] = True
+    updated_session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _save_upload_session(upload_id, updated_session)
+    return updated_session
+
+
+def _delete_pending_upload_destination(
+    upload_id: str,
+    session: Dict[str, Any],
+) -> bool:
+    if bool(session.get("pending_destination_deleted")):
+        return True
+    pending_result = session.get("pending_result")
+    if not isinstance(pending_result, dict):
+        return True
+    try:
+        pending_path = _resolve_pending_upload_path(pending_result)
+        if not pending_path.exists():
+            deleted_session = _persist_pending_destination_deleted(upload_id, session)
+            session.clear()
+            session.update(deleted_session)
+            return True
+        if not _pending_upload_destination_owned(session, pending_path):
+            logger.warning("待完成上传文件所有权校验失败: %s", pending_path)
+            return False
+        pinned_session = _persist_pending_destination_identity(
+            upload_id,
+            session,
+            pending_path,
+        )
+        session.clear()
+        session.update(pinned_session)
+        if not _pending_upload_destination_owned(session, pending_path):
+            return False
+        pending_path.unlink()
+        deleted_session = _persist_pending_destination_deleted(upload_id, session)
+        session.clear()
+        session.update(deleted_session)
+        return True
+    except FileNotFoundError:
+        return True
+    except (OSError, ValueError) as exc:
+        logger.warning("删除待完成上传文件失败: %s", exc)
+        return False
+
+
+def _complete_chunk_finalize_session(
+    upload_id: str,
+    session: Dict[str, Any],
+    result_payload: Dict[str, Any],
+) -> None:
+    with upload_session_lock:
+        completed_session = _load_upload_session(upload_id) or dict(session)
+        result_fingerprint = _normalize_sha256_fingerprint(
+            completed_session.get("pending_file_sha256", "")
+        )
+        pending_identity = completed_session.get("pending_destination_identity")
+        if not result_fingerprint or not isinstance(pending_identity, dict):
+            raise RuntimeError("上传完成所有权元数据缺失")
+        result_identity = {
+            key: _safe_int(pending_identity.get(key), -1)
+            for key in ("device", "inode", "ctime_ns")
+        }
+        if any(value < 0 for value in result_identity.values()):
+            raise RuntimeError("上传完成所有权元数据无效")
+        completed_session["status"] = "completed"
+        completed_session["result"] = result_payload
+        completed_session["result_file_sha256"] = result_fingerprint
+        completed_session["result_destination_identity"] = result_identity
+        completed_session.pop("pending_result", None)
+        completed_session.pop("pending_file_sha256", None)
+        completed_session.pop("pending_placeholder_identity", None)
+        completed_session.pop("pending_destination_identity", None)
+        completed_session.pop("pending_destination_deleted", None)
+        completed_session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _release_upload_memory(upload_id)
+        _save_upload_session(upload_id, completed_session)
 
 
 @app.route("/upload_chunk_finalize", methods=["POST"])
@@ -3723,71 +4449,188 @@ def upload_chunk_finalize():
     filename = ""
     total_size = 0
     staging_path: Path | None = None
+    save_path: Path | None = None
+    pending_move_result: Dict[str, Any] | None = None
 
     with upload_session_lock:
         session = _load_upload_session(upload_id)
         if session is None:
             return jsonify({"error": "上传会话不存在，请重新开始上传"}), 404
+        session_status = str(session.get("status", "uploading") or "uploading")
+        completed_result = session.get("result")
+        if session_status == "completed":
+            try:
+                completed_result_owned = (
+                    upload_session_service.completed_result_is_owned(
+                        session,
+                        upload_root=UPLOAD_ROOT,
+                    )
+                )
+            except OSError:
+                return (
+                    jsonify(
+                        {
+                            "error": "暂时无法验证上传完成回执，请稍后重试",
+                            "status": "verification_unavailable",
+                        }
+                    ),
+                    503,
+                )
+            if completed_result_owned and isinstance(completed_result, dict):
+                return jsonify(completed_result)
+            _delete_upload_session(upload_id)
+            return (
+                jsonify(
+                    {
+                        "error": "上传完成回执已过期，请重新开始上传",
+                        "status": "expired",
+                    }
+                ),
+                410,
+            )
+        if upload_id in upload_finalizing_ids:
+            return jsonify({"error": "上传正在完成，请稍后重试", "status": "finalizing"}), 409
 
-        filename = str(session.get("filename", "")).strip()
-        if not filename or not allowed_file(filename):
-            return jsonify({"error": "原始文件名无效"}), 400
+        pending_result = session.get("pending_result")
+        if session_status == "finalizing" and isinstance(pending_result, dict):
+            try:
+                pending_path = _resolve_pending_upload_path(pending_result)
+                pending_size = pending_path.stat().st_size
+            except (ValueError, FileNotFoundError, OSError):
+                return (
+                    jsonify({"error": "上传完成状态无法恢复", "status": "finalizing"}),
+                    409,
+                )
+            expected_size = _safe_int(session.get("total_size"), 0, 1)
+            if pending_size == expected_size:
+                if not _pending_upload_destination_owned(session, pending_path):
+                    return (
+                        jsonify({"error": "上传完成状态无法恢复", "status": "finalizing"}),
+                        409,
+                    )
+                _mark_uploaded_video_loaded_now(pending_path)
+                session = _persist_pending_destination_identity(
+                    upload_id,
+                    session,
+                    pending_path,
+                )
+                _complete_chunk_finalize_session(upload_id, session, pending_result)
+                return jsonify(pending_result)
+            pending_staging_path = _upload_session_temp_path(upload_id)
+            try:
+                pending_staging_size = pending_staging_path.stat().st_size
+            except (FileNotFoundError, OSError):
+                pending_staging_size = -1
+            if pending_size != 0 or pending_staging_size < expected_size:
+                return (
+                    jsonify({"error": "上传完成状态无法恢复", "status": "finalizing"}),
+                    409,
+                )
+            if not _pending_upload_destination_owned(session, pending_path):
+                return (
+                    jsonify({"error": "上传完成状态无法恢复", "status": "finalizing"}),
+                    409,
+                )
+            if pending_staging_size > expected_size:
+                with open(pending_staging_path, "r+b") as pending_file:
+                    pending_file.truncate(expected_size)
+            staging_path = pending_staging_path
+            save_path = pending_path
+            total_size = expected_size
+            pending_move_result = pending_result
+            upload_finalizing_ids.add(upload_id)
 
-        total_chunks = _safe_int(session.get("total_chunks"), 0, 1)
-        total_size = _safe_int(session.get("total_size"), 0, 1)
-        received_chunks = _normalize_received_chunks(session.get("received_chunks", []), total_chunks)
-        if len(received_chunks) < total_chunks:
-            received_set = set(received_chunks)
-            missing_chunks = [i for i in range(total_chunks) if i not in received_set][:10]
-            missing_text = ",".join(str(i) for i in missing_chunks)
-            suffix = "..." if len(received_chunks) + len(missing_chunks) < total_chunks else ""
-            return jsonify({"error": f"分片未上传完整，缺少分片: {missing_text}{suffix}"}), 400
-
-        storage_mode = _get_chunk_storage_mode(session)
-        staging_path = _build_upload_staging_path(filename)
-        if storage_mode == "memory":
-            chunk_buffer = upload_memory_buffers.get(upload_id)
-            if chunk_buffer is None:
-                _delete_upload_session(upload_id)
-                return jsonify({"error": "上传会话已过期，请重新开始上传"}), 409
-
-            all_missing = [i for i in range(total_chunks) if i not in chunk_buffer]
-            missing_buffer = all_missing[:10]
-            if missing_buffer:
-                missing_text = ",".join(str(i) for i in missing_buffer)
-                suffix = "..." if len(all_missing) > len(missing_buffer) else ""
-                return jsonify({"error": f"分片缓存不完整，缺少分片: {missing_text}{suffix}"}), 400
-
-            with open(staging_path, "wb") as f:
-                for idx in range(total_chunks):
-                    f.write(chunk_buffer.get(idx, b""))
-                if f.tell() > total_size:
-                    f.truncate(total_size)
+        if pending_move_result is not None:
+            filename = str(session.get("filename", "")).strip()
         else:
-            temp_path = _upload_session_temp_path(upload_id)
-            if not temp_path.exists():
-                return jsonify({"error": "临时文件不存在，请重新上传"}), 400
+            filename = str(session.get("filename", "")).strip()
+            if not filename or not allowed_file(filename):
+                return jsonify({"error": "原始文件名无效"}), 400
 
-            if temp_path.stat().st_size < total_size:
-                return jsonify({"error": "文件尚未完整上传，请继续上传缺失分片"}), 400
+            total_chunks = _safe_int(session.get("total_chunks"), 0, 1)
+            total_size = _safe_int(session.get("total_size"), 0, 1)
+            received_chunks = _normalize_received_chunks(
+                session.get("received_chunks", []), total_chunks
+            )
+            if len(received_chunks) < total_chunks:
+                received_set = set(received_chunks)
+                missing_chunks = [i for i in range(total_chunks) if i not in received_set][:10]
+                missing_text = ",".join(str(i) for i in missing_chunks)
+                suffix = "..." if len(received_chunks) + len(missing_chunks) < total_chunks else ""
+                return jsonify({"error": f"分片未上传完整，缺少分片: {missing_text}{suffix}"}), 400
 
-            if temp_path.stat().st_size > total_size:
-                with open(temp_path, "r+b") as f:
-                    f.truncate(total_size)
+            storage_mode = _get_chunk_storage_mode(session)
+            if storage_mode == "memory":
+                staging_path = _build_upload_staging_path(filename)
+                chunk_buffer = upload_memory_buffers.get(upload_id)
+                if chunk_buffer is None:
+                    _delete_upload_session(upload_id)
+                    return jsonify({"error": "上传会话已过期，请重新开始上传"}), 409
 
-            shutil.move(str(temp_path), str(staging_path))
-        _delete_upload_session(upload_id)
+                all_missing = [i for i in range(total_chunks) if i not in chunk_buffer]
+                missing_buffer = all_missing[:10]
+                if missing_buffer:
+                    missing_text = ",".join(str(i) for i in missing_buffer)
+                    suffix = "..." if len(all_missing) > len(missing_buffer) else ""
+                    return jsonify({"error": f"分片缓存不完整，缺少分片: {missing_text}{suffix}"}), 400
+
+                with open(staging_path, "wb") as f:
+                    for idx in range(total_chunks):
+                        f.write(chunk_buffer.get(idx, b""))
+                    if f.tell() > total_size:
+                        f.truncate(total_size)
+            else:
+                temp_path = _upload_session_temp_path(upload_id)
+                if not temp_path.exists():
+                    return jsonify({"error": "临时文件不存在，请重新上传"}), 400
+
+                if temp_path.stat().st_size < total_size:
+                    return jsonify({"error": "文件尚未完整上传，请继续上传缺失分片"}), 400
+
+                if temp_path.stat().st_size > total_size:
+                    with open(temp_path, "r+b") as f:
+                        f.truncate(total_size)
+                staging_path = temp_path
+
+            session["status"] = "finalizing"
+            session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _save_upload_session(upload_id, session)
+            upload_finalizing_ids.add(upload_id)
 
     if staging_path is None:
         return jsonify({"error": "上传文件状态异常"}), 500
 
+    if pending_move_result is not None and save_path is not None:
+        try:
+            with upload_session_lock:
+                if not _pending_upload_destination_owned(session, save_path):
+                    return (
+                        jsonify({"error": "上传完成状态无法恢复", "status": "finalizing"}),
+                        409,
+                    )
+                os.replace(staging_path, save_path)
+                _mark_uploaded_video_loaded_now(save_path)
+                session = _persist_pending_destination_identity(
+                    upload_id,
+                    session,
+                    save_path,
+                )
+                _complete_chunk_finalize_session(upload_id, session, pending_move_result)
+            return jsonify(pending_move_result)
+        except Exception as exc:
+            return jsonify({"error": f"上传恢复失败: {str(exc)}"}), 500
+        finally:
+            with upload_session_lock:
+                upload_finalizing_ids.discard(upload_id)
+
+    pending_persisted = False
     try:
         if not is_valid_video_content(staging_path):
-            _safe_remove_file(staging_path)
+            _discard_chunk_finalize(upload_id, staging_path)
             return jsonify({"error": "文件内容不是有效的视频格式"}), 400
         segment_policy = _build_video_segment_policy(staging_path)
         if bool(segment_policy.get("requires_trim")):
-            _safe_remove_file(staging_path)
+            _discard_chunk_finalize(upload_id, staging_path)
             return (
                 jsonify(
                     _build_segment_policy_reject_payload(
@@ -3807,7 +4650,7 @@ def upload_chunk_finalize():
             source="upload_chunk_finalize",
         )
         if blacklist_risk is not None:
-            _safe_remove_file(staging_path)
+            _discard_chunk_finalize(upload_id, staging_path)
             return jsonify(_risk_reject_payload(blacklist_risk)), 403
 
         risk, file_fingerprint, _ = _run_upload_pre_risk_check(
@@ -3818,7 +4661,7 @@ def upload_chunk_finalize():
             skip_blacklist=True,
         )
         if _is_risk_infra_failure(risk):
-            _safe_remove_file(staging_path)
+            _discard_chunk_finalize(upload_id, staging_path)
             logger.warning("上传风控服务异常（chunk finalize）: %s", risk)
             payload, status_code = _build_upload_risk_failure_response(risk)
             return jsonify(payload), status_code
@@ -3834,30 +4677,63 @@ def upload_chunk_finalize():
             )
             if blocked_hash:
                 risk["hash_sha256"] = blocked_hash
-            _safe_remove_file(staging_path)
+            _discard_chunk_finalize(upload_id, staging_path)
             return jsonify(_risk_reject_payload(risk)), 403
 
-        save_path = _build_unique_upload_path(filename)
-        shutil.move(str(staging_path), str(save_path))
-        _mark_uploaded_video_loaded_now(save_path)
-        if save_path.stat().st_size > total_size:
-            with open(save_path, "r+b") as f:
-                f.truncate(total_size)
-        return jsonify(
-            {
-                "success": True,
-                "filename": save_path.name,
-                "filepath": str(save_path),
-                "segment_policy": segment_policy,
-            }
+        save_path = upload_session_service.reserve_unique_destination(
+            filename,
+            upload_root=UPLOAD_ROOT,
+            reservation_token=upload_id,
         )
+        pending_fingerprint = _normalize_sha256_fingerprint(file_fingerprint)
+        if not pending_fingerprint:
+            pending_fingerprint = _compute_file_sha256(staging_path)
+        placeholder_identity = _upload_path_identity(save_path)
+        result_payload = {
+            "success": True,
+            "status": "completed",
+            "filename": save_path.name,
+            "filepath": str(save_path),
+            "segment_policy": segment_policy,
+        }
+        with upload_session_lock:
+            pending_session = _load_upload_session(upload_id) or dict(session)
+            pending_session["status"] = "finalizing"
+            pending_session["pending_result"] = result_payload
+            pending_session["pending_file_sha256"] = pending_fingerprint
+            pending_session["pending_placeholder_identity"] = placeholder_identity
+            pending_session.pop("pending_destination_deleted", None)
+            pending_session["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            _save_upload_session(upload_id, pending_session)
+            session = pending_session
+        pending_persisted = True
+        with upload_session_lock:
+            if not _pending_upload_destination_owned(session, save_path):
+                raise RuntimeError("上传目标文件所有权校验失败")
+            os.replace(staging_path, save_path)
+            _mark_uploaded_video_loaded_now(save_path)
+            if save_path.stat().st_size > total_size:
+                with open(save_path, "r+b") as f:
+                    f.truncate(total_size)
+            session = _persist_pending_destination_identity(
+                upload_id,
+                session,
+                save_path,
+            )
+            _complete_chunk_finalize_session(upload_id, session, result_payload)
+        return jsonify(result_payload)
     except ValueError as exc:
-        _safe_remove_file(staging_path)
+        if not pending_persisted:
+            _discard_chunk_finalize(upload_id, staging_path, save_path)
         logger.warning("上传风控不可用（chunk finalize）: %s", exc)
         return jsonify(_upload_risk_unavailable_payload()), 503
     except Exception as exc:
-        _safe_remove_file(staging_path)
+        if not pending_persisted:
+            _discard_chunk_finalize(upload_id, staging_path, save_path)
         return jsonify({"error": f"上传失败: {str(exc)}"}), 500
+    finally:
+        with upload_session_lock:
+            upload_finalizing_ids.discard(upload_id)
 
 
 @app.route("/analyze", methods=["POST"])
@@ -3876,6 +4752,10 @@ def analyze():
         data
     )
     summary_only = _as_bool(data.get("summary_only", False))
+    try:
+        output_template = normalize_output_template(data.get("output_template"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "task_id": task_id}), 400
 
     try:
         video_path = _resolve_upload_filepath(data.get("filepath"))
@@ -3945,6 +4825,7 @@ def analyze():
             effective_max_vision,
             fps,
             summary_only=effective_summary_only,
+            output_template=output_template,
             history_owner_id=history_owner_id,
             progress_callback=_single_progress_callback,
         )
@@ -3986,6 +4867,10 @@ def analyze():
                 "key_points": result_meta.get("key_points", []),
                 "timeline_points": result_meta.get("timeline_points", []),
                 "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                "output_template": str(
+                    result_meta.get("output_template", output_template)
+                ),
+                "external_references": result_meta.get("external_references", []),
                 "task_id": task_id,
                 "segment_policy": segment_policy,
                 "segment_guardrails": segment_guardrails,
@@ -4004,9 +4889,12 @@ def analyze():
                     "web_search": effective_web_search,
                     "max_vision": effective_max_vision,
                     "summary_only": effective_summary_only,
+                    "output_template": output_template,
                 },
             }
         )
+    except TaskCancelledError:
+        raise
     except ContentPolicyBlockedError as exc:
         _update_single_progress(
             owner_id=history_owner_id,
@@ -4321,6 +5209,7 @@ def refresh_subtitle(output_dir):
 @app.route("/regenerate", methods=["POST"])
 def regenerate_document():
     data = _json_payload()
+    history_owner_id = _ensure_history_owner()
     try:
         api_key, model_name, model_base_url = _read_shared_backend_model_options(
             require_api_key=True
@@ -4331,6 +5220,10 @@ def regenerate_document():
     steps = data.get("steps", [])
     if not isinstance(steps, list) or not steps:
         return jsonify({"error": "没有步骤数据"}), 400
+    try:
+        output_template = normalize_output_template(data.get("output_template"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
 
     try:
         output_dir = _resolve_output_dir(data.get("output_dir"), must_exist=True)
@@ -4344,6 +5237,22 @@ def regenerate_document():
         _as_bool(raw_web_search)
         if raw_web_search is not None
         else _env_bool(("WEB_SEARCH", "web_search"), False)
+    )
+
+    original_steps: List[Dict[str, Any]] = []
+    steps_path = output_dir / "steps.json"
+    if steps_path.exists() and steps_path.is_file():
+        try:
+            persisted_steps = json.loads(steps_path.read_text(encoding="utf-8"))
+            if isinstance(persisted_steps, list):
+                original_steps = [
+                    item for item in persisted_steps if isinstance(item, dict)
+                ]
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.warning("读取原步骤证据失败，将按无可信证据处理: %s", exc)
+    steps = reconcile_edited_step_evidence(
+        steps,
+        original_steps=original_steps,
     )
 
     try:
@@ -4361,16 +5270,45 @@ def regenerate_document():
                 image_dir="images",
                 web_search=web_search,
                 respect_step_content=True,
+                output_template=output_template,
             )
+        )
+
+        md_content = output_path.read_text(encoding="utf-8")
+        external_references = (
+            extract_external_references_from_markdown(
+                md_content,
+                source="ark_web_search",
+            )
+            if web_search and bool(getattr(agent, "last_document_web_search_used", False))
+            else []
         )
 
         output_pdf = output_dir / "operation_guide.pdf"
         agent.generate_pdf(str(output_path), str(output_pdf))
-        agent.save_results(steps, str(output_dir / "steps.json"))
+        agent.save_results(steps, str(steps_path))
         output_media = _build_output_media_bundle(output_dir)
 
-        with open(output_path, "r", encoding="utf-8") as f:
-            md_content = f.read()
+        with history_service.lock:
+            history = history_service.read_unlocked()
+            history_changed = False
+            for record in history:
+                if history_service.record_owner(record) != history_owner_id:
+                    continue
+                try:
+                    record_output_dir = _resolve_output_dir(
+                        record.get("output_dir"), must_exist=False
+                    )
+                except (ValueError, FileNotFoundError):
+                    continue
+                if record_output_dir != output_dir:
+                    continue
+                record["output_template"] = output_template
+                record["external_references"] = external_references
+                record["steps_count"] = len(steps)
+                history_changed = True
+            if history_changed:
+                history_service.write_unlocked(history)
 
         return jsonify(
             {
@@ -4381,6 +5319,8 @@ def regenerate_document():
                 "output_dir_name": str(output_media.get("output_dir_name", "")).strip()
                 or output_dir.name,
                 "pdf_path": str(output_pdf),
+                "output_template": output_template,
+                "external_references": external_references,
                 "video_preview_url": str(output_media.get("video_preview_url", "")).strip(),
                 "subtitle_available": bool(output_media.get("subtitle_available", False)),
                 "subtitle_file_name": str(output_media.get("subtitle_file_name", "")).strip(),
@@ -4594,6 +5534,192 @@ def get_single_progress():
     return jsonify(progress_state_service.get_single_snapshot(owner_id, task_id=task_id))
 
 
+_ANALYSIS_TASK_COMMON_PAYLOAD_FIELDS = {
+    "web_search",
+    "max_vision",
+    "summary_only",
+    "output_template",
+}
+_ANALYSIS_TASK_PAYLOAD_FIELDS = {
+    "single": _ANALYSIS_TASK_COMMON_PAYLOAD_FIELDS | {"filepath", "task_id"},
+    "batch": _ANALYSIS_TASK_COMMON_PAYLOAD_FIELDS | {"filepaths", "task_id"},
+    "url": _ANALYSIS_TASK_COMMON_PAYLOAD_FIELDS | {"url", "filename", "task_id"},
+}
+_ANALYSIS_TASK_PUBLIC_FIELDS = (
+    "task_id",
+    "kind",
+    "status",
+    "stage",
+    "message",
+    "percent",
+    "total",
+    "current",
+    "current_file",
+    "file_progress",
+    "error_code",
+    "error_message",
+    "error_http_status",
+    "retryable",
+    "cancel_requested",
+    "attempt_count",
+    "recovery_count",
+    "created_at",
+    "updated_at",
+    "started_at",
+    "finished_at",
+)
+
+
+def _public_analysis_task(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    return {field: snapshot.get(field) for field in _ANALYSIS_TASK_PUBLIC_FIELDS}
+
+
+def _public_analysis_task_summary(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    summary = _public_analysis_task(snapshot)
+    request_payload = snapshot.get("request")
+    summary["payload"] = request_payload if isinstance(request_payload, dict) else {}
+    return summary
+
+
+def _analysis_task_not_found_response():
+    return jsonify({"error": "Task not found"}), 404
+
+
+def _analysis_task_for_request(task_id: str) -> Tuple[str, Dict[str, Any] | None]:
+    owner_id = _ensure_history_owner()
+    return owner_id, analysis_task_store.get_task(owner_id, task_id)
+
+
+@app.route("/analysis_tasks", methods=["GET"])
+def list_analysis_tasks():
+    owner_id = _ensure_history_owner()
+    tasks = analysis_task_store.list_tasks(owner_id)
+    return jsonify(
+        {"tasks": [_public_analysis_task_summary(snapshot) for snapshot in tasks]}
+    )
+
+
+@app.route("/analysis_tasks", methods=["POST"])
+def create_analysis_task():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON object body is required"}), 400
+    kind = str(data.get("kind", "")).strip().lower()
+    if kind not in _ANALYSIS_TASK_PAYLOAD_FIELDS:
+        return jsonify({"error": "kind must be single, batch, or url"}), 400
+    raw_payload = data.get("payload")
+    if not isinstance(raw_payload, dict):
+        return jsonify({"error": "payload must be an object"}), 400
+
+    payload = dict(raw_payload)
+    unsupported = sorted(set(payload) - _ANALYSIS_TASK_PAYLOAD_FIELDS[kind])
+    if unsupported:
+        return (
+            jsonify({"error": f"Unsupported payload fields: {', '.join(unsupported)}"}),
+            400,
+        )
+
+    try:
+        payload["output_template"] = normalize_output_template(
+            payload.get("output_template")
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    payload_task_id = payload.pop("task_id", None)
+    requested_task_id = data.get("task_id", payload_task_id)
+    if data.get("task_id") not in (None, "") and payload_task_id not in (None, ""):
+        if str(data.get("task_id")).strip() != str(payload_task_id).strip():
+            return jsonify({"error": "Conflicting task_id values"}), 409
+    task_id = _resolve_progress_task_id(requested_task_id)
+    idempotency_key = str(request.headers.get("Idempotency-Key", "")).strip() or None
+    if idempotency_key is not None and len(idempotency_key) > 256:
+        return jsonify({"error": "Idempotency-Key is too long"}), 400
+
+    owner_id = _ensure_history_owner()
+    try:
+        snapshot = analysis_task_store.create_task(
+            owner_id,
+            kind,
+            payload,
+            task_id=task_id,
+            idempotency_key=idempotency_key,
+        )
+    except TaskConflictError as exc:
+        return jsonify({"error": str(exc)}), 409
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+
+    _ensure_analysis_task_runner_started()
+    analysis_task_runner.wake()
+    return jsonify(_public_analysis_task(snapshot)), 202
+
+
+@app.route("/analysis_tasks/<task_id>", methods=["GET"])
+def get_analysis_task(task_id: str):
+    _owner_id, snapshot = _analysis_task_for_request(task_id)
+    if snapshot is None:
+        return _analysis_task_not_found_response()
+    return jsonify(_public_analysis_task(snapshot))
+
+
+@app.route("/analysis_tasks/<task_id>/result", methods=["GET"])
+def get_analysis_task_result(task_id: str):
+    _owner_id, snapshot = _analysis_task_for_request(task_id)
+    if snapshot is None:
+        return _analysis_task_not_found_response()
+    if snapshot["status"] == "completed":
+        return jsonify(snapshot["result"])
+    if snapshot["status"] == "failed":
+        try:
+            error_status = int(snapshot.get("error_http_status") or 500)
+        except (TypeError, ValueError):
+            error_status = 500
+        if not 400 <= error_status <= 599:
+            error_status = 500
+        return (
+            jsonify(
+                {
+                    "error": str(snapshot.get("error_message") or "Analysis task failed"),
+                    "code": str(snapshot.get("error_code") or "analysis_failed"),
+                    "retryable": bool(snapshot.get("retryable")),
+                    "task_id": snapshot["task_id"],
+                }
+            ),
+            error_status,
+        )
+    if snapshot["status"] == "cancelled":
+        return jsonify({"error": "Task cancelled", "task_id": snapshot["task_id"]}), 409
+    return jsonify(_public_analysis_task(snapshot)), 202
+
+
+@app.route("/analysis_tasks/<task_id>/cancel", methods=["POST"])
+def cancel_analysis_task(task_id: str):
+    owner_id, snapshot = _analysis_task_for_request(task_id)
+    if snapshot is None:
+        return _analysis_task_not_found_response()
+    if snapshot["status"] in {"completed", "failed"}:
+        return jsonify({"error": f"Cannot cancel task in state {snapshot['status']}"}), 409
+    cancelled = analysis_task_store.request_cancel(owner_id, task_id)
+    analysis_task_runner.wake()
+    status_code = 202 if cancelled["status"] == "analyzing" else 200
+    return jsonify(_public_analysis_task(cancelled)), status_code
+
+
+@app.route("/analysis_tasks/<task_id>/retry", methods=["POST"])
+def retry_analysis_task(task_id: str):
+    owner_id, snapshot = _analysis_task_for_request(task_id)
+    if snapshot is None:
+        return _analysis_task_not_found_response()
+    try:
+        retried = analysis_task_store.retry_task(owner_id, task_id)
+    except TaskStateError as exc:
+        return jsonify({"error": str(exc)}), 409
+    _ensure_analysis_task_runner_started()
+    analysis_task_runner.wake()
+    return jsonify(_public_analysis_task(retried)), 202
+
+
 @app.route("/analyze_batch", methods=["POST"])
 def analyze_batch():
     data = _json_payload()
@@ -4614,6 +5740,10 @@ def analyze_batch():
         data
     )
     summary_only = _as_bool(data.get("summary_only", False))
+    try:
+        output_template = normalize_output_template(data.get("output_template"))
+    except ValueError as exc:
+        return jsonify({"error": str(exc), "task_id": task_id}), 400
 
     filepaths: List[Path] = []
     for raw_path in raw_filepaths:
@@ -4663,12 +5793,23 @@ def analyze_batch():
             if not batch_policy_warnings
             else f"批量任务已启动（并行度={batch_workers}，策略提醒：{batch_policy_warnings[0]}）"
         ),
+        file_progress=[
+            {
+                "index": index,
+                "filename": filepath.name,
+                "status": "waiting",
+                "stage": "queued",
+                "message": "正在等待分析...",
+            }
+            for index, filepath in enumerate(filepaths, start=1)
+        ],
     )
 
     total_files = len(filepaths)
     results_by_index: Dict[int, Dict[str, Any]] = {}
     completed_counter = {"value": 0}
     completed_counter_lock = Lock()
+    analysis_progress_bridge = _current_analysis_task_progress_bridge()
 
     def _get_completed_count() -> int:
         with completed_counter_lock:
@@ -4703,6 +5844,9 @@ def analyze_batch():
             task_id=task_id,
             current=_get_completed_count(),
             current_file=filepath.name,
+            file_index=idx,
+            file_name=filepath.name,
+            file_status="analyzing",
             stage="prepare",
             message=f"正在准备处理: {filepath.name}",
         )
@@ -4713,6 +5857,9 @@ def analyze_batch():
                 task_id=task_id,
                 current=_get_completed_count(),
                 current_file=_name,
+                file_index=idx,
+                file_name=_name,
+                file_status="analyzing",
                 stage=stage,
                 message=message,
             )
@@ -4729,6 +5876,7 @@ def analyze_batch():
                 effective_max_vision,
                 fps,
                 summary_only=effective_summary_only,
+                output_template=output_template,
                 history_owner_id=history_owner_id,
                 progress_callback=_batch_progress_callback,
             )
@@ -4758,6 +5906,12 @@ def analyze_batch():
                         "key_points": result_meta.get("key_points", []),
                         "timeline_points": result_meta.get("timeline_points", []),
                         "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                        "output_template": str(
+                            result_meta.get("output_template", output_template)
+                        ),
+                        "external_references": result_meta.get(
+                            "external_references", []
+                        ),
                         "segment_policy": segment_policy,
                         "segment_guardrails": segment_guardrails,
                         "output_dir_name": str(
@@ -4785,6 +5939,7 @@ def analyze_batch():
                             "web_search": effective_web_search,
                             "max_vision": effective_max_vision,
                             "summary_only": effective_summary_only,
+                            "output_template": output_template,
                         },
                     },
                     "failed",
@@ -4813,6 +5968,12 @@ def analyze_batch():
                     "key_points": result_meta.get("key_points", []),
                     "timeline_points": result_meta.get("timeline_points", []),
                     "confidence_note": str(result_meta.get("confidence_note", "")).strip(),
+                    "output_template": str(
+                        result_meta.get("output_template", output_template)
+                    ),
+                    "external_references": result_meta.get(
+                        "external_references", []
+                    ),
                     "segment_policy": segment_policy,
                     "segment_guardrails": segment_guardrails,
                     "video_preview_url": str(
@@ -4836,6 +5997,7 @@ def analyze_batch():
                         "web_search": effective_web_search,
                         "max_vision": effective_max_vision,
                         "summary_only": effective_summary_only,
+                        "output_template": output_template,
                     },
                 },
                 "done",
@@ -4845,6 +6007,8 @@ def analyze_batch():
                     else f"{filepath.name} 分析完成"
                 ),
             )
+        except TaskCancelledError:
+            raise
         except ContentPolicyBlockedError as exc:
             blocked_notice = _build_blocked_notice_payload(exc.risk)
             return (
@@ -4880,16 +6044,28 @@ def analyze_batch():
                 error_msg,
             )
 
+    def _run_batch_file_with_progress_context(
+        idx: int, filepath: Path
+    ) -> Tuple[int, Dict[str, Any], str, str]:
+        with _bind_analysis_task_progress_bridge(analysis_progress_bridge):
+            return _analyze_single_batch_file(idx, filepath)
+
+    batch_cancelled = False
     try:
         with ThreadPoolExecutor(max_workers=batch_workers) as executor:
             future_map = {
-                executor.submit(_analyze_single_batch_file, idx, filepath): (idx, filepath)
+                executor.submit(_run_batch_file_with_progress_context, idx, filepath): (
+                    idx,
+                    filepath,
+                )
                 for idx, filepath in enumerate(filepaths, start=1)
             }
             for future in as_completed(future_map):
                 idx, filepath = future_map[future]
                 try:
                     result_idx, result_payload, final_stage, final_message = future.result()
+                except TaskCancelledError:
+                    raise
                 except Exception as exc:
                     error_msg, _, _ = _normalize_provider_error(exc, default_status=500)
                     result_idx = idx
@@ -4909,18 +6085,27 @@ def analyze_batch():
                     task_id=task_id,
                     current=completed_count,
                     current_file=filepath.name,
+                    file_index=result_idx,
+                    file_name=filepath.name,
+                    file_status=(
+                        "success" if bool(result_payload.get("success")) else "failed"
+                    ),
                     stage=final_stage,
                     message=f"已完成 {completed_count}/{total_files}：{final_message}",
                 )
+    except TaskCancelledError:
+        batch_cancelled = True
+        raise
     finally:
-        _update_batch_progress(
-            owner_id=history_owner_id,
-            task_id=task_id,
-            status="completed",
-            current_file="",
-            stage="done",
-            message="\u6279\u91cf\u5206\u6790\u5df2\u5b8c\u6210",
-        )
+        if not batch_cancelled:
+            _update_batch_progress(
+                owner_id=history_owner_id,
+                task_id=task_id,
+                status="completed",
+                current_file="",
+                stage="done",
+                message="\u6279\u91cf\u5206\u6790\u5df2\u5b8c\u6210",
+            )
 
     results = [results_by_index[idx] for idx in sorted(results_by_index)]
     success_count = sum(1 for r in results if r.get("success"))

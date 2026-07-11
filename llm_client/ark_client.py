@@ -18,6 +18,7 @@ from .base import (
     LLMClient,
     ProviderFeatureUnsupportedError,
     ProviderRequestError,
+    ToolResponse,
 )
 
 
@@ -110,6 +111,27 @@ class ArkLLMClient(LLMClient):
                     if text_value:
                         return str(text_value)
         return ""
+
+    @staticmethod
+    def _completed_tool_types(response: Any) -> frozenset[str]:
+        """Return only tool calls that the provider marked as completed."""
+
+        output = (
+            response.get("output", [])
+            if isinstance(response, dict)
+            else getattr(response, "output", None) or []
+        )
+        completed: set[str] = set()
+        for item in output:
+            if isinstance(item, dict):
+                item_type = item.get("type")
+                status = item.get("status")
+            else:
+                item_type = getattr(item, "type", None)
+                status = getattr(item, "status", None)
+            if item_type == "web_search_call" and status == "completed":
+                completed.add(item_type)
+        return frozenset(completed)
 
     # Capability implementations ----------------------------------------------
     async def chat_completion(
@@ -205,7 +227,7 @@ class ArkLLMClient(LLMClient):
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
         extra: Optional[Dict[str, Any]] = None,
-    ) -> str:
+    ) -> ToolResponse:
         async def call_api() -> Any:
             return await self._client.responses.create(
                 model=self.model,
@@ -218,7 +240,10 @@ class ArkLLMClient(LLMClient):
         except Exception as exc:  # noqa: BLE001 - propagate upstream
             logging.warning("[ArkLLMClient] responses.create with tools failed: %s", exc)
             raise
-        return self._extract_response_text(response)
+        return ToolResponse(
+            self._extract_response_text(response),
+            completed_tool_types=self._completed_tool_types(response),
+        )
 
     async def aclose(self) -> None:
         closer = getattr(self._client, "close", None)

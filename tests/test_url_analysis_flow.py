@@ -142,10 +142,12 @@ def test_analyze_url_downloads_and_processes_video(tmp_path, monkeypatch):
         max_vision,
         fps,
         summary_only=False,
+        output_template="operation_guide",
         history_owner_id="",
         progress_callback=None,
     ):
         processed["video_path"] = Path(video_path)
+        processed["output_template"] = output_template
         return (
             [{"step": 1, "time": "00:00", "title": "开始", "description": "打开页面"}],
             "# doc",
@@ -197,13 +199,18 @@ def test_analyze_url_downloads_and_processes_video(tmp_path, monkeypatch):
 
     response = app.app.test_client().post(
         "/analyze_url",
-        json={"url": "https://example.com/share/video"},
+        json={
+            "url": "https://example.com/share/video",
+            "output_template": "content_summary",
+        },
     )
 
     payload = response.get_json()
     assert response.status_code == 200
     assert payload["success"] is True
     assert processed["video_path"] == saved_path
+    assert processed["output_template"] == "content_summary"
+    assert payload["output_template"] == "content_summary"
     assert payload["download_source"] == "platform_xiaohongshu_downloader_llm"
     assert payload["source_url"] == "https://example.com/share/video"
     assert payload["subtitle_available"] is True

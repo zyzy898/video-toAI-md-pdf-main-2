@@ -22,6 +22,15 @@ def test_build_unique_upload_path_uses_timestamped_fallback_for_empty_name(tmp_p
     assert result == tmp_path / "upload_20260709_010203_1.mp4"
 
 
+def test_build_unique_upload_path_preserves_non_ascii_name_extension(tmp_path):
+    now = datetime(2026, 7, 9, 1, 2, 3)
+
+    result = build_unique_upload_path("视频.mp4", upload_root=tmp_path, now=now)
+
+    assert result == tmp_path / "upload_20260709_010203.mp4"
+    assert result.suffix == ".mp4"
+
+
 def test_create_unique_output_dir_sanitizes_stem_and_creates_directory(tmp_path):
     now = datetime(2026, 7, 9, 1, 2, 3)
     (tmp_path / "My_Clip_20260709_010203").mkdir()

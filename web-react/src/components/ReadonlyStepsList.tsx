@@ -2,13 +2,16 @@ import { memo } from "react";
 import type { StepItem } from "../types/api";
 import { parseTimeToSeconds } from "../lib/utils-app";
 import { PlayIcon } from "./icons";
+import { StepEvidence } from "./StepEvidence";
 
 export const ReadonlyStepsList = memo(function ReadonlyStepsList({
   steps,
   onSeek,
+  outputDir,
 }: {
   steps: StepItem[];
   onSeek?: (seconds: number) => void;
+  outputDir: string;
 }) {
   return (
     <div className="space-y-2">
@@ -17,7 +20,7 @@ export const ReadonlyStepsList = memo(function ReadonlyStepsList({
         const seconds = parseTimeToSeconds(step.time);
         const canSeek = Boolean(onSeek) && seconds !== null;
         return (
-          <div key={`s-${i}`} className="readonly-step-card rounded border border-neutral-800 bg-neutral-950/60 p-2">
+          <div key={step.step_id || `s-${i}`} className="readonly-step-card rounded border border-neutral-800 bg-neutral-950/60 p-2">
             <p className="readonly-step-meta flex items-center gap-1.5 text-xs text-neutral-500">
               <span>#{step.step || i + 1}</span>
               {canSeek ? (
@@ -37,6 +40,7 @@ export const ReadonlyStepsList = memo(function ReadonlyStepsList({
             </p>
             <p className="readonly-step-title text-sm font-medium">{step.title || "未命名步骤"}</p>
             <p className="readonly-step-desc text-sm text-neutral-300">{step.description || ""}</p>
+            <StepEvidence step={step} outputDir={outputDir} />
           </div>
         );
       })}

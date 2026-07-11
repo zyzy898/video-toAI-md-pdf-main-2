@@ -16,6 +16,8 @@ export default defineConfig({
       "/upload_chunk_init": "http://127.0.0.1:5000",
       "/upload_chunk": "http://127.0.0.1:5000",
       "/upload_chunk_finalize": "http://127.0.0.1:5000",
+      "/upload_chunk_cancel": "http://127.0.0.1:5000",
+      "/analysis_tasks": "http://127.0.0.1:5000",
       "/analyze": "http://127.0.0.1:5000",
       "/analyze_batch": "http://127.0.0.1:5000",
       "/single_progress": "http://127.0.0.1:5000",

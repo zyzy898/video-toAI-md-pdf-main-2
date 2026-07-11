@@ -5,6 +5,7 @@ import { EditIcon, StepsIcon, TrashIcon } from "./icons";
 import { ReadonlyStepsList } from "./ReadonlyStepsList";
 import { clone } from "../lib/utils-app";
 import { formatDegradeReason } from "../lib/format";
+import { ExternalReferences } from "./StepEvidence";
 import {
   CONTENT_POLICY_BLOCK_MESSAGE,
   NEW_STEP_DEFAULT_DESCRIPTION,
@@ -96,7 +97,12 @@ export const StepsPanel = memo(function StepsPanel({
       ) : !isEditMode ? (
         <div className="single-result-scroll history-scroll flex-1 min-h-0 space-y-2 overflow-auto pr-1">
           {isDegradedResult ? <DegradedSummary resultData={resultData} /> : null}
-          <ReadonlyStepsList steps={steps} onSeek={onSeek} />
+          <ReadonlyStepsList
+            steps={steps}
+            onSeek={onSeek}
+            outputDir={resultData.output_dir_name || resultData.output_dir}
+          />
+          <ExternalReferences references={resultData.external_references || []} />
         </div>
       ) : (
         <div className="steps-edit-scroll history-scroll flex-1 min-h-0 overflow-auto pr-1">

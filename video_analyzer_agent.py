@@ -32,6 +32,18 @@ from asr.base import TranscriberBackend, TranscriberError
 # 模型默认值统一从 config 读取（config 以 .env 为准），避免在此处写死模型名/地址。
 from config import DEFAULT_MODEL_NAME as _CONFIG_DEFAULT_MODEL_NAME
 from config import DEFAULT_MODEL_BASE_URL as _CONFIG_DEFAULT_MODEL_BASE_URL
+from services.output_templates import (
+    CONTENT_SUMMARY,
+    DEFAULT_OUTPUT_TEMPLATE,
+    OutputTemplate,
+    build_content_summary_fallback,
+    escape_markdown_text,
+    is_content_summary_aligned_with_steps,
+    is_content_summary_markdown,
+    is_operation_guide_aligned_with_steps,
+    normalize_output_template,
+    uses_only_expected_image_paths,
+)
 
 # 配置日志
 logging.basicConfig(
@@ -996,36 +1008,47 @@ class VideoAnalyzerAgent:
         self, markdown_content: str, steps: List[Dict]
     ) -> bool:
         """Check whether generated markdown reflects edited step titles and descriptions."""
-        normalized_doc = self._normalize_compare_text(markdown_content)
-        if not normalized_doc:
-            return False
+        return is_operation_guide_aligned_with_steps(markdown_content, steps)
 
-        for idx, step in enumerate(steps, start=1):
-            title = str(step.get("title", "") or "").strip()
-            description = str(step.get("description", "") or "").strip()
+    @staticmethod
+    def _resolve_step_screenshot_path(
+        step: Dict, step_no: int, image_dir: str = "images"
+    ) -> Optional[str]:
+        evidence = step.get("evidence")
+        screenshot = evidence.get("screenshot") if isinstance(evidence, dict) else None
+        raw_path = screenshot.get("path") if isinstance(screenshot, dict) else None
+        if isinstance(raw_path, str):
+            candidate = raw_path.strip()
+            if re.fullmatch(r"images/[\w][\w.-]*", candidate):
+                return candidate
+        return None
 
-            if title:
-                title_anchor = self._normalize_compare_text(title)
-                if title_anchor and title_anchor not in normalized_doc:
-                    return False
+    def _uses_provenance_screenshot_paths(
+        self,
+        markdown_content: str,
+        steps: List[Dict],
+        image_dir: str = "images",
+    ) -> bool:
+        allowed_paths: set[str] = set()
+        required_paths: set[str] = set()
+        for index, step in enumerate(steps, start=1):
+            raw_step_no = step.get("step", index)
+            try:
+                step_no = int(raw_step_no)
+            except (TypeError, ValueError):
+                step_no = index
+            expected_path = self._resolve_step_screenshot_path(
+                step, step_no, image_dir=image_dir
+            )
+            if expected_path:
+                allowed_paths.add(expected_path)
+                required_paths.add(expected_path)
 
-            if description:
-                description_anchor = self._normalize_compare_text(description)
-                if len(description_anchor) > 32:
-                    description_anchor = description_anchor[:32]
-                if description_anchor and description_anchor not in normalized_doc:
-                    return False
-
-            step_no = step.get("step", idx)
-            zh_heading_anchor = self._normalize_compare_text(f"步骤{step_no}")
-            en_heading_anchor = self._normalize_compare_text(f"step{step_no}")
-            if (
-                zh_heading_anchor not in normalized_doc
-                and en_heading_anchor not in normalized_doc
-            ):
-                return False
-
-        return True
+        return uses_only_expected_image_paths(
+            markdown_content,
+            allowed_paths=allowed_paths,
+            required_paths=required_paths,
+        )
 
     def _build_document_from_steps(self, steps: List[Dict], image_dir: str = "images") -> str:
         """Build a deterministic document from user-edited steps as a strict fallback."""
@@ -1062,23 +1085,29 @@ class VideoAnalyzerAgent:
             except (TypeError, ValueError):
                 step_no = idx
 
-            title = str(step.get("title", "") or "").strip() or f"步骤 {step_no}"
-            time_text = str(step.get("time", "") or "").strip()
-            description = str(step.get("description", "") or "").strip() or "（未填写步骤说明）"
-            screenshot_name = f"step_{step_no:02d}.jpg"
+            raw_title = str(step.get("title", "") or "").strip() or f"步骤 {step_no}"
+            raw_time_text = str(step.get("time", "") or "").strip()
+            raw_description = (
+                str(step.get("description", "") or "").strip()
+                or "（未填写步骤说明）"
+            )
+            title = escape_markdown_text(" ".join(raw_title.split()))
+            time_text = escape_markdown_text(" ".join(raw_time_text.split()))
+            description = escape_markdown_text(raw_description)
+            screenshot_path = self._resolve_step_screenshot_path(
+                step, step_no, image_dir=image_dir
+            )
 
             lines.extend(
                 [
                     f"## 步骤 {step_no}：{title}",
                     f"- 时间：{time_text or '00:00'}",
                     "",
-                    f"![步骤{step_no}截图]({image_dir}/{screenshot_name})",
-                    "",
-                    "### 操作说明",
-                    description,
-                    "",
                 ]
             )
+            if screenshot_path:
+                lines.extend([f"![步骤{step_no}截图]({screenshot_path})", ""])
+            lines.extend(["### 操作说明", description, ""])
 
         return "\n".join(lines).rstrip() + "\n"
 
@@ -1090,6 +1119,7 @@ class VideoAnalyzerAgent:
         image_dir: str = "images",
         web_search: bool = False,
         respect_step_content: bool = False,
+        output_template: OutputTemplate | str = DEFAULT_OUTPUT_TEMPLATE,
     ) -> str:
         """
         生成步骤操作文档（Markdown格式）
@@ -1099,7 +1129,11 @@ class VideoAnalyzerAgent:
         :param image_dir: 截图目录
         :param web_search: 是否启用联网搜索增强
         :param respect_step_content: 是否严格遵循传入步骤内容（用于用户手工编辑后重生成）
+        :param output_template: 输出模板（操作教程或内容摘要）
         """
+        selected_template = normalize_output_template(output_template)
+        self.last_document_web_search_used = False
+
         # 准备字幕信息（如果有）
         subtitle_text = ""
         if srt_path and os.path.exists(srt_path):
@@ -1108,19 +1142,67 @@ class VideoAnalyzerAgent:
                 [f"[{sub['start_time']}] {sub['text']}" for sub in subtitles]
             )
 
-        # 准备步骤和截图的对应关系
-        steps_info = json.dumps(steps, ensure_ascii=False, indent=2)
+        # 内容摘要只需要内容字段，不向提示词传递截图 evidence。
+        if selected_template == CONTENT_SUMMARY:
+            summary_fields = (
+                "step",
+                "time",
+                "time_seconds",
+                "title",
+                "description",
+                "confidence",
+            )
+            prompt_steps = [
+                {key: step[key] for key in summary_fields if key in step}
+                for step in steps
+                if isinstance(step, dict)
+            ]
+            steps_info = json.dumps(prompt_steps, ensure_ascii=False, indent=2)
+        else:
+            steps_info = json.dumps(steps, ensure_ascii=False, indent=2)
 
         # 构建截图列表（发送给 AI 时使用路径占位符）
         screenshot_list = []
         for step in steps:
             step_num = step.get("step", 0)
-            filename = f"step_{step_num:02d}.jpg"
-            screenshot_list.append(
-                f"步骤{step_num}: ![步骤{step_num}截图]({image_dir}/{filename})"
+            screenshot_path = self._resolve_step_screenshot_path(
+                step, step_num, image_dir=image_dir
             )
+            if screenshot_path:
+                screenshot_list.append(
+                    f"步骤{step_num}: ![步骤{step_num}截图]({screenshot_path})"
+                )
 
-        if web_search:
+        if selected_template == CONTENT_SUMMARY:
+            search_requirement = (
+                "可使用联网搜索补充可靠背景信息，但不得改变视频原意。"
+                if web_search
+                else "仅根据提供的步骤和字幕总结，不要补充无法确认的事实。"
+            )
+            reference_requirement = (
+                "8. 联网搜索成功时，在结论章节内追加“### 参考资料”，仅列出实际搜索引用的标题和 http/https 链接；没有可靠来源时不要添加。"
+                if web_search
+                else "8. 不添加外部引用或无法验证的链接。"
+            )
+            system_prompt = f"""你是一个专业的内容编辑。请根据提供的内容节点和字幕，生成简洁、准确的视频内容摘要。
+
+{search_requirement}
+
+要求：
+1. 使用 Markdown 格式，并严格按以下标题和顺序组织，不得新增其他一级或二级标题：
+# 内容摘要
+## 核心摘要
+## 关键要点
+## 时间线
+## 结论
+2. 核心摘要概括视频主题和主要结论。
+3. 关键要点使用列表提炼重要信息，并保留输入中的具体内容。
+4. 时间线按输入时间点串联内容脉络。
+5. 结论收束视频内容，不引入无法确认的新事实。
+6. 不得按步骤章节组织，不得插入截图或截图列表。
+7. 保持语言简洁专业，直接返回 Markdown 内容，不要添加其他说明。
+{reference_requirement}"""
+        elif web_search:
             system_prompt = """你是一个专业的技术文档编写专家。请根据提供的操作步骤信息、截图和字幕内容，生成一份清晰、专业的步骤操作文档。
 
 你拥有联网搜索能力，请主动搜索以下内容来丰富文档：
@@ -1159,7 +1241,17 @@ class VideoAnalyzerAgent:
 7. 直接返回 Markdown 内容，不要添加其他说明"""
 
         if respect_step_content:
-            system_prompt += """
+            if selected_template == CONTENT_SUMMARY:
+                system_prompt += """
+
+Additional strict requirements:
+1. The provided content items are user-edited final content and are authoritative.
+2. Keep each provided title and description visible in the summary.
+3. Do not add, remove, or reinterpret critical content from the provided items.
+4. Integrate the edited content into the summary sections without creating step sections.
+"""
+            else:
+                system_prompt += """
 
 Additional strict requirements:
 1. The provided `steps` are user-edited final content and are authoritative.
@@ -1169,14 +1261,28 @@ Additional strict requirements:
 5. In each step section, keep the user-provided description text visible before any expansion.
 """
 
-        user_prompt = f"""操作步骤信息：
+        if selected_template == CONTENT_SUMMARY:
+            user_prompt = f"""内容节点信息：
+{steps_info}
+"""
+        else:
+            user_prompt = f"""操作步骤信息：
 {steps_info}
 
 截图对应关系：
 {chr(10).join(screenshot_list)}
 """
         if respect_step_content:
-            user_prompt += """
+            if selected_template == CONTENT_SUMMARY:
+                user_prompt += """
+
+IMPORTANT:
+- These items were manually edited by the user.
+- Treat every provided title and description as authoritative source content.
+- Keep each provided title and description visible in the final markdown.
+"""
+            else:
+                user_prompt += """
 
 IMPORTANT:
 - These steps were manually edited by the user.
@@ -1189,9 +1295,15 @@ IMPORTANT:
 {subtitle_text}
 """
         if web_search:
-            user_prompt += "\n请先联网搜索相关信息，然后生成完整的步骤操作文档。"
+            if selected_template == CONTENT_SUMMARY:
+                user_prompt += "\n请先联网搜索可靠背景信息，然后生成完整的内容摘要。"
+            else:
+                user_prompt += "\n请先联网搜索相关信息，然后生成完整的步骤操作文档。"
         else:
-            user_prompt += "\n请生成完整的步骤操作文档。"
+            if selected_template == CONTENT_SUMMARY:
+                user_prompt += "\n请生成完整的内容摘要。"
+            else:
+                user_prompt += "\n请生成完整的步骤操作文档。"
 
         if web_search:
             if not self.llm_client.supports(Capability.WEB_SEARCH_TOOL):
@@ -1204,12 +1316,19 @@ IMPORTANT:
             else:
                 print("正在调用 AI 生成步骤操作文档（联网搜索增强）...")
                 try:
-                    markdown_content = await self.llm_client.responses_with_tools(
+                    tool_response = await self.llm_client.responses_with_tools(
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": user_prompt},
                         ],
                         tools=[{"type": "web_search"}],
+                    )
+                    markdown_content = str(tool_response)
+                    completed_tool_types = getattr(
+                        tool_response, "completed_tool_types", frozenset()
+                    )
+                    self.last_document_web_search_used = (
+                        "web_search_call" in completed_tool_types
                     )
                 except ProviderFeatureUnsupportedError:
                     logging.warning(
@@ -1228,15 +1347,36 @@ IMPORTANT:
                 ]
             )
 
-        if respect_step_content and not self._is_markdown_aligned_with_steps(
-            markdown_content, steps
-        ):
-            logging.warning(
-                "Model output did not fully reflect edited steps; using strict fallback document builder."
+        if selected_template == CONTENT_SUMMARY:
+            summary_is_valid = is_content_summary_markdown(markdown_content)
+            if respect_step_content:
+                summary_is_valid = summary_is_valid and is_content_summary_aligned_with_steps(
+                    markdown_content,
+                    steps,
+                )
+            if not summary_is_valid:
+                logging.warning(
+                    "Model output did not match the content summary contract; "
+                    "using deterministic content summary fallback."
+                )
+                markdown_content = build_content_summary_fallback(steps)
+        else:
+            uses_provenance_screenshots = self._uses_provenance_screenshot_paths(
+                markdown_content,
+                steps,
+                image_dir=image_dir,
             )
-            markdown_content = self._build_document_from_steps(
-                steps=steps, image_dir=image_dir
+            respects_edited_steps = not respect_step_content or self._is_markdown_aligned_with_steps(
+                markdown_content, steps
             )
+            if not uses_provenance_screenshots or not respects_edited_steps:
+                logging.warning(
+                    "Model output did not match the operation guide contract; "
+                    "using strict fallback document builder."
+                )
+                markdown_content = self._build_document_from_steps(
+                    steps=steps, image_dir=image_dir
+                )
 
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(markdown_content)

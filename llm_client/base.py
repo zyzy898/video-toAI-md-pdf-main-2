@@ -12,7 +12,7 @@ import asyncio
 import logging
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, Iterable, List, Optional
 
 
 class Capability(str, Enum):
@@ -25,6 +25,22 @@ class Capability(str, Enum):
     FILE_UPLOAD = "file_upload"
     # responses.create + tools=[{"type": "web_search"}] (Ark-specific today).
     WEB_SEARCH_TOOL = "web_search_tool"
+
+
+class ToolResponse(str):
+    """Text response carrying provider-confirmed completed tool call types."""
+
+    completed_tool_types: frozenset[str]
+
+    def __new__(
+        cls,
+        value: str,
+        *,
+        completed_tool_types: Iterable[str] = (),
+    ) -> "ToolResponse":
+        response = super().__new__(cls, value)
+        response.completed_tool_types = frozenset(completed_tool_types)
+        return response
 
 
 class ProviderError(RuntimeError):
@@ -167,7 +183,7 @@ class LLMClient(ABC):
         messages: List[Dict[str, Any]],
         tools: List[Dict[str, Any]],
         extra: Optional[Dict[str, Any]] = None,
-    ) -> str:
+    ) -> ToolResponse:
         raise ProviderFeatureUnsupportedError(
             provider=self.provider,
             capability=Capability.WEB_SEARCH_TOOL,

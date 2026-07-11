@@ -8,7 +8,7 @@ export const techCards = [
     section: 'FRONTEND',
     name: '前端工作台',
     count: 9,
-    summary: 'React 19 + TypeScript 全量类型化；Tailwind 4 与原生 CSS 变量并存的设计系统。',
+    summary: 'React 19 + TypeScript 构建工作台；Tailwind 4 与原生 CSS 变量并存的设计系统。',
     items: [
       { label: 'React 19', accent: true },
       { label: 'TypeScript 5', accent: true },
@@ -27,7 +27,7 @@ export const techCards = [
     section: 'BACKEND',
     name: '后端 API 服务',
     count: 7,
-    summary: 'Flask 主框架 + Waitress 生产级 WSGI；分片续传、会话管理、自动清理一应俱全。',
+    summary: 'Flask 主框架 + Waitress WSGI；提供分片续传、会话管理与定时清理。',
     items: [
       { label: 'Flask', accent: true },
       { label: 'Waitress', accent: true },
@@ -64,7 +64,7 @@ export const techCards = [
     section: 'DOCUMENT',
     name: '文档生成',
     count: 6,
-    summary: 'Markdown / PDF / 字幕 / 步骤 JSON 全套输出；中文字体跨平台自适配。',
+    summary: '输出 Markdown、字幕与步骤 JSON，并在 PDF 生成成功时附带 PDF；中文字体支持跨平台适配。',
     items: [
       { label: 'markdown', accent: true },
       { label: 'fpdf2', accent: true },
@@ -94,16 +94,13 @@ export const techCards = [
     cls: 'tc-llm',
     emoji: '🔌',
     section: 'LLM',
-    name: '多模型平台路由',
-    count: 6,
-    summary: '能力声明驱动的统一抽象；同一段调用代码自动适配 4 大平台，不支持的能力自动降级。',
+    name: '三类模型路由',
+    count: 3,
+    summary: '统一抽象按 Ark、OpenAI、OpenAI 兼容三类路由；DeepSeek、Qwen 可作为兼容端点示例。',
     items: [
       { label: 'Ark · Doubao', accent: true },
       { label: 'OpenAI', accent: true },
-      { label: 'DeepSeek' },
-      { label: 'Qwen' },
-      { label: '能力声明路由' },
-      { label: '错误归一化' }
+      { label: 'OpenAI 兼容（DeepSeek / Qwen 等）' }
     ]
   }
 ];

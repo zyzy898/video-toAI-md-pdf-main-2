@@ -1,12 +1,16 @@
-"""Tests for subtitle parsing/rendering helpers (services/media_bundle.py).
+"""Tests for subtitle parsing/rendering and downloadable result bundles.
 
-Covers the pure timestamp + SRT/VTT/TXT functions. File-discovery and bundle
-assembly touch the OUTPUT_ROOT filesystem and are out of scope here.
+Covers the pure timestamp + SRT/VTT/TXT functions and the downloadable bundle
+contract. Output media discovery that depends on the application root stays out of scope.
 """
+
+from io import BytesIO
+import zipfile
 
 import pytest
 
 from services.media_bundle import (
+    _append_output_bundle_to_zip,
     _format_seconds_to_mmss,
     _format_seconds_to_vtt_timestamp,
     _parse_srt_file_entries,
@@ -94,3 +98,23 @@ class TestRenderExports:
     def test_txt_skips_empty_text(self):
         entries = [{"index": 1, "start_seconds": 0.0, "end_seconds": 1.0, "text": ""}]
         assert _render_txt_from_entries(entries) == ""
+
+
+def test_result_zip_includes_steps_json_but_not_original_video(tmp_path):
+    output_dir = tmp_path / "result"
+    output_dir.mkdir()
+    (output_dir / "operation_guide.md").write_text("# Guide", encoding="utf-8")
+    (output_dir / "steps.json").write_text('[{"step": 1}]', encoding="utf-8")
+    (output_dir / "source.mp4").write_bytes(b"video")
+    archive = BytesIO()
+
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as bundle:
+        _append_output_bundle_to_zip(bundle, output_dir)
+
+    archive.seek(0)
+    with zipfile.ZipFile(archive, "r") as bundle:
+        names = set(bundle.namelist())
+
+    assert "operation_guide.md" in names
+    assert "steps.json" in names
+    assert "source.mp4" not in names

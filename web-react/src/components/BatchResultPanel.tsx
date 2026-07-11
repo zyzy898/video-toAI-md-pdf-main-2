@@ -3,6 +3,7 @@ import type { BatchResultData, BatchResultItem } from "../types/api";
 import {
   DownloadSingleIcon,
   DownloadZipIcon,
+  RefreshIcon,
   StackIcon,
   StatusFailedIcon,
   StatusSuccessIcon,
@@ -16,6 +17,9 @@ type BatchResultPanelProps = {
   onDownloadAll: () => void;
   onDownloadItem: (outputDir: string | undefined, filename: string | undefined) => void;
   onOpenItem: (item: BatchResultItem) => void;
+  onRetryFailed?: () => void;
+  onRetryItem?: (item: BatchResultItem) => void;
+  retrying?: boolean;
 };
 
 const classifyItem = (item: BatchResultItem): BatchStatus => {
@@ -51,6 +55,9 @@ export const BatchResultPanel = memo(function BatchResultPanel({
   onDownloadAll,
   onDownloadItem,
   onOpenItem,
+  onRetryFailed,
+  onRetryItem,
+  retrying = false,
 }: BatchResultPanelProps) {
   const [filter, setFilter] = useState<"all" | BatchStatus>("all");
   const [keyword, setKeyword] = useState("");
@@ -88,14 +95,28 @@ export const BatchResultPanel = memo(function BatchResultPanel({
           <StackIcon className="h-4 w-4 text-neutral-300" />
           <h2 className="text-base font-semibold">批量处理结果</h2>
         </div>
-        <button
-          className="zip-download-btn flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50"
-          disabled={downloadable === 0}
-          onClick={onDownloadAll}
-        >
-          <DownloadZipIcon className="h-3.5 w-3.5" />
-          下载批量 ZIP{downloadable > 0 ? `（${downloadable}）` : ""}
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {counts.failed > 0 && onRetryFailed ? (
+            <button
+              type="button"
+              className="batch-open-btn flex items-center gap-1 rounded border px-2 py-1 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+              aria-busy={retrying}
+              disabled={retrying}
+              onClick={onRetryFailed}
+            >
+              <RefreshIcon className="h-3.5 w-3.5" />
+              仅重试失败项（{counts.failed}）
+            </button>
+          ) : null}
+          <button
+            className="zip-download-btn flex items-center gap-1 rounded border border-neutral-700 px-2 py-1 text-xs disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={downloadable === 0}
+            onClick={onDownloadAll}
+          >
+            <DownloadZipIcon className="h-3.5 w-3.5" />
+            下载批量 ZIP{downloadable > 0 ? `（${downloadable}）` : ""}
+          </button>
+        </div>
       </div>
 
       <div className="batch-stat-grid mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
@@ -166,6 +187,8 @@ export const BatchResultPanel = memo(function BatchResultPanel({
               item={item}
               onDownload={() => onDownloadItem(item.output_dir, item.filename)}
               onOpen={() => onOpenItem(item)}
+              onRetry={onRetryItem ? () => onRetryItem(item) : undefined}
+              retrying={retrying}
             />
           ))}
         </div>
@@ -196,16 +219,21 @@ const BatchResultRow = memo(function BatchResultRow({
   item,
   onDownload,
   onOpen,
+  onRetry,
+  retrying,
 }: {
   item: BatchResultItem;
   onDownload: () => void;
   onOpen: () => void;
+  onRetry?: () => void;
+  retrying: boolean;
 }) {
   const status = classifyItem(item);
   const meta = STATUS_META[status];
   const isBlocked = status === "blocked";
   const isDownloadable = item.success && Boolean(item.output_dir);
   const canOpen = item.success && Boolean(item.output_dir);
+  const canRetry = status === "failed" && Boolean(onRetry);
 
   return (
     <div className={`batch-result-row batch-result-row--${status} rounded border border-neutral-800 bg-neutral-950/60 p-2.5`}>
@@ -287,7 +315,23 @@ const BatchResultRow = memo(function BatchResultRow({
           ) : null}
         </div>
       ) : (
-        <p className="mt-2 text-xs text-rose-300 break-words">{item.error || "处理失败"}</p>
+        <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+          <p className="min-w-0 flex-1 text-xs text-rose-300 break-words">
+            {item.error || "处理失败"}
+          </p>
+          {canRetry ? (
+            <button
+              type="button"
+              className="batch-open-btn flex shrink-0 items-center gap-1 rounded border px-2 py-1 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+              aria-busy={retrying}
+              disabled={retrying}
+              onClick={onRetry}
+            >
+              <RefreshIcon className="h-3.5 w-3.5" />
+              重试此项
+            </button>
+          ) : null}
+        </div>
       )}
     </div>
   );
